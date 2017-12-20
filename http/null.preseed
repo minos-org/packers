@@ -1,0 +1,1 @@
+#workaround for debian-installer requiring a preseed file in order to use kickstart

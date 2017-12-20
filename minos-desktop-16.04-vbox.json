@@ -1,0 +1,62 @@
+{
+    "variables": {
+        "vm_name": "desktop-16.04",
+        "hostname": "minos-desktop-16-04",
+        "iso_url": "http://archive.ubuntu.com/ubuntu/dists/xenial-updates/main/installer-amd64/current/images/hwe-netboot/mini.iso",
+        "iso_sha256": "d4d7e635b4c625d061da16a2a3bd260f5ed69c035262b8ef31777deeb060beb9"
+    },
+
+    "builders": [{
+        "type": "virtualbox-iso",
+        "guest_os_type": "Ubuntu_64",
+        "vm_name": "{{user `vm_name`}}",
+        "disk_size": "40000",
+        "vboxmanage": [
+            ["modifyvm", "{{.Name}}", "--memory", "512"],
+            ["modifyvm", "{{.Name}}", "--cpus", "2"],
+            ["modifyvm", "{{.Name}}", "--ioapic", "on"],
+            ["modifyvm", "{{.Name}}", "--pae", "on"],
+            ["modifyvm", "{{.Name}}", "--rtcuseutc", "on"],
+            ["modifyvm", "{{.Name}}", "--bioslogodisplaytime", "1"]
+        ],
+        "iso_checksum_type": "sha256",
+        "iso_url": "{{user `iso_url`}}",
+        "iso_checksum": "{{user `iso_sha256`}}",
+        "http_directory": "http",
+        "ssh_wait_timeout": "20m",
+        "ssh_username": "vagrant",
+        "ssh_password": "vagrant",
+        "shutdown_command": "echo 'vagrant'|sudo -S shutdown -P now",
+        "boot_wait": "2s",
+        "boot_command": [
+            "<tab><wait>",
+            "auto=true ",
+            "priority=critical ",
+            "hostname={{user `hostname`}} ",
+            "ks=http://{{.HTTPIP}}:{{.HTTPPort}}/kickstart.cfg",
+            "<enter>"
+        ]
+    }],
+
+    "provisioners": [{
+        "type": "shell",
+        "execute_command": "echo 'vagrant' | {{.Vars}} sudo -S -E bash '{{.Path}}'",
+        "scripts": [
+            "scripts/vagrant.sh",
+            "scripts/sshd.sh",
+            "scripts/minos.sh",
+            "scripts/virtualbox.sh",
+            "scripts/enable-exec-on-tmpfs.sh",
+            "scripts/disable-tmux-autolaunch.sh",
+            "scripts/delete-unnecesary-pkgs.sh",
+            "scripts/upgrade.sh",
+            "scripts/cleanup.sh"
+        ]
+    }],
+
+    "post-processors": [{
+        "type": "vagrant",
+        "output": "{{user `vm_name`}}.box",
+        "keep_input_artifact": false
+    }]
+}
