@@ -3,7 +3,7 @@
         "vm_name": "desktop-16.04",
         "hostname": "minos-desktop-16-04",
         "iso_url": "http://archive.ubuntu.com/ubuntu/dists/xenial-updates/main/installer-amd64/current/images/hwe-netboot/mini.iso",
-        "iso_sha256": "d4d7e635b4c625d061da16a2a3bd260f5ed69c035262b8ef31777deeb060beb9"
+        "iso_sha256": "f8c9ade45b2780be6c032c3626b218f99becbf8583e3ba2f83fd87cdde14d9a9"
     },
 
     "builders": [{
