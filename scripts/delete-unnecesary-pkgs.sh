@@ -29,7 +29,7 @@ case "${MINOS_EDITION}" in
         libgudev-1.0-0 libgusb2 libharfbuzz0b libice6 libicu52
         libieee1284-3 libio-string-perl libjbig0 libjpeg-turbo8
         libjs-jquery liblcms2-2 libllvm3.4 liblockfile-bin
-        liblog-message-simple-perl libltdl7 liblwres90 libmodule-pluggable-perl
+        liblog-message-simple-perl liblwres90 libmodule-pluggable-perl
         libmspack0 libnetfilter-conntrack3 libnl-3-200 libnss-myhostname
         libnuma1 libogg0 libpam-cap libpango-1.0-0 libpangoft2-1.0-0
         libparse-debianchangelog-perl libparted0debian1 libpciaccess0
