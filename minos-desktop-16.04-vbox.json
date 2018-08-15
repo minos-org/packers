@@ -3,7 +3,7 @@
         "vm_name": "desktop-16.04",
         "hostname": "minos-desktop-16-04",
         "iso_url": "http://archive.ubuntu.com/ubuntu/dists/xenial-updates/main/installer-amd64/current/images/hwe-netboot/mini.iso",
-        "iso_sha256": "0bd564c0f4d5a6eb45db82991bdb1acfad792a80b30c7188c2e64ffdf8c6cf2f"
+        "iso_sha256": "369bfd5fa39eaef879f1766917157ae34b38ffa1fe2607adebab516af2678b4e"
     },
 
     "builders": [{
@@ -22,6 +22,7 @@
         "iso_checksum_type": "sha256",
         "iso_url": "{{user `iso_url`}}",
         "iso_checksum": "{{user `iso_sha256`}}",
+        "output_directory": "vbox_cache/{{user `vm_name`}}",
         "http_directory": "http",
         "ssh_wait_timeout": "20m",
         "ssh_username": "vagrant",
