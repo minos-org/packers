@@ -19,13 +19,13 @@ case "${MINOS_EDITION}" in
         language-pack-en language-pack-gnome-en laptop-detect
         libaccountsservice0 libapparmor-perl libarchive-extract-perl libasound2
         libatk1.0-0 libatm1 libaugeas0 libavahi-client3
-        libavahi-common3 libc6-dev libcap-ng0 libc-dev-bin
+        libavahi-common3 libc6-dev libc-dev-bin
         libclass-accessor-perl libcolord1 libcolorhug1 libcups2 libdatrie1
         libdconf1 libdns100 libdpkg-perl libdrm-intel1 libdrm-nouveau2
         libdrm-radeon1 libdumbnet1 libelf1 libexif12 libfakeroot
         libfile-fcntllock-perl libfontconfig1 libfontenc1 libfribidi0 libgc1c2
         libgcr-3-common libgeoip1 libgirepository-1.0-1 libglapi-mesa
-        libglib2.0-0 libglib2.0-data libgphoto2-port10 libgraphite2-3
+        libglib2.0-data libgphoto2-port10 libgraphite2-3
         libgudev-1.0-0 libgusb2 libharfbuzz0b libice6 libicu52
         libieee1284-3 libio-string-perl libjbig0 libjpeg-turbo8
         libjs-jquery liblcms2-2 libllvm3.4 liblockfile-bin
@@ -64,8 +64,10 @@ case "${MINOS_EDITION}" in
 
         case "${MINOS_VERSION}" in
             14.04*) pkgs="${pkgs} libmpdec2 libcryptsetup4 libapparmor1
-                libcap2-bin libcap-ng0 libicu55" ;;
-            16.04*) pkgs="${pkgs} libdrm2 libnih1 libslang2 makedev" ;;
+                libcap2-bin libicu55" ;;
+            14.04*|16.04*) pkgs="${pkgs} libcap-ng0" ;;
+            16.04*) pkgs="${pkgs} libglib2.0-0" ;;
+            16.04*|18.04*) pkgs="${pkgs} libdrm2 libnih1 libslang2 makedev" ;;
         esac
         ;;
 
@@ -92,8 +94,8 @@ case "${MINOS_EDITION}" in
         linux-firmware linux-headers-generic linux-libc-dev lockfile-progs lshw
         ltrace lxc-common lxcfs lxd lxd-client manpages-dev open-iscsi
         open-vm-tools os-prober pastebinit plymouth-theme-ubuntu-text pollinate
-        popularity-contest ppp python3-apport python3-gi python3-newt
-        python3-problem-report python3-pycurl python3-systemd python-cheetah
+        popularity-contest ppp python3-gi python3-newt
+        python3-pycurl python3-systemd python-cheetah
         python-configobj python-crypto python-gdbm python-httplib2
         python-jsonpatch python-json-pointer python-keyring python-oauth
         python-openssl python-pam python-pkg-resources python-prettytable
@@ -110,10 +112,18 @@ case "${MINOS_EDITION}" in
         case "${MINOS_VERSION}" in
             14.04*) pkgs="${pkgs} libmpdec2 libcryptsetup4 libcap2-bin
                 hicolor-icon-theme libgcr-3-common libnuma1 libplymouth4" ;;
-            16.04*) pkgs="${pkgs} libnih1 makedev libcolord1 libdns100
+            14.04*|16.04*) pkgs="${pkgs} python3-apport python3-problem-report" ;;
+            16.04*) pkgs="${pkgs} libglib2.0-0" ;;
+            16.04*|18.04*) pkgs="${pkgs} libnih1 makedev libcolord1 libdns100
                 libgphoto2-port10 libjasper1 libllvm3.4 liblwres90
                 libparted0debian1 libsystemd-daemon0 libsystemd-login0 libvpx1
                 sound-theme-freedesktop" ;;
+            18.04*) pkgs="${pkgs} dmsetup geoclue installation-report
+                libblockdev2 libcap2-bin libgeoclue0 libgl1-mesa-glx
+                libip6tc0 libiptc0 libirs160 liblzo2-2 libnfnetlink0
+                libnm-glib4 libnm-util2 libnss-systemd libxtables12
+                mlocate nano netplan.io publicsuffix python3-yaml
+                ubuntu-advantage-tools" ;;
         esac
         ;;
 esac
@@ -142,7 +152,7 @@ for pkg in ${sensible_pkgs}; do
 done
 
 if [ -n "${unnecesary_pkgs}" ]; then
-    apt-get purge -y $unnecesary_pkgs
+    apt-get purge -y ${unnecesary_pkgs}
     apt-get -y autoremove
 fi
 
@@ -152,6 +162,6 @@ if command -v "hostnamectl"; then
     #better alternative could be to remove/rename hostnamectl so vagrant
     #doesn't complain, or replace systemd =D.., work in progress
     case "${MINOS_VERSION}" in
-        16.04*) apt-get install --no-install-recommends -y dbus ;;
+        16.04*|18.04*) apt-get install --no-install-recommends -y dbus ;;
     esac
 fi

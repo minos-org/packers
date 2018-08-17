@@ -1,0 +1,65 @@
+{
+    "variables": {
+        "vm_name": "core-18.04-load-balancer",
+        "hostname": "minos-core-18-04-load-balancer",
+        "iso_url": "http://archive.ubuntu.com/ubuntu/dists/bionic-updates/main/installer-amd64/current/images/netboot/mini.iso",
+        "iso_sha256": "178efabb856ddccdf0cf3bd6ce98d76c3772c012067dee2777ca51b1e0dad86e"
+    },
+
+    "builders": [{
+        "type": "virtualbox-iso",
+        "guest_os_type": "Ubuntu_64",
+        "vm_name": "{{user `vm_name`}}",
+        "disk_size": "40000",
+        "vboxmanage": [
+            ["modifyvm", "{{.Name}}", "--memory", "512"],
+            ["modifyvm", "{{.Name}}", "--cpus", "2"],
+            ["modifyvm", "{{.Name}}", "--ioapic", "on"],
+            ["modifyvm", "{{.Name}}", "--pae", "on"],
+            ["modifyvm", "{{.Name}}", "--rtcuseutc", "on"],
+            ["modifyvm", "{{.Name}}", "--bioslogodisplaytime", "1"]
+        ],
+        "iso_checksum_type": "sha256",
+        "iso_url": "{{user `iso_url`}}",
+        "iso_checksum": "{{user `iso_sha256`}}",
+        "output_directory": "vbox_cache/{{user `vm_name`}}",
+        "http_directory": "http",
+        "ssh_wait_timeout": "20m",
+        "ssh_username": "vagrant",
+        "ssh_password": "vagrant",
+        "shutdown_command": "echo 'vagrant'|sudo -S shutdown -P now",
+        "boot_wait": "2s",
+        "boot_command": [
+            "<tab><wait>",
+            "auto=true ",
+            "priority=critical ",
+            "hostname={{user `hostname`}} ",
+            "ks=http://{{.HTTPIP}}:{{.HTTPPort}}/kickstart.cfg url=http://{{.HTTPIP}}:{{.HTTPPort}}/null.preseed",
+            "<enter>"
+        ]
+    }],
+
+    "provisioners": [{
+        "type": "shell",
+        "execute_command": "echo 'vagrant' | {{.Vars}} sudo -S -E bash '{{.Path}}'",
+        "scripts": [
+            "scripts/vagrant.sh",
+            "scripts/sshd.sh",
+            "scripts/minos.sh",
+            "scripts/virtualbox.sh",
+            "scripts/enable-exec-on-tmpfs.sh",
+            "scripts/disable-tmux-autolaunch.sh",
+            "scripts/delete-unnecesary-pkgs.sh",
+            "scripts/upgrade.sh",
+            "scripts/install-keepalived.sh",
+            "scripts/install-haproxy.sh",
+            "scripts/cleanup.sh"
+        ]
+    }],
+
+    "post-processors": [{
+        "type": "vagrant",
+        "output": "{{user `vm_name`}}.box",
+        "keep_input_artifact": false
+    }]
+}
