@@ -9,12 +9,6 @@ Recipes to build the official minos images for the [vagrant](https://www.vagrant
 | [core-16.04](https://app.vagrantup.com/minos/boxes/core-16.04) | [desktop-16.04](https://app.vagrantup.com/minos/boxes/desktop-16.04) |
 | [core-18.04](https://app.vagrantup.com/minos/boxes/core-18.04) | [desktop-18.04](https://app.vagrantup.com/minos/boxes/desktop-18.04) |
 
-<!--<p align="center">-->
-  <!--<a href="https://app.vagrantup.com/minos" target="_blank">-->
-    <!--<img src="https://github.com/minos-org/packers/blob/master/minos-images-table.png?raw=true" alt="minos image table"/>-->
-  <!--</a>-->
-<!--</p>-->
-
 Usage
 -----
 
