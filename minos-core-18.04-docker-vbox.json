@@ -53,6 +53,7 @@
             "scripts/upgrade.sh",
             "scripts/install-docker-compose.sh",
             "scripts/install-docker.sh",
+            "scripts/install-vagrant-network-interfaces-deps.sh",
             "scripts/cleanup.sh"
         ]
     }],

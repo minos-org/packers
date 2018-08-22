@@ -53,6 +53,7 @@
             "scripts/upgrade.sh",
             "scripts/install-keepalived.sh",
             "scripts/install-haproxy.sh",
+            "scripts/install-vagrant-network-interfaces-deps.sh",
             "scripts/cleanup.sh"
         ]
     }],
