@@ -54,6 +54,7 @@
             "scripts/install-keepalived.sh",
             "scripts/install-haproxy.sh",
             "scripts/install-vagrant-network-interfaces-deps.sh",
+            "scripts/default-python.sh",
             "scripts/cleanup.sh"
         ]
     }],

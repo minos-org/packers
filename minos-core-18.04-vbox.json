@@ -52,6 +52,7 @@
             "scripts/delete-unnecesary-pkgs.sh",
             "scripts/upgrade.sh",
             "scripts/install-vagrant-network-interfaces-deps.sh",
+            "scripts/default-python.sh",
             "scripts/cleanup.sh"
         ]
     }],
