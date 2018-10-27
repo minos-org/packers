@@ -3,14 +3,14 @@
         "vm_name": "desktop-14.04",
         "hostname": "minos-desktop-14-04",
         "iso_url": "http://archive.ubuntu.com/ubuntu/dists/trusty-updates/main/installer-amd64/current/images/netboot/mini.iso",
-        "iso_sha256": "49c863211e53efe4cf72b2df49099567f6bcad765fe49c0f56bfe05347d8bceb"
+        "iso_sha256": "a70dd66360668d92faf8e6554480903e87e20d6eec164d1a9e5924c2fdeb2b95"
     },
 
     "builders": [{
         "type": "virtualbox-iso",
         "guest_os_type": "Ubuntu_64",
         "vm_name": "{{user `vm_name`}}",
-        "disk_size": "40000",
+        "disk_size": "10000",
         "vboxmanage": [
             ["modifyvm", "{{.Name}}", "--memory", "512"],
             ["modifyvm", "{{.Name}}", "--cpus", "2"],
@@ -50,6 +50,8 @@
             "scripts/disable-tmux-autolaunch.sh",
             "scripts/delete-unnecesary-pkgs.sh",
             "scripts/upgrade.sh",
+            "scripts/install-docker.sh",
+            "scripts/install-docker-compose.sh",
             "scripts/cleanup.sh"
         ]
     }],

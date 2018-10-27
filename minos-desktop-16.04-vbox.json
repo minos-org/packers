@@ -10,7 +10,7 @@
         "type": "virtualbox-iso",
         "guest_os_type": "Ubuntu_64",
         "vm_name": "{{user `vm_name`}}",
-        "disk_size": "40000",
+        "disk_size": "10000",
         "vboxmanage": [
             ["modifyvm", "{{.Name}}", "--memory", "512"],
             ["modifyvm", "{{.Name}}", "--cpus", "2"],
@@ -51,6 +51,8 @@
             "scripts/disable-tmux-autolaunch.sh",
             "scripts/delete-unnecesary-pkgs.sh",
             "scripts/upgrade.sh",
+            "scripts/install-docker.sh",
+            "scripts/install-docker-compose.sh",
             "scripts/cleanup.sh"
         ]
     }],
