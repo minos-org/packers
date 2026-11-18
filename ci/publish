@@ -1,0 +1,157 @@
+#!/bin/sh
+#publishes the boxes and the ISOs of a run that passed (.github/workflows/boxes.yml, master only) as the
+#one release of this repository: the .box and the .sha256 of each box, the .iso and the .sha256 of each
+#ISO. minos-org/vagrant writes each box's catalog from it (minos.io/vagrant/BOX.json). Only the newest
+#release is kept: the older ones are deleted with their tags.
+#The tag is the day, YYYY.MM.DD, and nothing else: a second release the same day takes the day's tag over,
+#at its own commit (the catalog's version tells the two apart, by when each was published). So that a
+#failed publish never leaves the repository without a release, the new one is first a draft under a name
+#of its own (DAY-draft-RUN), given its files and checked against them by the digests GitHub computed. Only
+#then are the older releases deleted with their tags (the day's own too, when it has one), and the draft
+#published under the day's tag, at this commit.
+#usage: ci/publish DIR   => DIR holds NAME.box or NAME.iso and NAME.sha256 of each image, in folders or not
+#       needs gh and jq, and GH_TOKEN with write access to $GITHUB_REPOSITORY; the tag points at
+#       $GITHUB_SHA (the checkout's HEAD when unset)
+#       DRAFT=1 stops at the checked draft and deletes nothing but the drafts of earlier runs: a test that
+#       publishes nothing
+
+repo="${GITHUB_REPOSITORY:?usage: GITHUB_REPOSITORY=OWNER/NAME ci/publish DIR}"
+dir="${1:?usage: ci/publish DIR}"
+target="${GITHUB_SHA:-$(git -C "$(dirname "${0}")" rev-parse HEAD)}"
+server="${GITHUB_SERVER_URL:-https://github.com}"
+tmp="$(mktemp -d)" || exit 1
+trap 'rm -rf "${tmp}"' EXIT
+
+_line() { printf "%-10s %s\\n" "${1}" "${2}"; }
+_die() { printf "%s\\n" "publish: ${*}" >&2; exit 1; }
+
+_releases() { #=> every release of the repository as one JSON array in $tmp/releases, drafts included
+    gh api --paginate "repos/${repo}/releases?per_page=100" > "${tmp}/pages" &&
+        jq -s 'add // []' "${tmp}/pages" > "${tmp}/releases"
+}
+
+_assets() { #$1 jq filter of the release => "SHA256 NAME" of its files, as GitHub computed them, by name
+    jq -r "[.[] | select(${1})][0].assets[]? | \"\\(.digest // \"no-digest\" | sub(\"^sha256:\"; \"\")) \\(.name)\"" \
+        "${tmp}/releases" | sort -k2
+}
+
+_delete_draft() { #$1 id, $2 its name => the draft is gone, or says why not
+    gh api -X DELETE "repos/${repo}/releases/${1}" > /dev/null ||
+        printf "%s\\n" "publish: the draft ${2} (${1}) stays; delete it by hand" >&2
+}
+
+#the files: each .box or .iso listed in its .sha256 and matching it, each under GitHub's 2 GiB per file
+find "${dir}" -type f \( -name 'minos-*.box' -o -name 'minos-*.iso' -o -name 'minos-*.sha256' \) |
+    sort > "${tmp}/files"
+[ -s "${tmp}/files" ] || _die "no minos-*.box, .iso or .sha256 in ${dir}"
+dupes="$(sed 's|.*/||' "${tmp}/files" | sort | uniq -d | tr '\n' ' ')"
+[ -z "${dupes}" ] || _die "the same name twice: ${dupes}"
+bad=0
+while IFS= read -r file; do
+    name="$(basename "${file}")"; size="$(stat -c %s "${file}")"
+    if [ "${size}" -ge 2147483648 ]; then
+        printf "%s\\n" "publish: ${name} weighs ${size} B; a release's files must be under 2 GiB" >&2; bad=1
+    fi
+    case "${name}" in
+        *.sha256)
+            (cd "$(dirname "${file}")" && sha256sum --quiet --strict -c "${name}") ||
+                { printf "%s\\n" "publish: ${name} does not match its files" >&2; bad=1; } ;;
+        *)
+            awk -v f="${name}" '$2 == f {found = 1} END {exit !found}' "${file%.*}.sha256" 2>/dev/null ||
+                { printf "%s\\n" "publish: ${name} is not in ${name%.*}.sha256" >&2; bad=1; } ;;
+    esac
+done < "${tmp}/files"
+[ "${bad}" -eq 0 ] || exit 1
+#what each file must be once uploaded, "SHA256 NAME": the .box or the .iso as its .sha256 says
+while IFS= read -r file; do
+    name="$(basename "${file}")"
+    case "${name}" in
+        *.sha256) printf "%s %s\\n" "$(sha256sum < "${file}" | cut -d' ' -f1)" "${name}" ;;
+        *) awk -v f="${name}" '$2 == f {print $1, f}' "${file%.*}.sha256" ;;
+    esac
+done < "${tmp}/files" | sort -k2 > "${tmp}/local"
+_line "files" "$(wc -l < "${tmp}/files") ($(grep -c '\.box$' "${tmp}/files") boxes, $(grep -c '\.iso$' "${tmp}/files") ISOs), checked against their .sha256, each under 2 GiB"
+
+day="$(date -u +%Y.%m.%d)"
+draft="${day}-draft-${GITHUB_RUN_ID:-$$}"
+
+#the notes
+{   printf "%s\\n\\n" "The minos boxes and ISOs built from ${target}${GITHUB_RUN_ID:+ by ${server}/${repo}/actions/runs/${GITHUB_RUN_ID}}."
+    printf "%s\\n" "A Vagrant box for VirtualBox of each flavour and release. Vagrant finds the boxes through their catalogs (https://github.com/minos-org/vagrant):" "" \
+        "    vagrant box add https://minos.io/vagrant/core-24.04.json" "" \
+        "VirtualBox without Vagrant imports the box's own OVF, once the box, a tar compressed with xz, is unpacked (File > Import Appliance, or):" "" \
+        "    tar xf minos-core-24.04.box" "    VBoxManage import box.ovf" ""
+    isos="$(grep '\.iso$' "${tmp}/files" | sed 's|.*/||')"
+    if [ -n "${isos}" ]; then
+        printf "%s\\n" "An ISO of each release ($(printf "%s\\n" "${isos}" | paste -sd ' ' - | sed 's/ /, /g')) boots minos-desktop as a live session from a DVD or a USB stick, by BIOS or UEFI (Secure Boot too); in it, Win+i installs minos on a disk by copying the live system, with no network. Written to a stick:" "" \
+            "    sudo dd if=$(printf "%s\\n" "${isos}" | tail -n 1) of=/dev/sdX bs=4M conv=fsync status=progress" ""
+    fi
+    printf "%s\\n" "sha256:" ""
+    grep '\.sha256$' "${tmp}/files" | while IFS= read -r sums; do sed 's/^/    /' "${sums}"; done
+} > "${tmp}/notes"
+
+#the draft with its files, then what GitHub says it holds. Nothing else has been touched yet: a draft that
+#fails is deleted, and the release published before stays
+set --
+while IFS= read -r file; do set -- "${@}" "${file}"; done < "${tmp}/files"
+if ! gh release create "${draft}" --repo "${repo}" --draft --target "${target}" --title "${day}" \
+        --notes-file "${tmp}/notes" "${@}" > /dev/null; then
+    _releases && id="$(jq -r --arg t "${draft}" '.[] | select(.draft and .tag_name == $t) | .id' "${tmp}/releases")" &&
+        [ -n "${id}" ] && _delete_draft "${id}" "${draft}"
+    _die "the draft ${draft} did not get its files; the releases published before stay"
+fi
+_releases || _die "cannot read back the draft ${draft}; it stays, and so do the releases published before"
+id="$(jq -r --arg t "${draft}" '.[] | select(.draft and .tag_name == $t) | .id' "${tmp}/releases")"
+[ -n "${id}" ] || _die "no draft ${draft} among the releases"
+_assets ".draft and .tag_name == \"${draft}\"" > "${tmp}/uploaded"
+if ! cmp -s "${tmp}/local" "${tmp}/uploaded"; then
+    diff "${tmp}/local" "${tmp}/uploaded" >&2
+    _delete_draft "${id}" "${draft}"; _die "the draft ${draft} does not hold the files checked here; the releases published before stay"
+fi
+_line "draft" "${draft}: $(wc -l < "${tmp}/uploaded") files, the digests GitHub computed match"
+
+#the drafts earlier runs left behind
+jq -r --arg t "${draft}" '.[] | select(.draft and .tag_name != $t and (.tag_name | test("^[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}-draft-"))) | "\(.id) \(.tag_name)"' \
+    "${tmp}/releases" | while read -r old name; do
+    gh api -X DELETE "repos/${repo}/releases/${old}" > /dev/null || _die "the draft ${name} (${old}) of an earlier run was not deleted"
+    _line "deleted" "${name} (a draft of an earlier run)"
+done || exit 1
+if [ -n "${DRAFT}" ]; then
+    _line "kept" "${draft}, a draft: DRAFT is set, nothing is published"
+    exit 0
+fi
+
+#the releases published before, with their tags, the day's own too: the draft takes the day's tag
+jq -r '.[] | select((.draft | not) and (.prerelease | not) and
+        (.tag_name | test("^[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}(\\.[0-9]+)?$"))) | .tag_name' "${tmp}/releases" > "${tmp}/older"
+while read -r tag; do
+    gh release delete "${tag}" --repo "${repo}" --cleanup-tag --yes > /dev/null ||
+        _die "the release ${tag} was not deleted; the new one stays the draft ${draft}: publish it by hand once ${tag} is gone"
+    _line "deleted" "${tag} and its tag"
+done < "${tmp}/older"
+#a tag named by the day that no release holds would keep the new release at its commit
+if gh api "repos/${repo}/git/ref/tags/${day}" > /dev/null 2>&1; then
+    gh api -X DELETE "repos/${repo}/git/refs/tags/${day}" > /dev/null ||
+        _die "the tag ${day} was not deleted; the new release stays the draft ${draft}"
+    _line "deleted" "the tag ${day}, which no release held"
+fi
+
+#the draft published under the day's tag, which GitHub makes at this commit; then read back
+gh api -X PATCH "repos/${repo}/releases/${id}" -f tag_name="${day}" -f target_commitish="${target}" \
+    -f name="${day}" -F draft=false > /dev/null ||
+    _die "the draft ${draft} was not published as ${day}; publish it by hand"
+_releases || _die "cannot read back the release ${day}"
+_assets "(.draft | not) and .tag_name == \"${day}\"" > "${tmp}/published"
+cmp -s "${tmp}/local" "${tmp}/published" || { diff "${tmp}/local" "${tmp}/published" >&2; _die "the release ${day} does not hold the files checked here"; }
+#GitHub makes the tag as it publishes; read it a few times before saying it is missing
+tagged=""
+for wait in 0 5 10 15; do
+    sleep "${wait}"
+    if tagged="$(gh api "repos/${repo}/git/ref/tags/${day}" --jq '.object.sha' 2>/dev/null)"; then break; fi
+done
+[ -n "${tagged}" ] || _die "no tag ${day} after the publish"
+[ "${tagged}" = "${target}" ] || _die "the tag ${day} points at ${tagged}, not at ${target}"
+_line "published" "${server}/${repo}/releases/tag/${day} at ${target}, $(wc -l < "${tmp}/published") files, published $(jq -r --arg t "${day}" '.[] | select(.tag_name == $t) | .published_at' "${tmp}/releases")"
+_line "releases" "$(jq -r '[.[] | .tag_name + (if .draft then " (draft)" else "" end)] | join(" ")' "${tmp}/releases")"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

@@ -1,0 +1,120 @@
+#!/bin/sh
+#on a machine with KVM, as root (a GitHub-hosted runner, .github/workflows/boxes.yml): the minos ISO of a
+#release built from scratch by iso/build, from the Ubuntu archive, the minos archive and the installer at
+#minos.io/s, then used in QEMU the way a person uses it. Its live session boots by BIOS from a CD and by UEFI
+#with Secure Boot from a USB stick (iso/live-check), and its probe says what the session is, ci/probe-common
+#among it; the session boots with the network's cable out too, and must come up all the same, with its
+#plugins. Then minos is installed from the live session onto an empty disk with no network, by UEFI and by
+#BIOS, and that disk boots alone, by UEFI with a network as well, once minos-untrim has given it back what
+#the ISO left out (iso/install-check). One line per check; ci/verdict iso reads them.
+#usage: [SETUP=FILE|URL] [MIRROR=URI] ci/iso RELEASE
+#  MIRROR, the Ubuntu archive the build fetches from: by default the one this machine's apt reads
+#  (ci/mirror), on a GitHub-hosted runner its cloud's mirror; the ISO's sources say archive.ubuntu.com
+#  => $ISO_OUT (~/minos-iso-out): minos-RELEASE-amd64.iso, its .sha256 and logs/minos-RELEASE-amd64/: the
+#     build's logs, each check's, the serial logs, the disks' facts and the screens
+#  needs iso/build's tools (debootstrap, squashfs-tools, xorriso, dosfstools, mtools, kmod, wget or curl) and
+#  the checks' (qemu-system-x86, qemu-utils, ovmf, socat, netpbm); the packages iso/build downloads stay in
+#  $ISO_CACHE (~/minos-iso-cache), the system it makes and the disks the checks install in $ISO_WORK
+#  (/tmp/minos-iso)
+
+w="$(cd "$(dirname "${0}")/.." && pwd)"
+cache="${ISO_CACHE:-${HOME}/minos-iso-cache}"; out="${ISO_OUT:-${HOME}/minos-iso-out}"
+tmp="${ISO_WORK:-${TMPDIR:-/tmp}/minos-iso}"
+setup="${SETUP:-https://minos.io/s}"
+mirror="$(sh "${w}/ci/mirror")"
+
+_line() { printf "%-34s %s\\n" "${1}" "${2}"; }
+
+_live() { #label firmware medium cable => LABEL's line, and with the cable in (yes) the probe's lines after it
+    _live__name="${2}-${3}"; [ "${4}" = yes ] || _live__name="${_live__name}-nocable"
+    _live__log="${logs}/live-${_live__name}.log"; _live__serial="${logs}/live/${_live__name}.serial.log"
+    _live__start="$(date +%s)"
+    CABLE="${4}" sh "${w}/iso/live-check" "${iso}" "${2}" "${3}" "${logs}/live" > "${_live__log}" 2>&1
+    _live__status="${?}"; _live__secs="$(($(date +%s) - _live__start))"
+    #the guest's serial port ends each line with \r\n (its tty's onlcr): the \r goes, or no value ends where
+    #ci/verdict looks for its end
+    tr -d '\r' < "${_live__serial}" > "${_live__serial}.lines" 2>/dev/null
+    if [ "${_live__status}" = 0 ]; then
+        _line "${1}" "ok    ${_live__secs}s; network: $(sed -n 's/^probe: network  *//p' "${_live__serial}.lines" | head -n 1)"
+    else
+        _line "${1}" "FAIL  (${_live__status}) ${_live__secs}s $(tail -n 2 "${_live__log}" | tr '\n' ' ' | cut -c1-220)"
+    fi
+    #the session with no network is judged by live-check alone, its network and names being meant to fail;
+    #but for its plugins, which the image brings: they must be there with no network too
+    if [ "${4}" = yes ]; then
+        sed -n 's/^probe: //p' "${_live__serial}.lines" 2>/dev/null
+    else
+        _line "plugins, no cable" "$(sed -n 's/^probe: plugins  *//p' "${_live__serial}.lines" 2>/dev/null)"
+    fi
+    rm -f "${_live__serial}.lines"
+}
+
+_install() { #label firmware disk phases => LABEL's line; the disk's facts, serial log and screens to the logs
+    _install__name="${2}-${3}"; _install__log="${logs}/install-${_install__name}.log"
+    _install__start="$(date +%s)"
+    PHASES="${4}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${tmp}/install" 20 > "${_install__log}" 2>&1
+    _install__status="${?}"; _install__secs="$(($(date +%s) - _install__start))"
+    mkdir -p "${logs}/install"
+    for _install__file in "${tmp}/install/${_install__name}".facts "${tmp}/install/${_install__name}".serial.log \
+                          "${tmp}/install/${_install__name}"-*.png; do
+        [ ! -f "${_install__file}" ] || cp "${_install__file}" "${logs}/install/"
+    done
+    #the disk weighs gigabytes, and the next check needs the room
+    rm -f "${tmp}/install/${_install__name}".img "${tmp}/install/${_install__name}".vars.fd
+    if [ "${_install__status}" = 0 ]; then
+        _line "${1}" "ok    ${_install__secs}s; $(grep '^dpkg --verify' "${logs}/install/${_install__name}.facts" | tail -n 1 | cut -c1-160)"
+    else
+        _line "${1}" "FAIL  (${_install__status}) ${_install__secs}s $(tail -n 2 "${_install__log}" | tr '\n' ' ' | cut -c1-220)"
+    fi
+}
+
+[ "$(id -u)" = 0 ] || { printf "%s\\n" "ci/iso runs as root: iso/build and iso/install-check need it" >&2; exit 2; }
+[ -c /dev/kvm ] || { printf "%s\\n" "no /dev/kvm on $(hostname): the ISO is checked with KVM only" >&2; exit 2; }
+release="${1:?usage: [SETUP=FILE|URL] ci/iso RELEASE}"
+name="minos-${release}-amd64"; iso="${out}/${name}.iso"; logs="${out}/logs/${name}"
+rm -rf "${out:?}/${name}".* "${logs}" "${tmp}/install"; mkdir -p "${cache}" "${logs}/live" "${tmp}/install"
+printf "\\n=== %s ===\\n" "${name}.iso"
+began="$(date +%s)"
+
+#the build: iso/build empties its own work directory, unmounting first what a killed run left mounted there.
+#It took 35 minutes once, 27 of them debootstrap's downloads from a slow archive: past an hour it is stopped
+#(timeout's TERM goes to its whole process group; iso/build unmounts on its way out)
+start="$(date +%s)"
+timeout 3600 sh "${w}/iso/build" -c "${cache}" -w "${tmp}/build" -o "${iso}" -s "${setup}" -m "${mirror}" "${release}" \
+    > "${logs}/build.log" 2>&1
+status="${?}"; secs="$(($(date +%s) - start))"
+[ "${status}" != 124 ] || printf "%s\\n" "ci/iso: the build was stopped after 3600 s" >> "${logs}/build.log"
+for log in build.log debootstrap.log; do
+    [ ! -f "${tmp}/build/${log}" ] || cp "${tmp}/build/${log}" "${logs}/system-${log}"
+done
+if [ "${status}" != 0 ] || [ ! -f "${iso}" ]; then
+    _line "iso build" "FAIL  (${status}) ${secs}s $(tail -n 3 "${logs}/build.log" | tr '\n' ' ' | cut -c1-220)"
+    exit 1
+fi
+_line "iso build" "ok    ${secs}s; $(sed -n 's/^ *boot: //p' "${logs}/build.log" | tr '\n' ';' | sed 's/;$//; s/;/; /g' | cut -c1-240)"
+#where the build fetched from, and what the downloads of debootstrap cost (once 1630 s from a slow archive)
+_line "iso build, mirror" "${mirror}; debootstrap $(awk '$2 == "debootstrap" && $4 == "from" {sub(/s$/, "", $1); from = $1}
+    $2 == "debootstrap" && $4 ~ /^[0-9]+$/ {sub(/s$/, "", $1); printf "%ds, %s files retrieved", $1 - from, $4}' "${logs}/build.log")"
+#what each purge step left, as setup's live mode says it
+_line "slimming steps" "$(sed -n 's/^ *[0-9]*s  slim: //p' "${logs}/build.log" | tr '\n' ',' | sed 's/,$//; s/,/, /g' | cut -c1-300)"
+size="$(stat -c %s "${iso}")"
+if [ "${size}" -lt 700000000 ]; then
+    _line "iso size" "${size} B ($((size / 1048576)) MiB), under 700 MB"
+else
+    _line "iso size" "FAIL  ${size} B ($((size / 1048576)) MiB), over 700 MB"
+fi
+(cd "${out}" && sha256sum "${name}.iso" > "${name}.sha256")
+_line "sha256" "$(awk '{printf "%s %s  ", $2, $1}' "${out}/${name}.sha256")"
+
+#the live session, as a person boots it
+_live "live bios cd" bios cd yes
+_live "live secureboot usb" secureboot usb yes
+_live "live uefi cd, no cable" uefi cd no
+
+#minos installed from the live session, with no network, then the disk alone
+_install "install uefi sata" uefi sata "install boot untrim"
+_install "install bios sata" bios sata "install boot"
+rm -rf "${tmp}/install"
+printf "%s\\n" "--- ${name}.iso took $(($(date +%s) - began))s"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

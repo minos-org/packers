@@ -1,0 +1,37 @@
+#!/bin/sh
+#the Ubuntu archive this machine's apt reads, as a URI with its trailing slash: on a GitHub-hosted runner
+#its mirror inside the same cloud, which the builds fetch from instead of archive.ubuntu.com across the
+#internet (ci/iso: iso/build -m; ci/boxes: minos.pkr.hcl's mirror). Ubuntu's archive is the source that
+#serves the machine's release and its -updates (a third party's serves the release alone); when it is a
+#list of mirrors (mirror+file:, the runners' /etc/apt/apt-mirrors.txt), the one apt tries first, of the
+#lowest priority. apt checks what any mirror serves against the archive's signed Release, so the mirror is
+#a matter of speed, not of trust. What a box or the ISO keeps in its sources is Ubuntu's own archive
+#whatever mirror built it (ci/probe-common's line "apt sources")
+#usage: ci/mirror   => the URI on stdout; $MIRROR when it is set; http://archive.ubuntu.com/ubuntu/ when
+#       the machine reads no Ubuntu archive over http or https
+
+archive="http://archive.ubuntu.com/ubuntu/"
+if [ -n "${MIRROR}" ]; then
+    printf "%s/\\n" "${MIRROR%/}"
+    exit 0
+fi
+codename="$(. /etc/os-release 2>/dev/null; printf "%s" "${VERSION_CODENAME}")"
+#apt names each source's Release file, "URI/dists/SUITE/InRelease", from both formats of sources, with no
+#package list needed: the URI that serves both CODENAME and CODENAME-updates
+source="$(apt-get -o Debug::NoLocking=1 update --print-uris 2>/dev/null |
+    sed -n "s|^'\\(.*/\\)dists/\\([^/]*\\)/InRelease'.*|\\1 \\2|p" |
+    awk -v release="${codename}" '$2 == release {r[$1] = 1} $2 == release "-updates" {u[$1] = 1}
+        END {for (uri in r) if (uri in u) {print uri; exit}}')"
+case "${source}" in
+    mirror+file:*)
+        #"URI [priority:N]...", a line each: the lowest priority first, the order of the file among equals
+        list="${source#mirror+file:}"; list="${list%/}"
+        source="$(awk '!/^[ \t]*(#|$)/ {p = 0; for (i = 2; i <= NF; i++) if ($i ~ /^priority:[0-9]+$/) p = substr($i, 10) + 0
+                print p, NR, $1}' "${list}" 2>/dev/null | sort -n -k1,1 -k2,2 | awk 'NR == 1 {print $3}')" ;;
+esac
+case "${source}" in
+    http://?*|https://?*) printf "%s/\\n" "${source%/}" ;;
+    *) printf "%s\\n" "${archive}" ;;
+esac
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

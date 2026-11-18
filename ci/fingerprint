@@ -1,0 +1,30 @@
+#!/bin/sh
+#what a box is made of that lives outside this repository, as text: the packages the minos archive
+#serves to each release (name and version, read from the Packages index apt reads, so a package counts
+#once its build is published, not when its source is uploaded) and the installer at minos.io/s. Two
+#fingerprints differ when a box built now would differ from the one built then (.github/workflows/boxes.yml)
+#usage: ci/fingerprint   => one line per package and release, one for the installer; exits 1 when a part
+#       cannot be read
+
+archive="https://ppa.launchpadcontent.net/minos-archive/main/ubuntu"
+installer="https://minos.io/s"
+tmp="$(mktemp -d)" || exit 1
+trap 'rm -rf "${tmp}"' EXIT
+
+_packages() { #$1 series => "SERIES PACKAGE VERSION" lines of the archive's amd64 index
+    curl -fsSL --retry 3 -o "${tmp}/${1}.gz" "${archive}/dists/${1}/main/binary-amd64/Packages.gz" || return 1
+    gzip -dc "${tmp}/${1}.gz" > "${tmp}/${1}" || return 1
+    awk -v series="${1}" '$1 == "Package:" {name = $2} $1 == "Version:" {print series, name, $2}' "${tmp}/${1}" |
+        sort > "${tmp}/${1}.list"
+    #an index without the metapackages is not one a box could be built from
+    grep -q "^${1} minos-core " "${tmp}/${1}.list" || { printf "%s\\n" "fingerprint: no minos-core for ${1}" >&2; return 1; }
+    cat "${tmp}/${1}.list"
+}
+
+for series in jammy noble resolute; do
+    _packages "${series}" || { printf "%s\\n" "fingerprint: cannot read the index of ${series}" >&2; exit 1; }
+done
+curl -fsSL --retry 3 -o "${tmp}/s" "${installer}" || { printf "%s\\n" "fingerprint: cannot read ${installer}" >&2; exit 1; }
+printf "%s %s\\n" "${installer}" "$(sha256sum "${tmp}/s" | cut -d' ' -f1)"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

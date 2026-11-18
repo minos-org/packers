@@ -1,0 +1,126 @@
+#!/bin/sh
+#what a box or the ISO must show to pass: the lines its checks print, read against what a working one
+#prints. A box's come from ci/boxes and ci/box-check, the ISO's from ci/iso and its live session's probe;
+#both carry the lines of ci/probe-common, which are judged here once, alike for both. A check that must
+#pass is named here with the value it must have, and a missing line fails like a wrong one (a box that
+#never answered ssh prints none of box-check's); a line that comes more than once (the probe of each live
+#session) is judged each time; any value that starts with FAIL fails too. The other lines (sizes,
+#weights, versions) are there to be read, not judged.
+#usage: ci/verdict FLAVOUR RELEASE LOG   => FLAVOUR core or desktop for a box, iso for the ISO; one line per
+#       check; exits 1 when one fails
+
+flavour="${1:?usage: ci/verdict core|desktop|iso RELEASE LOG}"; release="${2:?}"; log="${3:?}"
+case "${flavour}" in core|desktop|iso) ;; *) printf "%s\\n" "verdict: ${flavour}: core, desktop or iso" >&2; exit 2 ;; esac
+[ -f "${log}" ] || { printf "%s\\n" "verdict: no ${log}"; exit 1; }
+
+awk -v flavour="${flavour}" -v release="${release}" '
+    function must(label, value) { n++; want_label[n] = label; want_value[n] = value }
+    #what every minos system shows (ci/probe-common), for the system FLAVOUR whose user is USER
+    function common(flavour, user) {
+        must("^minos-" flavour "$", "^install ok installed ")
+        must("^release$", "^" r)
+        #apt reads the Ubuntu archive itself, whatever mirror built the system (ci/mirror): archive.ubuntu.com,
+        #security.ubuntu.com for -security, and besides them the minos archive alone (over http it sorts
+        #before security.ubuntu.com, over https after it)
+        must("^apt sources$", "^http://archive\\.ubuntu\\.com/ubuntu/( [a-z]+(-updates|-backports)?)+(; " ppa ")?; http://security\\.ubuntu\\.com/ubuntu/ [a-z]+-security(; " ppa ")?$")
+        #names resolve through the system resolver: apt, Vagrant and the installer need it
+        must("^dns$", "^archive\\.ubuntu\\.com [0-9a-f.:]+ after ")
+        must("^sudo without password \\(" user "\\)$", "^ok$")
+        must("^tmux source-file ~/\\.tmux\\.conf$", "^no errors$")
+        must("^failed units$", "^none$")
+        if (flavour == "desktop") {
+            must("^i3 [0-9]", "^0 config errors$")
+            must("^display manager$", "slim\\.service$")
+            must("^slim, Xorg$", "^slim active; Xorg up on ")
+        }
+    }
+    BEGIN {
+        r = release; gsub(/\./, "\\.", r)
+        ppa = "https?://ppa\\.launchpad(content)?\\.net/minos-archive/main/ubuntu/ [a-z]+"
+        several = "([2-9]|[1-9][0-9]+)"
+        plugins = "^vim " several ", tmux " several ", shundle " several "; login hook: nothing to install$"
+        if (flavour == "iso") {
+            common("desktop", "minos")
+            must("^iso build$", "^ok ")
+            #the owner: under 700 MB, as minos ISOs used to be
+            must("^iso size$", "under 700 MB$")
+            must("^sha256$", "^minos-" r "-amd64\\.iso [0-9a-f]{64} *$")
+            #each boot of the live session came to i3 and ran its probe (iso/live-check), with Secure Boot on
+            #from the USB stick, and with no cable it came up all the same and found no address
+            must("^live bios cd$", "^ok ")
+            must("^live secureboot usb$", "^ok ")
+            must("^live uefi cd, no cable$", "^ok ")
+            #casper booted the medium: its squashfs, read-only, under the session
+            must("^medium$", " on /cdrom \\(iso9660\\), .* on /rofs \\(squashfs\\)")
+            must("^network$", "^[a-z][a-z0-9]* [0-9.]+/[0-9]+ ")
+            #the session carries the drivers of the cards of virtual machines, and the VGA card QEMU gives it
+            #(iso/live-check) is driven by its own, bochs, which offers more than one mode: no card is left
+            #to the framebuffer of the firmware (simple-framebuffer), which has the one mode it was left in
+            must("^display$", "^drivers vmwgfx vboxvideo virtio-gpu bochs; card[0-9] bochs-drm, ([2-9]|[1-9][0-9]+) modes; fb: ")
+            #the vim, tmux and shell plugins came with the image: each manager has plugins besides itself, and
+            #the login hook of minos-core-settings found none to install, with the cable in and with it out
+            must("^plugins$", plugins)
+            must("^plugins, no cable$", plugins)
+            #minos installed from the live session with no network, and the disk came up alone to i3
+            #(iso/install-check); by UEFI also with a network, until minos-untrim gave back what the ISO left out
+            must("^install uefi sata$", "^ok ")
+            must("^install bios sata$", "^ok ")
+        } else {
+            common(flavour, "vagrant")
+            must("^packer build \\(ppa\\)$", "^ok ")
+            #export.sh made zeros of what the root filesystem does not hold, and the filesystem is whole after it
+            must("^zeros at export$", "^partition [0-9]+ \\(ext4\\), [0-9]+ of [0-9]+ free blocks were not zero; journal [0-9]+M made again, empty; e2fsck -fn clean;")
+            #the box is the one file a release carries: its .sha256 lists it alone, and is true of it
+            must("^sha256$", "^minos-" flavour "-" r "\\.box [0-9a-f]{64} *$")
+            must("^box checksum$", "^minos-" flavour "-" r "\\.box: OK *$")
+            #a tar of the four files, compressed with xz
+            must("^box members$", "^metadata\\.json Vagrantfile box\\.ovf box-disk1\\.vmdk \\(.*, XZ compressed data; ")
+            must("^ovf schema \\(DMTF 1\\.1\\.0\\)$", " validates *$")
+            #the disk the OVF names is the one beside it in the box (what VBoxManage import box.ovf opens), a sparse
+            #VMDK that the OVF calls one
+            must("^vmdk$", "^box-disk1\\.vmdk: vmdk; .*; monolithicSparse; ovf vmdk\\.html#sparse; capacity [0-9]+ = disk, size [0-9]+ = file$")
+            must("^ovf vbox:Machine$", "^SATA ports 1; disk \\{[0-9a-f-]+\\} = DiskSection$")
+            must("^ssh vagrant, ed25519 key$", "^ok after ")
+            must("^ssh vagrant, rsa key$", "^ok$")
+            #what the box itself asks of Vagrant (export.sh: config.ssh.shell = "bash")
+            must("^vagrant.s channel, bash$", "^ok *$")
+            must("^network$", "^eth0 [0-9.]+/[0-9]+ .*net\\.ifnames=0")
+            must("^the owner.s commands, by shundle$", "/wcd .*/fuck .*/diff-so-fancy .*/battery .*/cmdfound ")
+            must("^cmdfound$", "^cmdfound .*: reached with: .*surely-not-installed")
+            #what box.sh purges of the Ubuntu server seed
+            must("^leftovers$", "^none$")
+            must("^boot on virtio, ssh$", "^ok after ")
+            must("^vagrant [0-9.]+ box add catalog$", "^minos/" flavour "-" r " \\(virtualbox, .*box-disk1\\.vmdk box\\.ovf metadata\\.json \\(vmdk = the box.s\\)$")
+            if (flavour == "desktop") {
+                must("^compton on :0$", "^starts and stays up$")
+                must("^i3 on :0$", "^starts and stays up$")
+                must("^sound cards$", "snd_hda_intel loaded snd_intel8x0 loaded")
+                must("^boot splash$", "^splash; theme [^ ]+; in the initramfs: .*; missing: none$")
+                must("^network-online\\.target$", "^connman-wait-online disabled;")
+                #a person logs in through slim and gets i3
+                must("^logged in through slim$", "^i3 of vagrant up")
+            }
+        }
+    }
+    {
+        label = substr($0, 1, 34); sub(/ +$/, "", label); value = substr($0, 36)
+        for (i = 1; i <= n; i++) {
+            if (label !~ want_label[i]) continue
+            seen[i] = 1; shown[i] = label
+            if (value !~ want_value[i]) wrong[i] = value
+        }
+        if (value ~ /^FAIL/) failed[++f] = sprintf("%-34s FAIL  %s", label, substr(value, 7))
+    }
+    END {
+        bad = 0
+        for (i = 1; i <= n; i++) {
+            if (!(i in seen)) { printf "%-34s FAIL  no line (%s)\n", want_label[i], want_value[i]; bad++ }
+            else if (i in wrong) { printf "%-34s FAIL  %s (wants %s)\n", shown[i], substr(wrong[i], 1, 160), want_value[i]; bad++ }
+            else printf "%-34s ok\n", shown[i]
+        }
+        for (i = 1; i <= f; i++) { print failed[i]; bad++ }
+        printf "%-34s %s\n", "verdict", (bad ? bad " failed of " n + f : "all " n " checks pass")
+        exit (bad ? 1 : 0)
+    }' "${log}"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

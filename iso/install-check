@@ -1,0 +1,358 @@
+#!/bin/sh
+#install minos from an ISO's live session onto an empty disk, with no network, as a person would, then
+#boot that disk alone, in QEMU with KVM, by BIOS (SeaBIOS), UEFI (OVMF) or UEFI with Secure Boot on. The
+#live session boots from a CD; a probe from a second CD partitions the disk (one partition on BIOS; an
+#EFI system partition and one for minos on UEFI) and leaves it unformatted, and the installer's key
+#(Win+i) is answered key by key: no cfdisk, the partition, the EFI partition it finds, a user, its
+#password twice, the partition's name to confirm. Then the disk boots alone, still with no network, to
+#slim, where the user logs in, and to i3, and stays up until minos-untrim has had its try, which must fail
+#and leave the unit enabled. The disk is read here after each boot: the files dpkg --verify finds
+#missing, what the copy left out, the boot loader, the boot's journal.
+#usage: [PHASES="install boot [untrim]"] install-check ISO FIRMWARE DISK OUTPUT [MINUTES]
+#  FIRMWARE    bios, uefi or secureboot
+#  DISK        sata or nvme, the disk minos goes to
+#  PHASES      install (the live session, the installer), boot (the disk alone, no network), untrim (the
+#              disk alone with a network, read once minos-untrim is through). boot and untrim alone use
+#              the disk OUTPUT/NAME.img an earlier run, or another installer, left; ISO is then unused
+#  => in OUTPUT, for NAME=FIRMWARE-DISK: NAME.img (the disk), NAME.serial.log (the probe in the live
+#     session), NAME.facts (the disk read after each boot), the screens NAME-{desktop,installer,installed}.png
+#     of the install, NAME-{slim,i3}.png of the disk's boot and NAME-net-{slim,i3}.png of its boot with a
+#     network; exit 0 when the installer finished, the disk came up to i3 by itself (on a copy of the ISO,
+#     with minos-untrim failed and still enabled) and, with untrim, the packages minos-untrim reinstalls
+#     miss no file and the unit disabled itself
+#needs what live-check needs, qemu-img, losetup and mount (root) to read the disk
+
+set -eu
+iso="${1:-}"; firmware="${2:-}"; disk="${3:-}"; out="${4:-}"; minutes="${5:-15}"
+phases="${PHASES:-install boot}"
+if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '11,22s/^#//p' "${0}" >&2; exit 2; fi
+name="${firmware}-${disk}"
+user="ana"; password="minos2026"
+
+_die() { #message => on stderr, exit 1
+    printf "%s\\n" "install-check: ${name}: ${*}" >&2
+    exit 1
+}
+
+_step() { #message => one line on stdout, with the seconds since the start
+    printf "%5ss  %s\\n" "$(($(date +%s) - start))" "${*}"
+}
+
+# shellcheck source=iso/qemu-lib
+. "$(dirname "${0}")/qemu-lib"
+
+_write_probe() { #dir => DIR/probe.iso, a CD labelled PROBE: prepare partitions the disk and leaves watch
+    #behind, which says on the serial port how the installer ended and what it said
+    mkdir -p "${1}/probe"
+    cat > "${1}/probe/prepare" << 'E=O=F'
+#!/bin/sh
+#install-check's probe, run as root in the live session: DISK partitioned as LABEL (dos: one partition;
+#gpt: an EFI system partition of 256 MiB and one for minos), nothing formatted
+_say() { printf "probe: %s\n" "${*}" > /dev/ttyS0; }
+case "${2}" in
+    dos) printf "%s\n" "label: dos" ",,L" | sfdisk -q "${1}" ;;
+    gpt) printf "%s\n" "label: gpt" ",256M,U" ",,L" | sfdisk -q "${1}" ;;
+esac || { _say "sfdisk failed on ${1}"; exit 1; }
+udevadm settle
+_say "partitioned ${1}: $(lsblk -lnpo NAME,SIZE,PARTTYPE "${1}" | tr -s ' ' | tr '\n' ',')"
+_say "network: $(ip -4 -o address show scope global | awk '{print $2 " " $4}' | head -n 1) (none expected)"
+setsid sh /mnt/watch < /dev/null > /dev/null 2>&1 &
+_say "prepared"
+E=O=F
+    cat > "${1}/probe/watch" << 'E=O=F'
+#!/bin/sh
+#install-check's watcher: how the installer ended, and what setup said, on the serial port
+_say() { printf "probe: %s\n" "${*}" > /dev/ttyS0; }
+until pgrep -f /usr/local/bin/minos-installer > /dev/null; do sleep 1; done
+_say "installer: open"
+until pgrep -f "/cdrom/minos/setup live" > /dev/null || [ -f /tmp/minos-installer.status ]; do sleep 1; done
+_say "install: started"
+waited=0
+until [ -f /tmp/minos-installer.status ]; do
+    sleep 5; waited="$((waited + 5))"
+    [ "${waited}" -lt 3600 ] || { _say "install: no end after an hour"; exit 1; }
+done
+sync
+sed 's/\x1b\[[0-9;]*m//g; s/\r/\n/g' /tmp/minos-installer.log | tr -d '\b' |
+    while IFS= read -r line; do _say "log: ${line}"; done
+_say "install: setup exited $(cat /tmp/minos-installer.status) after ${waited} s"
+_say "install: done"
+E=O=F
+    xorriso -report_about WARNING -as mkisofs -V PROBE -J -r -o "${1}/probe.iso" "${1}/probe" 2>/dev/null ||
+        _die "cannot write the probe's CD"
+}
+
+_boot() { #network => the machine booted, KVM, 2 CPUs, 3 GiB, its firmware, the target disk and what
+    #the phase adds in extra (the ISO, the probe), with a network card (user) or none (none), in the
+    #background; its pid in qemu
+    rm -f "${run}/qemu.pid" "${run}/monitor"
+    # shellcheck disable=SC2046,SC2086 # lists of options
+    qemu-system-x86_64 -enable-kvm -cpu host -smp 2 -m 3072 $(_firmware_options "${firmware}" "${vars}") \
+        ${target} ${extra} -nic "${1}" -vga std -display none -serial "file:${serial}" \
+        -monitor "unix:${run}/monitor,server,nowait" -no-reboot -daemonize -pidfile "${run}/qemu.pid"
+    qemu="$(cat "${run}/qemu.pid")"
+}
+
+_halt() { #=> the machine powered off as by its button, waited for 3 minutes; then quit
+    _monitor system_powerdown >/dev/null || :
+    _halt__end="$(($(date +%s) + 180))"
+    while kill -0 "${qemu}" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "${_halt__end}" ]; then
+            _step "no power off after 3 minutes: quit"
+            _monitor quit >/dev/null || :
+            sleep 2
+        fi
+        sleep 2
+    done
+    qemu=""
+}
+
+_log_in() { #prefix => slim's login answered until i3 is up, within MINUTES: before each try the screen,
+    #OUTPUT/NAME-PREFIXslim.png (the last one is slim's), and once i3 is up NAME-PREFIXi3.png. minos' slim
+    #names the user (default_user) and asks only for the password (focus_password). The first try waits a
+    #minute: keys pressed sooner reach the firmware or GRUB
+    sleep 60
+    until _on_desktop; do
+        kill -0 "${qemu}" 2>/dev/null || _die "the machine stopped"
+        [ "$(($(date +%s) - phase_start))" -lt "$((minutes * 60))" ] || { _screen "${1}timeout"; _die "no i3 after ${minutes} min"; }
+        _screen "${1}slim"
+        _type "${password}"; _press ret; sleep 25
+    done
+    _step "i3 is up"
+    sleep 10
+    _screen "${1}i3"
+}
+
+_written() { #=> the bytes the machine has written to the target disk
+    _monitor "info blockstats" | tr -d '\r' | awk '$1 == "target:" {for (i = 2; i <= NF; i++) if ($i ~ /^wr_bytes=/) {sub(/^wr_bytes=/, "", $i); print $i}}'
+}
+
+_read_disk() { #title => NAME.facts gets TITLE and what the disk holds: the files dpkg --verify misses,
+    #what only the live session needed, the user, fstab, the boot loader, minos-untrim and the last boot's
+    #journal
+    _read_disk__loop="$(losetup -f --show -P "${image}")"
+    _read_disk__root="${run}/disk"; mkdir -p "${_read_disk__root}"
+    sleep 1
+    mount "${_read_disk__loop}p${root_number}" "${_read_disk__root}"
+    [ -z "${esp_number}" ] || mount "${_read_disk__loop}p${esp_number}" "${_read_disk__root}/boot/efi"
+    mount -t proc proc "${_read_disk__root}/proc"
+    {   printf "\n== %s\n" "${1}"
+        _read_disk__verify="$(chroot "${_read_disk__root}" dpkg --verify 2>/dev/null || :)"
+        #missing: the kernel modules and firmware the ISO left out, the documentation it leaves out
+        #(minos-docs, which the copy keeps), anything else
+        printf "%s\n" "${_read_disk__verify}" | awk '
+            $1 == "missing" {missing++
+                if ($NF ~ /^\/(usr\/)?lib\/(modules|firmware)\//) trimmed++
+                else if ($NF ~ /^\/usr\/share\/(doc|man|groff|info|lintian|linda)\// && $NF !~ /^\/usr\/share\/doc\/[^\/]*\/copyright$/ ||
+                         $NF ~ /^\/usr\/share\/locale\/.*\/LC_MESSAGES\/.*\.mo$/) docs++
+                else other[++others] = $NF}
+            END {printf "dpkg --verify: %d files missing, %d of them kernel modules or firmware, %d documentation, %d else\n",
+                     missing, trimmed, docs, others
+                 for (i = 1; i <= others && i <= 10; i++) printf "  missing, neither: %s\n", other[i]}'
+        printf "%s\n" "${_read_disk__verify}" | awk '$1 != "missing" && NF' | head -n 5 | sed 's/^/  dpkg --verify: /'
+        # shellcheck disable=SC2016 # dpkg-query's format, not the shell's
+        printf "casper: %s\n" "$(chroot "${_read_disk__root}" dpkg-query -W -f='${db:Status-Abbrev}${Version}' casper 2>/dev/null || printf "not installed")"
+        for _read_disk__path in /etc/dpkg/dpkg.cfg.d/minos-live /var/lib/minos/live-only /usr/local/bin/minos-installer \
+            /etc/netplan/90-minos-live.yaml /etc/casper.conf /etc/systemd/system/systemd-networkd-wait-online.service \
+            /var/lib/minos/live-trimmed /etc/dpkg/dpkg.cfg.d/minos-docs; do
+            if [ -e "${_read_disk__root}${_read_disk__path}" ] || [ -L "${_read_disk__root}${_read_disk__path}" ]; then
+                printf "present: %s\n" "${_read_disk__path}"
+            else
+                printf "absent: %s\n" "${_read_disk__path}"
+            fi
+        done
+        printf "slim: %s\n" "$(grep -E '^(default_user|auto_login)' "${_read_disk__root}/etc/slim.conf" | tr -s ' ' | tr '\n' ',')"
+        #a link of the settings packages may lead to a file of theirs that is missing
+        if [ -e "${_read_disk__root}/etc/i3/config" ]; then
+            printf "i3 config: %s lines naming minos-installer\n" "$(grep -c minos-installer "${_read_disk__root}/etc/i3/config" || :)"
+        elif [ -L "${_read_disk__root}/etc/i3/config" ]; then
+            printf "i3 config: a link to %s, which is missing\n" "$(readlink "${_read_disk__root}/etc/i3/config")"
+        else
+            printf "%s\n" "i3 config: absent"
+        fi
+        #what every system setup's live mode makes carries: the services it purges, the upgraders
+        printf "packages: %s\n" "$(for _read_disk__package in rsyslog cron networkd-dispatcher dbus-user-session \
+            unattended-upgrades ubuntu-release-upgrader-core; do
+                # shellcheck disable=SC2016 # dpkg-query's format, not the shell's
+                printf "%s %s, " "${_read_disk__package}" "$(chroot "${_read_disk__root}" dpkg-query -W \
+                    -f='${db:Status-Abbrev}' "${_read_disk__package}" 2>/dev/null | tr -d ' ' || :)"
+            done | sed 's/ ,/ absent,/g; s/, $//')"
+        printf "user: %s; groups: %s\n" "$(grep "^${user}:" "${_read_disk__root}/etc/passwd")" \
+            "$(awk -F: -v user="${user}" '$4 ~ "(^|,)" user "(,|$)" {printf "%s ", $1}' "${_read_disk__root}/etc/group")"
+        #where the disk's apt fetches from, as ci/probe-common says it: the Ubuntu archive itself, whatever
+        #mirror built the ISO
+        printf "apt sources: %s\n" "$(chroot "${_read_disk__root}" apt-get -o Debug::NoLocking=1 update --print-uris 2>/dev/null |
+            sed -n "s|^'\\(.*/\\)dists/\\([^/]*\\)/InRelease'.*|\\1 \\2|p" | sort -u |
+            awk '$1 != uri {printf "%s%s", (n++ ? "; " : ""), $1; uri = $1} {printf " %s", $2} END {print ""}')"
+        printf "hostname: %s; keyboard: %s\n" "$(cat "${_read_disk__root}/etc/hostname")" \
+            "$(grep '^XKBLAYOUT' "${_read_disk__root}/etc/default/keyboard")"
+        sed 's/^/fstab: /' "${_read_disk__root}/etc/fstab"
+        printf "boot: %s\n" "$(cd "${_read_disk__root}/boot" && find . -maxdepth 2 \( -name 'vmlinuz-*' -o -name 'initrd.img-*' -o -path ./grub/grub.cfg \) | sort | tr '\n' ' ')"
+        [ -z "${esp_number}" ] || printf "esp: %s\n" "$(cd "${_read_disk__root}/boot/efi" && find . -type f | sort | tr '\n' ' ')"
+        printf "kernels: %s\n" "$(find "${_read_disk__root}/usr/lib/modules" -mindepth 1 -maxdepth 1 -printf '%f ')"
+        printf "minos-untrim.service: %s\n" "$([ -L "${_read_disk__root}/etc/systemd/system/multi-user.target.wants/minos-untrim.service" ] && printf enabled || printf disabled)"
+        #the last boot's journal, read with the disk's own journalctl
+        _read_disk__boot="$(chroot "${_read_disk__root}" journalctl -D /var/log/journal --list-boots --no-pager -q 2>/dev/null | awk 'END {print $2}')"
+        if [ -n "${_read_disk__boot}" ]; then
+            # shellcheck disable=SC2086 # a command and its options
+            _read_disk__journal="chroot ${_read_disk__root} journalctl -D /var/log/journal -b ${_read_disk__boot} --no-pager -q -o short-monotonic"
+            ${_read_disk__journal} -k | grep -i -m 2 -E 'secure boot|Command line' | sed 's/^/journal: /'
+            ${_read_disk__journal} | grep -E 'Started (slim|minos-untrim)|Finished minos-untrim|Failed to start|minos-untrim\.service: (Failed|Main process|Deactivated|Scheduled)|Reached target (graphical|network-online)' |
+                head -n 30 | sed 's/^/journal: /'
+            ${_read_disk__journal} -u minos-untrim | grep -E 'minos-untrim:|^E:|^W:|Err|Fetched|upgraded,' | tail -n 15 | sed 's/^/untrim: /'
+            ${_read_disk__journal} -p err | tail -n 10 | sed 's/^/journal error: /'
+        else
+            printf "%s\n" "journal: none on the disk"
+        fi
+    } >> "${facts}"
+    umount "${_read_disk__root}/proc"
+    [ -z "${esp_number}" ] || umount "${_read_disk__root}/boot/efi"
+    umount "${_read_disk__root}"
+    losetup -d "${_read_disk__loop}"
+}
+
+case "${firmware}" in bios) layout="dos"; root_number=1; esp_number="" ;; *) layout="gpt"; root_number=2; esp_number=1 ;; esac
+case "${disk}" in
+    sata) device="sda"; partition="sda${root_number}"
+          target_device="ide-hd,drive=target,bus=ide.2,serial=MINOS0001" ;;
+    nvme) device="nvme0n1"; partition="nvme0n1p${root_number}"
+          target_device="nvme,drive=target,serial=MINOS0001" ;;
+    *) _die "the disk is sata or nvme" ;;
+esac
+[ -c /dev/kvm ] || _die "no /dev/kvm"
+mkdir -p "${out}"; out="$(cd "${out}" && pwd)"
+image="${out}/${name}.img"; vars="${out}/${name}.vars.fd"; facts="${out}/${name}.facts"
+run="$(mktemp -d)"; qemu=""
+trap '[ -z "${qemu}" ] || kill "${qemu}" 2>/dev/null; rm -rf "${run}"' EXIT
+trap 'exit 143' INT TERM HUP
+start="$(date +%s)"
+
+case " ${phases} " in *" install "*)
+    [ -f "${iso}" ] || _die "no ISO ${iso}"
+    rm -f "${image}" "${vars}" "${facts}" "${out}/${name}"*.png "${out}/${name}.serial.log"
+    qemu-img create -q -f raw "${image}" 12G
+    _write_probe "${run}"
+    serial="${out}/${name}.serial.log"; phase_start="$(date +%s)"
+    target="-drive if=none,id=target,format=raw,file=${image} -device ${target_device}"
+    extra="-drive if=none,id=boot,media=cdrom,readonly=on,format=raw,file=${iso} -device ide-cd,drive=boot,bus=ide.0,bootindex=0"
+    extra="${extra} -drive if=none,id=probe,media=cdrom,readonly=on,format=raw,file=${run}/probe.iso -device ide-cd,drive=probe,bus=ide.1"
+    _step "the live session of $(basename "${iso}") (${firmware}), no network, an empty ${disk} disk"
+    _boot none
+    until _on_desktop; do
+        kill -0 "${qemu}" 2>/dev/null || _die "the machine stopped"
+        [ "$(($(date +%s) - phase_start))" -lt "$((minutes * 60))" ] || { _screen timeout; _die "no desktop after ${minutes} min"; }
+        sleep 2
+    done
+    _step "the desktop"
+    _screen desktop
+    sleep 10
+    for _try in 1 2 3; do
+        _press meta_l-ret
+        sleep 5
+        _type "sudo mount -r -L PROBE /mnt; sudo sh /mnt/prepare /dev/${device} ${layout}"
+        _press ret
+        ! _wait_serial "probe: prepared" 60 || break
+        _screen "probe-${_try}"
+        [ "${_try}" != 3 ] || _die "the probe said nothing"
+    done
+    _step "the disk partitioned; the installer (Win+i)"
+    _press meta_l-i
+    _wait_serial "probe: installer: open" 60 || { _screen timeout; _die "Win+i opened no installer"; }
+    sleep 5
+    _press ret; sleep 3                                     #no cfdisk
+    _type "${partition}"; _press ret; sleep 3               #the partition for minos, formatted
+    if [ -n "${esp_number}" ]; then _press ret; sleep 3; fi #the EFI system partition it finds
+    _type "${user}"; _press ret; sleep 2
+    _type "${password}"; _press ret; sleep 2
+    _type "${password}"; _press ret; sleep 2
+    _screen installer
+    _type "${partition}"; _press ret                        #the confirmation
+    _wait_serial "probe: install: started" 120 || { _screen timeout; _die "the installer did not start setup"; }
+    _step "setup runs"
+    _wait_serial "probe: install: done" "$((minutes * 120))" || { _screen timeout; _die "the installer did not end"; }
+    _screen installed
+    _monitor quit >/dev/null || :
+    qemu=""
+    sed -n 's/^probe: \(install: \|partitioned\)/\1/p' "${serial}"
+    grep -q "^probe: install: setup exited 0 " "${serial}" ||
+        { grep '^probe: log: ' "${serial}" | tail -n 30 >&2; _die "the installer failed, see ${serial}"; }
+    ;;
+esac
+
+[ -f "${image}" ] || _die "no disk ${image}"
+target="-drive if=none,id=target,format=raw,file=${image} -device ${target_device},bootindex=0"; extra=""
+serial="${run}/serial.log"
+
+case " ${phases} " in *" boot "*)
+    _step "the disk alone, no network"
+    phase_start="$(date +%s)"
+    _boot none
+    _log_in ""
+    #with no network, network-online.target comes when connman-wait-online gives up, 2 minutes into the
+    #boot, and only then does minos-untrim have its try on a copy of the ISO: the machine stays up for it
+    while [ "$(($(date +%s) - phase_start))" -lt 180 ]; do sleep 5; done
+    _halt
+    _read_disk "${name}: the disk alone, no network"
+    _step "read: ${facts}"
+    ;;
+esac
+
+case " ${phases} " in *" untrim "*)
+    _step "the disk alone, with a network: minos-untrim"
+    phase_start="$(date +%s)"
+    _boot user,model=virtio-net-pci
+    _log_in "net-"
+    #minos-untrim writes the kernel modules and firmware, hundreds of MiB: it is through once the disk
+    #has taken them and nothing more is written for a minute, or after MINUTES
+    _untrim__last=0; _untrim__still=0
+    while [ "$(($(date +%s) - phase_start))" -lt "$((minutes * 60))" ]; do
+        _untrim__now="$(_written)"
+        if [ "$((_untrim__now - _untrim__last))" -lt 1048576 ]; then _untrim__still="$((_untrim__still + 1))"; else _untrim__still=0; fi
+        _untrim__last="${_untrim__now}"
+        [ "${_untrim__now}" -lt 419430400 ] || [ "${_untrim__still}" -lt 2 ] || break
+        sleep 30
+    done
+    _step "$((_untrim__last / 1048576)) MiB written to the disk"
+    _halt
+    _read_disk "${name}: the disk alone, with a network, minos-untrim through"
+    _step "read: ${facts}"
+    ;;
+esac
+
+cat "${facts}"
+#each reading: the disk reads the Ubuntu archive and security.ubuntu.com, besides them the minos archive alone
+awk '/^apt sources: / {n++; sub(/^apt sources: /, ""); k = split($0, source, "; "); archive = security = other = 0
+        for (i = 1; i <= k; i++) {
+            if (source[i] ~ /^http:\/\/archive\.ubuntu\.com\/ubuntu\/ /) archive++
+            else if (source[i] ~ /^http:\/\/security\.ubuntu\.com\/ubuntu\/ [a-z]+-security$/) security++
+            else if (source[i] !~ /^https?:\/\/ppa\.launchpad(content)?\.net\/minos-archive\/main\/ubuntu\/ /) other++
+        }
+        if (!archive || !security || other) bad++}
+    END {exit !(n && !bad)}' "${facts}" ||
+    _die "the disk reads another archive than archive.ubuntu.com, security.ubuntu.com and the minos one"
+case " ${phases} " in *" boot "*)
+    #the reading after the boot with no network: on a copy of the ISO, minos-untrim tried, failed for want
+    #of an archive, and stays enabled to try again
+    awk -v title="== ${name}: the disk alone, no network" '$0 == title {s = ""; on = 1; next} /^== / {on = 0}
+        on {s = s $0 "\n"} END {printf "%s", s}' "${facts}" > "${run}/offline"
+    if grep -q "^present: /var/lib/minos/live-trimmed" "${run}/offline"; then
+        grep -q "^untrim: .*minos-untrim: no package list" "${run}/offline" ||
+            _die "with no network, minos-untrim did not try, or did not say it reached no archive"
+        grep -q "^journal: .*minos-untrim.service: Main process exited, code=exited, status=1/FAILURE" "${run}/offline" ||
+            _die "with no network, minos-untrim did not fail"
+        grep -q "^minos-untrim.service: enabled" "${run}/offline" ||
+            _die "with no network, minos-untrim.service disabled itself"
+    fi
+    ;;
+esac
+case " ${phases} " in *" untrim "*)
+    #the last reading, after minos-untrim
+    awk '/^== / {last = ""} {last = last $0 "\n"} END {printf "%s", last}' "${facts}" > "${run}/last"
+    grep -q "^dpkg --verify: [0-9]* files missing, 0 of them kernel modules or firmware" "${run}/last" ||
+        _die "kernel modules or firmware still missing after minos-untrim"
+    grep -q "^minos-untrim.service: disabled" "${run}/last" || _die "minos-untrim.service is still enabled"
+    ;;
+esac
+_step "checked: ${facts}"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

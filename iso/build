@@ -1,0 +1,993 @@
+#!/bin/sh
+#the minos ISO, built from scratch for an Ubuntu LTS release: a debootstrap of the release with
+#minos-desktop, installed by the minos installer, made a live session by casper (the user minos, whom
+#slim logs into i3), squashed into one xz squashfs, casper/filesystem.squashfs. GRUB boots it on BIOS and
+#on UEFI, Secure Boot included through the archive's signed shim and GRUB, from a CD or from the same
+#image written to a USB stick. The live system carries the kernel modules and the firmware of the wired
+#and wireless network and of what booting needs (disks, USB, input, a basic display through simpledrm),
+#and the drivers of the cards virtual machines give it (vmwgfx, vboxvideo, virtio-gpu, bochs), nothing
+#else: dpkg keeps the rest out (/etc/dpkg/dpkg.cfg.d/minos-live), and a system copied from the live one
+#gets it back with the network (minos-untrim.service reinstalls the packages /var/lib/minos/live-trimmed
+#lists). Like Ubuntu's minimized images it carries no documentation, manual pages or translations of messages
+#(/etc/dpkg/dpkg.cfg.d/minos-docs), and a system copied from it keeps that. The boot loaders such a
+#system needs, for BIOS and for UEFI, are on the medium as packages (minos/bootloader), installable offline.
+#Its /etc/skel carries the vim, tmux and shell plugins minos' configuration names: the live user has them
+#from the first login on, with no network, and the user of a system copied from it those of vim and tmux.
+#What the live session alone needs is listed in /var/lib/minos/live-only: the minos installer (setup live,
+#Win+i in the session) copies the live system to a disk without it. Anything else that installer makes
+#there (minos-core, another release) comes from the network, with the debootstrap and wget the ISO carries.
+#usage: build [-c CACHE] [-w WORK] [-o ISO] [-s SETUP] [-m MIRROR] RELEASE
+#  RELEASE     the Ubuntu LTS release, 22.04, 24.04 or 26.04, or its codename (jammy, noble, resolute)
+#  -c CACHE    where downloaded packages stay between runs (default ~/.cache/minos-iso)
+#  -w WORK     where the system and the ISO's files are made, emptied first (default output/build)
+#  -o ISO      the ISO written (default output/minos-RELEASE-amd64.iso)
+#  -s SETUP    the minos installer, a file or an https URL (default https://minos.io/s)
+#  -m MIRROR   the Ubuntu archive the build fetches from (default http://archive.ubuntu.com/ubuntu/); the
+#              ISO's sources say archive.ubuntu.com and security.ubuntu.com whatever it is
+#runs as root (debootstrap, chroot, mounts) with the network; needs debootstrap, mksquashfs
+#(squashfs-tools), xorriso, mkfs.vfat (dosfstools), mtools, depmod and modinfo (kmod), dpkg-deb, md5sum,
+#and wget or curl
+
+set -eu
+
+_die() { #message => on stderr, exit 1
+    printf "%s\\n" "build: ${*}" >&2
+    exit 1
+}
+
+_step() { #message => one line on stdout, with the seconds since the start
+    printf "%5ss  %s\\n" "$(($(date +%s) - start))" "${*}"
+}
+
+_absolute() { #path => the same path from /, its directory created
+    mkdir -p "$(dirname "${1}")"
+    printf "%s/%s" "$(cd "$(dirname "${1}")" && pwd)" "$(basename "${1}")"
+}
+
+_fetch_url() { #url file => the file, a download that was cut off resumed
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -c -O "${2}" "${1}"
+    elif command -v curl >/dev/null 2>&1; then
+        curl -fsSL -C - -o "${2}" "${1}"
+    else
+        _die "neither wget nor curl to download ${1}"
+    fi
+}
+
+_releases() { #=> the releases an ISO is built for, "number codename" a line: the only place they are named
+    printf "%s\\n" "22.04 jammy" "24.04 noble" "26.04 resolute"
+}
+
+_release_line() { #release => its "number codename" line, from its number or its codename
+    _releases | awk -v release="${1}" '$1 == release || $2 == release'
+}
+
+_fetch_setup() { #source file => the minos installer in FILE: a copy of a local file, or downloaded.
+    #It carries the key of the minos archive, so whatever it installs is trusted because of it: https
+    #or a file, never plain http
+    rm -f "${2}"; mkdir -p "$(dirname "${2}")"
+    case "${1}" in
+        https://*) _fetch_url "${1}" "${2}" || _die "cannot download ${1}" ;;
+        *://*) _die "${1}: the minos installer comes from https or from a file" ;;
+        *) [ -f "${1}" ] || _die "no ${1}"; cp "${1}" "${2}" ;;
+    esac
+    grep -q '^_minos_archive_key()' "${2}" || _die "${1}: not the minos installer, it carries no archive key"
+    chmod 755 "${2}"
+}
+
+_unmount_below() { #dir => every mount below DIR undone, the deepest first
+    #the paths of /proc/mounts escape spaces and the like: WORK has none (checked before the first mount)
+    _unmount_below__dirs="$(awk -v dir="${1}/" 'index($2, dir) == 1 {print length($2), $2}' /proc/mounts |
+        sort -rn | cut -d' ' -f2)"
+    for _unmount_below__dir in ${_unmount_below__dirs}; do
+        umount "${_unmount_below__dir}" || _die "cannot unmount ${_unmount_below__dir}"
+    done
+}
+
+_prepare_work() { #work => WORK emptied: only when it is empty or one of ours, never a directory that
+    #happened to be named
+    [ ! -d "${1}" ] || [ -f "${1}/.build" ] || [ -z "$(ls -A "${1}")" ] ||
+        _die "${1} is not empty and no work of build: name another one with -w"
+    #a run that was killed may have left the build machine's /dev and /proc mounted in the system: those
+    #go first, and rm stays on WORK's file system whatever is left
+    _unmount_below "${1}"
+    rm -rf --one-file-system "${1}"; mkdir -p "${1}"; : > "${1}/.build"
+}
+
+_chroot() { #root command... => COMMAND run in ROOT with a clean environment, its messages added to the
+    #build's log, the last of them shown when it fails
+    _chroot__root="${1}"; shift
+    chroot "${_chroot__root}" env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 TERM=dumb \
+        DEBIAN_FRONTEND=noninteractive "${@}" >> "${log}" 2>&1 ||
+        { tail -n 20 "${log}" >&2; _die "${*}: failed in ${_chroot__root}, see ${log}"; }
+}
+
+_write_sources() { #root archive security => ROOT/etc/apt/sources.list, the sources the minos installer's live
+    #mode gives the systems it makes: the release and its -updates from ARCHIVE, its -security from
+    #SECURITY, every component
+    printf "%s\\n" "deb ${2} ${codename} main restricted universe multiverse" \
+        "deb ${3} ${codename}-security main restricted universe multiverse" \
+        "deb ${2} ${codename}-updates main restricted universe multiverse" > "${1}/etc/apt/sources.list"
+}
+
+_bootstrap_root() { #root => a debootstrap of the release in ROOT from MIRROR, the packages it fetches kept in
+    #CACHE/debootstrap; its sources MIRROR's until _leave_root gives it Ubuntu's own
+    _bootstrap_root__script="/usr/share/debootstrap/scripts/${codename}"
+    #a debootstrap older than the release does not know its name; it bootstraps every Ubuntu release
+    #since 7.10 with the script of that one
+    [ -e "${_bootstrap_root__script}" ] || _bootstrap_root__script="/usr/share/debootstrap/scripts/gutsy"
+    mkdir -p "${cache}/debootstrap"
+    _step "debootstrap ${codename} from ${mirror}, its messages in ${work}/debootstrap.log"
+    debootstrap --arch=amd64 --cache-dir="${cache}/debootstrap" "${codename}" "${1}" "${mirror}" \
+        "${_bootstrap_root__script}" > "${work}/debootstrap.log" 2>&1 ||
+        { tail -n 20 "${work}/debootstrap.log" >&2; _die "debootstrap ${codename} failed, see ${work}/debootstrap.log"; }
+    _step "debootstrap ${codename}: $(grep -c '^I: Retrieving ' "${work}/debootstrap.log") files retrieved"
+    rm -f "${1}/etc/apt/sources.list.d/ubuntu.sources"
+    #debootstrap copies the build machine's name; the live session is minos, as the systems the minos
+    #installer makes
+    printf "%s\\n" minos > "${1}/etc/hostname"
+    _write_sources "${1}" "${mirror}" "${mirror}"
+}
+
+_enter_root() { #root => what package scripts expect around them inside ROOT: /proc, /sys, /dev, a /run and
+    #a /tmp of their own (memory: nothing in them reaches the ISO), names resolved as here, no daemon
+    #started (policy-rc.d, as debootstrap and live-build do), and apt's downloads kept in CACHE/archives
+    mount -t proc proc "${1}/proc"
+    mount -t sysfs sysfs "${1}/sys"
+    mount --bind /dev "${1}/dev"
+    mount --bind /dev/pts "${1}/dev/pts"
+    mount -t tmpfs tmpfs "${1}/run"
+    mount -t tmpfs tmpfs "${1}/tmp"
+    mkdir -p "${cache}/archives/partial"
+    mount --bind "${cache}/archives" "${1}/var/cache/apt/archives"
+    #Ubuntu's /etc/resolv.conf is, or becomes when systemd-resolved is installed, a link to its file in
+    #/run: there, the build machine's name servers
+    mkdir -p "${1}/run/systemd/resolve"
+    grep '^nameserver' /etc/resolv.conf > "${1}/run/systemd/resolve/stub-resolv.conf" ||
+        _die "no nameserver in /etc/resolv.conf"
+    printf "%s\\n" "#!/bin/sh" "exit 101" > "${1}/usr/sbin/policy-rc.d"
+    chmod 755 "${1}/usr/sbin/policy-rc.d"
+}
+
+_leave_root() { #root => ROOT as a system to squash, then the mounts of _enter_root undone. Gone: what the
+    #package tools leave behind (live-build's chroot_hacks) and the package lists, which a system reads
+    #anew before it installs anything. The machine's id is left empty: systemd makes one at each boot of
+    #the live system, and a system copied from it makes its own
+    rm -f "${1}/usr/sbin/policy-rc.d"
+    umount "${1}/var/cache/apt/archives"
+    chroot "${1}" apt-get clean
+    find "${1}/var/lib/apt/lists" -mindepth 1 -maxdepth 1 ! -name partial ! -name lock -exec rm -rf {} +
+    #whatever mirror the build fetched from, the live system and a copy of it read Ubuntu's own archive
+    _write_sources "${1}" http://archive.ubuntu.com/ubuntu/ http://security.ubuntu.com/ubuntu/
+    rm -f "${1}/var/cache/apt/"*.bin "${1}/etc/apt/trusted.gpg~" "${1}/etc/group-" "${1}/etc/passwd-" \
+        "${1}/etc/gshadow-" "${1}/etc/shadow-" "${1}/var/cache/debconf/"*-old "${1}/var/lib/dpkg/"*-old
+    rm -f "${1}/var/log/bootstrap.log" "${1}/var/log/dpkg.log" "${1}/var/log/alternatives.log" "${1}/var/log/apt/"*.log
+    find "${1}/var/tmp" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    : > "${1}/etc/machine-id"
+    #systemd remakes at boot what /etc and /var hold from /usr (ldconfig's cache, 15 s of each boot of the
+    #live system) when they look older than /usr (ConditionNeedsUpdate): they were made with the packages
+    touch "${1}/etc/.updated" "${1}/var/.updated"
+    [ -L "${1}/var/lib/dbus/machine-id" ] || rm -f "${1}/var/lib/dbus/machine-id"
+    #the live system resolves names through systemd-resolved, as Ubuntu does
+    [ "$(readlink "${1}/etc/resolv.conf")" = "../run/systemd/resolve/stub-resolv.conf" ] ||
+        _die "${1}/etc/resolv.conf: not the link to systemd-resolved's stub-resolv.conf"
+    #a process still running in ROOT is a daemon some package started despite policy-rc.d: it would
+    #hold the mounts, and it is a fault to read, not to kill
+    _leave_root__left=""
+    for _leave_root__proc in /proc/[0-9]*; do
+        [ "$(readlink "${_leave_root__proc}/root" 2>/dev/null)" != "${1}" ] ||
+            _leave_root__left="${_leave_root__left} ${_leave_root__proc#/proc/} ($(cat "${_leave_root__proc}/comm" 2>/dev/null))"
+    done
+    [ -z "${_leave_root__left}" ] || _die "processes left running in ${1}:${_leave_root__left}"
+    for _leave_root__dir in tmp run dev/pts dev sys proc; do
+        umount "${1}/${_leave_root__dir}" || _die "cannot unmount ${1}/${_leave_root__dir}"
+    done
+}
+
+_trim_docs() { #root => ROOT/etc/dpkg/dpkg.cfg.d/minos-docs, the filter of Ubuntu's minimized images: no
+    #documentation, manual pages or translations of messages, but the copyright files, the licences of
+    #what the ISO distributes. What debootstrap unpacked before it goes too. The locales' definitions
+    #(/usr/share/i18n) stay: minos makes the locale chosen with locale-gen. A system copied from the live
+    #one keeps the filter
+    mkdir -p "${1}/etc/dpkg/dpkg.cfg.d"
+    printf "%s\\n" "#the minos ISO: no documentation, manual pages or translations of messages, as Ubuntu's" \
+        "#minimized images; the copyright files stay. Removing this file and reinstalling the packages" \
+        "#brings them back" \
+        "path-exclude=/usr/share/doc/*" "path-include=/usr/share/doc/*/copyright" "path-exclude=/usr/share/man/*" \
+        "path-exclude=/usr/share/groff/*" "path-exclude=/usr/share/info/*" "path-exclude=/usr/share/lintian/*" \
+        "path-exclude=/usr/share/linda/*" "path-exclude=/usr/share/locale/*/LC_MESSAGES/*.mo" \
+        > "${1}/etc/dpkg/dpkg.cfg.d/minos-docs"
+    find "${1}/usr/share/doc" -mindepth 1 ! -type d ! -name copyright -delete
+    find "${1}/usr/share/doc" -mindepth 1 -type d -empty -delete
+    find "${1}/usr/share/man" "${1}/usr/share/groff" "${1}/usr/share/info" "${1}/usr/share/lintian" \
+        "${1}/usr/share/linda" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || :
+    find "${1}/usr/share/locale" -path '*/LC_MESSAGES/*.mo' -delete
+}
+
+_hold_initramfs() { #root => update-initramfs a no-op in ROOT while it is built, as live-build holds it:
+    #/boot gets no initrd. The live system boots from casper's, on the ISO, and a system copied from it
+    #makes its own
+    _chroot "${1}" dpkg-divert --local --rename --add /usr/sbin/update-initramfs
+    printf "%s\\n" "#!/bin/sh" "exit 0" > "${1}/usr/sbin/update-initramfs"
+    chmod 755 "${1}/usr/sbin/update-initramfs"
+}
+
+_release_initramfs() { #root => update-initramfs back in ROOT
+    rm "${1}/usr/sbin/update-initramfs"
+    _chroot "${1}" dpkg-divert --local --rename --remove /usr/sbin/update-initramfs
+}
+
+_kernel_package() { #root => the kernel the minos installer's live mode installs on the release: its HWE
+    #kernel when it has one, else its first one. The image alone: the headers build modules, and the
+    #live system builds none
+    for _kernel_package__name in "linux-image-generic-hwe-${number}" linux-image-generic; do
+        if chroot "${1}" apt-cache show "${_kernel_package__name}" >/dev/null 2>&1; then
+            printf "%s\\n" "${_kernel_package__name}"
+            return 0
+        fi
+    done
+    _die "${codename} has no linux-image-generic"
+}
+
+_modules_wanted() { #=> the kernel modules the live system preloads, below /lib/modules/VERSION: "+ PATH"
+    #takes what starts with PATH, "- PATH" leaves it out, and the last line that matches a module decides.
+    #Whatever a module taken needs (modules.dep) is taken too, wherever it is
+    #the wired and the wireless network: the cards (some wireless ones still in staging), the stack,
+    #without Bluetooth
+    printf "%s\\n" "+ kernel/drivers/net/" "+ kernel/net/" "- kernel/net/bluetooth/" \
+        "+ kernel/drivers/staging/rtl8192e/" "+ kernel/drivers/staging/rtl8712/" \
+        "+ kernel/drivers/staging/rtl8723bs/" "+ kernel/drivers/staging/vt6655/" "+ kernel/drivers/staging/vt6656/"
+    #the disks and the boot medium: SATA, NVMe (behind Intel's VMD too), SCSI and its CD drives, SD and
+    #eMMC, USB and USB4, virtual disks, the device mapper and RAID, and the file systems on them
+    printf "%s\\n" "+ kernel/drivers/ata/" "+ kernel/drivers/nvme/" "+ kernel/drivers/scsi/" "+ kernel/drivers/cdrom/" \
+        "+ kernel/drivers/mmc/" "+ kernel/drivers/usb/" "+ kernel/drivers/thunderbolt/" "+ kernel/drivers/block/" \
+        "+ kernel/drivers/virtio/" "+ kernel/drivers/md/" "+ kernel/drivers/pci/" "+ kernel/fs/"
+    #the input: USB, I2C and SPI keyboards, mice and touchpads, and the laptops' own keys and radio
+    #switches; not the sensor hubs (Intel's ISH, AMD's SFH), which speak HID too
+    printf "%s\\n" "+ kernel/drivers/hid/" "- kernel/drivers/hid/intel-ish-hid/" "- kernel/drivers/hid/amd-sfh-hid/" \
+        "+ kernel/drivers/input/" "+ kernel/drivers/platform/"
+    #the buses and the glue the touchpads and the card readers of laptops hang off: Intel's LPSS (I2C,
+    #SPI, UART), its DMA, the GPIO and pin controllers that carry their interrupts
+    printf "%s\\n" "+ kernel/drivers/i2c/" "+ kernel/drivers/spi/" "+ kernel/drivers/mfd/" "+ kernel/drivers/dma/" \
+        "+ kernel/drivers/gpio/" "+ kernel/drivers/pinctrl/" "+ kernel/drivers/acpi/"
+    #a basic display: the firmware's framebuffer, through simpledrm (built into the kernel where it is not
+    #a module, as the framebuffer it finds: sysfb)
+    printf "%s\\n" "+ kernel/drivers/gpu/drm/tiny/simpledrm.ko"
+    #the cards of virtual machines, each by its own driver: the firmware's framebuffer keeps the one mode it
+    #was left in, and a card's driver changes modes. VMware's and VirtualBox's VMSVGA (vmwgfx), VirtualBox's
+    #VBoxVGA and VBoxSVGA (vboxvideo), QEMU's VGA (bochs) and virtio-gpu; none asks for firmware
+    printf "%s\\n" "+ kernel/drivers/gpu/drm/vmwgfx/vmwgfx.ko" "+ kernel/drivers/gpu/drm/vboxvideo/vboxvideo.ko" \
+        "+ kernel/drivers/gpu/drm/virtio/virtio-gpu.ko" "+ kernel/drivers/gpu/drm/tiny/bochs.ko"
+    #what all of them ask for by name rather than by symbol: cryptography and the kernel's own libraries
+    printf "%s\\n" "+ kernel/crypto/" "+ kernel/arch/x86/crypto/" "+ kernel/lib/"
+}
+
+_fetch_debs() { #root list package... => the packages installing PACKAGES in ROOT would bring, downloaded
+    #to CACHE/archives and named in LIST, a file a line; none installed
+    _fetch_debs__root="${1}"; _fetch_debs__list="${2}"; shift 2
+    _chroot "${_fetch_debs__root}" apt-get install -y --no-install-recommends --download-only "${@}"
+    #the packages apt would install, "name version"
+    chroot "${_fetch_debs__root}" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 \
+        apt-get install -s --no-install-recommends "${@}" |
+        awk '$1 == "Inst" {sub(/^\(/, "", $3); print $2, $3}' > "${_fetch_debs__list}.packages"
+    [ -s "${_fetch_debs__list}.packages" ] || _die "installing ${*} installs nothing"
+    : > "${_fetch_debs__list}"
+    while read -r _fetch_debs__name _fetch_debs__version; do
+        set -- "${cache}/archives/${_fetch_debs__name}_$(printf "%s" "${_fetch_debs__version}" | sed 's/:/%3a/')_"*.deb
+        [ -f "${1}" ] || _die "${_fetch_debs__name} ${_fetch_debs__version}: not downloaded to ${cache}/archives"
+        printf "%s\\n" "${1}" >> "${_fetch_debs__list}"
+    done < "${_fetch_debs__list}.packages"
+}
+
+_trim_kernel() { #root kernel => ROOT/etc/dpkg/dpkg.cfg.d/minos-live, written from the packages installing
+    #KERNEL brings, read before any of them is unpacked: dpkg keeps out the kernel modules
+    #_modules_wanted does not take and the firmware no module taken asks for (modinfo's firmware lines)
+    _trim_kernel__root="${1}"; _trim_kernel__kernel="${2}"
+    _trim_kernel__dir="${work}/kernel"; _trim_kernel__tree="${work}/kernel/tree"
+    mkdir -p "${_trim_kernel__tree}"
+    _step "${_trim_kernel__kernel}: its packages, read to keep its modules and firmware for the network and booting"
+    _fetch_debs "${_trim_kernel__root}" "${_trim_kernel__dir}/debs" "${_trim_kernel__kernel}"
+    while read -r _trim_kernel__deb; do
+        dpkg-deb -x "${_trim_kernel__deb}" "${_trim_kernel__tree}" || _die "cannot unpack ${_trim_kernel__deb}"
+    done < "${_trim_kernel__dir}/debs"
+    #/lib is /usr/lib on the releases minos builds for: the files of both, in one place
+    if [ -d "${_trim_kernel__tree}/lib" ] && [ ! -L "${_trim_kernel__tree}/lib" ]; then
+        mkdir -p "${_trim_kernel__tree}/usr/lib"
+        cp -a "${_trim_kernel__tree}/lib/." "${_trim_kernel__tree}/usr/lib/"
+        rm -rf "${_trim_kernel__tree:?}/lib"
+    fi
+    [ -e "${_trim_kernel__tree}/lib" ] || ln -s usr/lib "${_trim_kernel__tree}/lib"
+    _trim_kernel__version=""
+    for _trim_kernel__modules in "${_trim_kernel__tree}/usr/lib/modules/"*; do
+        [ -d "${_trim_kernel__modules}" ] || continue
+        [ -z "${_trim_kernel__version}" ] || _die "${_trim_kernel__kernel} brings two kernels: ${_trim_kernel__version}, ${_trim_kernel__modules##*/}"
+        _trim_kernel__version="${_trim_kernel__modules##*/}"
+    done
+    [ -n "${_trim_kernel__version}" ] || _die "${_trim_kernel__kernel} brings no kernel modules"
+    _trim_kernel__modules="${_trim_kernel__tree}/usr/lib/modules/${_trim_kernel__version}"
+    depmod -b "${_trim_kernel__tree}" "${_trim_kernel__version}" || _die "depmod failed on ${_trim_kernel__modules}"
+
+    #the modules: those _modules_wanted takes, then what they need
+    (cd "${_trim_kernel__modules}" && find kernel -name '*.ko*' -type f) | sort > "${_trim_kernel__dir}/modules.all"
+    _modules_wanted | awk 'NR == FNR {sign[NR] = $1; path[NR] = $2; rules = NR; next}
+        {keep = 0; for (i = 1; i <= rules; i++) if (index($0, path[i]) == 1) keep = (sign[i] == "+"); if (keep) print}' \
+        - "${_trim_kernel__dir}/modules.all" > "${_trim_kernel__dir}/modules.wanted"
+    awk -F ': *' 'NR == FNR {wanted[$0] = 1; next}
+        $1 in wanted {print $1; deps = split($2, dep, " "); for (i = 1; i <= deps; i++) print dep[i]}' \
+        "${_trim_kernel__dir}/modules.wanted" "${_trim_kernel__modules}/modules.dep" | sort -u > "${_trim_kernel__dir}/modules.kept"
+
+    #the firmware: the files the kept modules name, matched as the kernel's loader would (also
+    #compressed), and where the links among them lead
+    _trim_kernel__firmware="$(cd "${_trim_kernel__tree}/usr/lib/firmware" 2>/dev/null && pwd -P)" ||
+        _die "${_trim_kernel__kernel} brings no firmware"
+    sed "s|^|${_trim_kernel__modules}/|" "${_trim_kernel__dir}/modules.kept" | xargs modinfo -F firmware |
+        sort -u > "${_trim_kernel__dir}/firmware.named"
+    while read -r _trim_kernel__name; do
+        _firmware_files "${_trim_kernel__firmware}" "${_trim_kernel__name}"
+    done < "${_trim_kernel__dir}/firmware.named" | sort -u > "${_trim_kernel__dir}/firmware.kept"
+    (cd "${_trim_kernel__firmware}" && find . ! -type d | sed 's|^\./||') | sort > "${_trim_kernel__dir}/firmware.all"
+    _step "${_trim_kernel__kernel}: $(wc -l < "${_trim_kernel__dir}/modules.kept") modules of $(wc -l < "${_trim_kernel__dir}/modules.all") kept ($(_size_of "${_trim_kernel__modules}" "${_trim_kernel__dir}/modules.kept") of $(_size_of "${_trim_kernel__modules}" "${_trim_kernel__dir}/modules.all") MiB), $(wc -l < "${_trim_kernel__dir}/firmware.kept") firmware files of $(wc -l < "${_trim_kernel__dir}/firmware.all") ($(_size_of "${_trim_kernel__firmware}" "${_trim_kernel__dir}/firmware.kept") of $(_size_of "${_trim_kernel__firmware}" "${_trim_kernel__dir}/firmware.all") MiB)"
+
+    #dpkg's filters, /lib and /usr/lib alike: packages name their files either way. A system copied from
+    #the live one goes without them (_live_only) and gets the rest back with minos-untrim (_write_untrim)
+    mkdir -p "${_trim_kernel__root}/etc/dpkg/dpkg.cfg.d"
+    _live_only "${_trim_kernel__root}" /etc/dpkg/dpkg.cfg.d/minos-live
+    { printf "%s\\n" "#the minos ISO: the live system keeps the kernel modules and the firmware of the network and" \
+          "#of booting, nothing else. A system copied from it removes this file and reinstalls the packages" \
+          "#/var/lib/minos/live-trimmed lists (apt-get install --reinstall), which brings the rest back"
+      for _trim_kernel__lib in /lib /usr/lib; do
+          printf "%s\\n" "path-exclude=${_trim_kernel__lib}/modules/*/kernel/*"
+          _modules_wanted | awk -v lib="${_trim_kernel__lib}" \
+              '{printf "path-%s=%s/modules/*/%s*\n", ($1 == "+" ? "include" : "exclude"), lib, $2}'
+          #what the modules taken need, outside what _modules_wanted takes
+          comm -23 "${_trim_kernel__dir}/modules.kept" "${_trim_kernel__dir}/modules.wanted" |
+              sed "s|^|path-include=${_trim_kernel__lib}/modules/*/|"
+          printf "%s\\n" "path-exclude=${_trim_kernel__lib}/firmware/*"
+          #dpkg keeps a directory the filter leaves out only for an include that names it, or whose part
+          #before its first wildcard starts with it; a file brought back into a directory left out fails
+          #to unpack. So the directories that hold the files kept are named, with and without the slash
+          #a package's directory may end with
+          awk -F / '{dir = ""; for (i = 1; i < NF; i++) {dir = dir (i > 1 ? "/" : "") $i; print dir; print dir "/"}}' \
+              "${_trim_kernel__dir}/firmware.kept" | sort -u | sed "s|^|path-include=${_trim_kernel__lib}/firmware/|"
+          sed "s|^|path-include=${_trim_kernel__lib}/firmware/|" "${_trim_kernel__dir}/firmware.kept"
+      done
+    } > "${_trim_kernel__root}/etc/dpkg/dpkg.cfg.d/minos-live"
+}
+
+_firmware_files() { #firmware name => the files below FIRMWARE (a directory, its canonical path) a module's
+    #firmware line NAME takes, relative to it, as the kernel's loader finds them (also compressed): the
+    #name may be a pattern (ath11k/QCN9074/hw1.0/*), the shell expands it here; what is a directory is
+    #taken whole; where the links lead is taken too
+    for _firmware_files__match in ${1}/${2} ${1}/${2}.zst ${1}/${2}.xz; do
+        [ -e "${_firmware_files__match}" ] || [ -L "${_firmware_files__match}" ] || continue
+        find "${_firmware_files__match}" "$(readlink -f "${_firmware_files__match}")" ! -type d 2>/dev/null
+    done | while read -r _firmware_files__file; do
+        printf "%s\\n" "${_firmware_files__file}" "$(readlink -f "${_firmware_files__file}")"
+    done | sed -n "s|^${1}/||p"
+}
+
+_size_of() { #dir list => the MiB the files LIST names below DIR take
+    (cd "${1}" && tr '\n' '\0' < "${2}" | xargs -0 -r stat -c %s --) | awk '{s += $1} END {printf "%d", s / 1048576}'
+}
+
+_list_trimmed() { #root => ROOT/var/lib/minos/live-trimmed, the packages one of whose kernel modules or
+    #firmware files dpkg kept out of ROOT, one a line: what a system copied from it reinstalls
+    mkdir -p "${1}/var/lib/minos"
+    #grep's "file.list:/path", split where the path starts: a package's list may hold a colon (pkg:amd64.list)
+    grep -H -E '^(/usr)?/lib/(modules/[^/]+/kernel|firmware)/' "${1}/var/lib/dpkg/info/"*.list |
+        sed 's|\.list:/|.list /|' | while read -r _list_trimmed__list _list_trimmed__path; do
+            [ -e "${1}${_list_trimmed__path}" ] || [ -L "${1}${_list_trimmed__path}" ] ||
+                printf "%s\\n" "${_list_trimmed__list##*/}"
+        done | sed 's/\.list$//; s/:[a-z0-9]*$//' | sort -u > "${1}/var/lib/minos/live-trimmed"
+    _step "dpkg kept files of $(wc -l < "${1}/var/lib/minos/live-trimmed") packages out: $(tr '\n' ' ' < "${1}/var/lib/minos/live-trimmed")"
+}
+
+_install_minos() { #root => the minos installer, run in ROOT, installs minos-desktop, as on any Ubuntu
+    cp "${work}/setup" "${1}/tmp/minos-setup"
+    _step "the minos installer installs minos-desktop"
+    _chroot "${1}" sh /tmp/minos-setup desktop
+    #the installer leaves with 0 on a system it does not support: the metapackage installed is the answer
+    # shellcheck disable=SC2016 # dpkg-query's format, not the shell's
+    [ "$(chroot "${1}" dpkg-query -W -f='${Status}' minos-desktop 2>/dev/null)" = "install ok installed" ] ||
+        { tail -n 20 "${log}" >&2; _die "minos-desktop is not installed, see ${log}"; }
+}
+
+_install_bootstrap() { #root => debootstrap and wget in ROOT: the minos installer, run in the live session,
+    #copies minos-desktop of its release, and makes anything else (minos-core, another release) from the
+    #network with them, as from any other live session. A system copied from the live one keeps them
+    _step "debootstrap and wget, for the minos installer's other modes"
+    _chroot "${1}" apt-get install -y --no-install-recommends debootstrap wget
+}
+
+_slim_root() { #root => ROOT carrying what every system the minos installer's live mode makes carries, so a
+    #system copied from it is the one live mode would bootstrap: the security updates applied by
+    #themselves and do-release-upgrade installed, and what Ubuntu's base brings and minos does not use
+    #purged. The purge is the installer's own, its function _live_slim_script read from setup and run
+    #here as live mode runs it in the systems it makes: one list, the installer's
+    _step "unattended-upgrades and ubuntu-release-upgrader-core, as the minos installer's live mode installs them"
+    _chroot "${1}" apt-get install -y --no-install-recommends unattended-upgrades ubuntu-release-upgrader-core
+    sed -n '/^_live_slim_script() {/,/^} #_live_slim_script/p' "${work}/setup" > "${work}/slim.sh"
+    grep -q '^} #_live_slim_script' "${work}/slim.sh" || _die "${work}/setup carries no _live_slim_script"
+    # shellcheck source=/dev/null # the installer's function, read above
+    . "${work}/slim.sh"
+    { printf "%s\\n" "set -e" "_step() { printf \"\\\\n[+] %s\\\\n\" \"\${*}\"; }"
+      submode="desktop" _live_slim_script; } > "${1}/tmp/minos-slim"
+    _step "what minos-desktop does not use, purged as the minos installer's live mode purges it"
+    _chroot "${1}" sh /tmp/minos-slim
+    grep '^slim: ' "${log}" | while IFS= read -r _slim_root__line; do _step "${_slim_root__line}"; done
+    rm -f "${1}/tmp/minos-slim"
+}
+
+_live_only() { #root path => PATH of ROOT, about to be changed or added for the live session alone, named in
+    #ROOT/var/lib/minos/live-only, a path a line, and kept as it is now in ROOT/var/lib/minos/live-only.d:
+    #the minos installer, copying the live system to a disk, puts that copy back, or removes PATH when
+    #there is none (a file the live session added)
+    mkdir -p "${1}/var/lib/minos"
+    ! grep -qxF "${2}" "${1}/var/lib/minos/live-only" 2>/dev/null || return 0
+    printf "%s\\n" "${2}" >> "${1}/var/lib/minos/live-only"
+    #a link is kept as a link, also one that leads out of ROOT from here
+    if [ -e "${1}${2}" ] || [ -L "${1}${2}" ]; then
+        mkdir -p "$(dirname "${1}/var/lib/minos/live-only.d${2}")"
+        cp -a "${1}${2}" "${1}/var/lib/minos/live-only.d${2}"
+    fi
+}
+
+_replace_file() { #root path awk-program => PATH of ROOT rewritten by the awk program, which exits 1 when
+    #the file is not what it expects; for the live session alone (_live_only)
+    _live_only "${1}" "${2}"
+    chroot "${1}" cat "${2}" > "${work}/replace" || _die "no ${2} in ${1}"
+    awk "${3}" "${work}/replace" > "${work}/replace.new" || _die "${2}: not the file this build knows"
+    rm -f "${1}${2}"; cp "${work}/replace.new" "${1}${2}"; chmod 644 "${1}${2}"
+}
+
+_make_live() { #root => ROOT made the live session of the ISO: casper, its user minos logged into i3 by
+    #slim, and the installer one key away.
+    #Each file changed or added here is the live session's alone (_live_only); casper, a package, the
+    #minos installer removes by name
+    _make_live__user="minos"
+    _step "the live session"
+    _chroot "${1}" apt-get install -y --no-install-recommends casper
+    #casper: the boot from the ISO, the live user (its home from /etc/skel, sudo without a password)
+    _live_only "${1}" /etc/casper.conf
+    printf "%s\\n" "#the live session of the minos ISO; casper reads it from its initrd" \
+        "export USERNAME=\"${_make_live__user}\"" "export USERFULLNAME=\"minos live session\"" \
+        "export HOST=\"minos\"" "export BUILD_SYSTEM=\"Ubuntu\"" "export FLAVOUR=\"minos\"" > "${1}/etc/casper.conf"
+    #the network is minos-desktop's own: connman takes the wired and the wireless cards, and its connman
+    #module (minos-desktop-settings) points systemd-resolved at connman's name server. Nothing here for it
+
+    #slim logs the live user in, into i3
+    _replace_file "${1}" /etc/slim.conf "
+        \$1 == \"default_user\" {\$0 = \"default_user        ${_make_live__user}\"; user = 1}
+        \$1 == \"auto_login\" {\$0 = \"auto_login          yes\"; auto = 1}
+        {print} END {exit !(user && auto)}"
+    #i3: minos' own configuration, and the installer one key away, \$Win+i, in a terminal of its own, full screen
+    # shellcheck disable=SC2016 # i3's variables, not the shell's
+    _replace_file "${1}" /etc/i3/config '
+        /^set \$Win / {win = 1} {print}
+        END {
+            print ""
+            print "#the live session of the minos ISO: the installer, one key away"
+            print "for_window [class=\"^URxvt$\" instance=\"^minos-installer$\"] fullscreen"
+            print "#        $Win+i"
+            print "bindcode $Win+31 exec urxvt -name minos-installer -title \"minos installer\" -e minos-installer"
+            exit !win
+        }'
+    #the key in minos' help (F1), which the welcome of the first login points to
+    _replace_file "${1}" /etc/minos/help '{print} /<f1>/ && !done {print "      <win><i>       ⇨  install minos (the live session)"; done = 1}
+        END {exit !done}'
+    mkdir -p "${1}/usr/local/bin"
+    _live_only "${1}" /usr/local/bin/minos-installer
+    cat > "${1}/usr/local/bin/minos-installer" << 'E=O=F'
+#!/bin/sh
+# shellcheck disable=SC2154 # answer, user, again and confirm: set by _read
+#the minos installer of the live session (Win+i), in this terminal: asks where minos goes and for whom,
+#then copies this live system there with the minos installer the medium carries (setup live desktop),
+#which needs no network. It partitions nothing by itself, cfdisk is offered for that, and it formats only
+#the partitions named here, once the name of the one for minos has been typed. What setup says also goes
+#to /tmp/minos-installer.log, and how it ended (its exit status) to /tmp/minos-installer.status
+#usage: minos-installer
+
+setup="/cdrom/minos/setup"; log="/tmp/minos-installer.log"; status="/tmp/minos-installer.status"
+trap 'stty echo 2>/dev/null' EXIT
+trap 'exit 130' INT TERM HUP
+
+_read() { #variable prompt => a line read into VARIABLE as typed; the input closed ends the installer
+    printf "%s" "${2}"
+    IFS= read -r "${1}" || { printf "\n"; exit 1; }
+}
+
+_end() { #message => said, and the terminal kept open until Enter
+    printf "%s\n" "${1}" "" "Press Enter to close."
+    IFS= read -r _end__line || :
+    exit 1
+}
+
+_partition() { #name => /dev/NAME, when it is a partition
+    _partition__dev="/dev/${1#/dev/}"
+    [ "$(lsblk -dno TYPE "${_partition__dev}" 2>/dev/null)" = "part" ] || return 1
+    printf "%s" "${_partition__dev}"
+}
+
+_fstype() { #partition => the file system on it, nothing when it has none
+    sudo blkid -o value -s TYPE "${1}" 2>/dev/null
+}
+
+printf "%s\n" "minos installer" "" \
+    "minos-desktop goes onto a partition of a disk, copied from this live system: no network is needed." \
+    "Nothing is written until the end, after you type the name of that partition."
+while :; do
+    printf "\n"; lsblk -e 7,11 -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT; printf "\n"
+    _read disk "To make or change partitions first, name a disk for cfdisk (sda, nvme0n1...), or press Enter to go on: "
+    [ -n "${disk}" ] || break
+    sudo cfdisk "/dev/${disk#/dev/}"
+done
+
+#the disk this live system runs from, when it is not a CD: none of its partitions
+medium="$(lsblk -dno PKNAME "$(findmnt -no SOURCE /cdrom 2>/dev/null)" 2>/dev/null)"
+while :; do
+    _read root "The partition for minos, mounted on / (sda2, nvme0n1p2...): "
+    if ! root="$(_partition "${root}")"; then
+        printf "%s\n" "That is not a partition."
+    elif [ -n "$(lsblk -no MOUNTPOINT "${root}")" ]; then
+        printf "%s\n" "${root} is in use, mounted on $(lsblk -no MOUNTPOINT "${root}" | head -n 1)."
+    elif [ -n "${medium}" ] && [ "$(lsblk -dno PKNAME "${root}")" = "${medium}" ]; then
+        printf "%s\n" "${root} is on the disk this live system runs from."
+    else
+        break
+    fi
+done
+#ext4 may stay, with the files on it; anything else is formatted
+format_root="yes"
+if [ "$(_fstype "${root}")" = "ext4" ]; then
+    _read answer "${root} is ext4 already: format it, erasing everything on it? [y/N] "
+    case "${answer}" in [yY]*) ;; *) format_root="" ;; esac
+fi
+
+#UEFI boots from an EFI system partition: the one on the disk of /, or another one named. One that holds
+#a file system already stays as it is: it may hold the boot loaders of other systems
+esp=""; format_esp=""
+if [ -d /sys/firmware/efi ]; then
+    found="$(lsblk -lnpo NAME,PARTTYPE "/dev/$(lsblk -dno PKNAME "${root}")" | awk '
+        tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" || tolower($2) == "0xef" {print $1; exit}')"
+    while :; do
+        _read esp "The EFI system partition, mounted on /boot/efi${found:+ (Enter for ${found})}: "
+        [ -n "${esp}" ] || esp="${found}"
+        if ! esp="$(_partition "${esp}")"; then
+            printf "%s\n" "That is not a partition."
+        elif [ "${esp}" = "${root}" ]; then
+            printf "%s\n" "That is the partition for minos."
+        else
+            case "$(_fstype "${esp}")" in
+                vfat) break ;;
+                "") format_esp="yes"; break ;;
+                *) printf "%s\n" "${esp} holds $(_fstype "${esp}"), and an EFI system partition is FAT." ;;
+            esac
+        fi
+    done
+fi
+
+while :; do
+    _read user "Your user name (lower case letters, digits, - and _, a letter first): "
+    case "${user}" in
+        ""|[!a-z]*|*[!a-z0-9_-]*) printf "%s\n" "That is not a user name minos takes." ;;
+        *) if grep -q "^${user}:" /rofs/etc/passwd; then
+               printf "%s\n" "${user} is one of the system's own users."
+           else
+               break
+           fi ;;
+    esac
+done
+while :; do
+    stty -echo 2>/dev/null
+    _read pass "Its password: "; printf "\n"
+    _read again "The password again: "; printf "\n"
+    stty echo 2>/dev/null
+    if [ -z "${pass}" ]; then
+        printf "%s\n" "The password is empty."
+    elif [ "${pass}" != "${again}" ]; then
+        printf "%s\n" "The two differ."
+    else
+        break
+    fi
+done
+
+printf "\n%s\n" "minos-desktop goes to ${root}${format_root:+, formatted as ext4 first: everything on it is erased}."
+[ -z "${esp}" ] || printf "%s\n" "Its boot loader goes to ${esp}${format_esp:+, formatted as FAT32 first}."
+printf "%s\n\n" "The user is ${user}."
+_read confirm "Type ${root#/dev/} to install minos there, anything else to cancel: "
+[ "${confirm#/dev/}" = "${root#/dev/}" ] || _end "Cancelled: nothing was written."
+
+if [ -n "${format_root}" ]; then
+    printf "%s\n" "Formatting ${root} as ext4 ..."
+    sudo mkfs.ext4 -q -F "${root}" || _end "${root} could not be formatted."
+fi
+if [ -n "${format_esp}" ]; then
+    printf "%s\n" "Formatting ${esp} as FAT32 ..."
+    if command -v mkfs.vfat >/dev/null 2>&1; then
+        sudo mkfs.vfat -F 32 "${esp}"
+    else
+        sudo busybox mkdosfs -F 32 "${esp}"
+    fi || _end "${esp} could not be formatted."
+fi
+
+set -- live desktop "${root}" "${user}" "${pass}"
+[ -z "${esp}" ] || set -- "${@}" --esp "${esp}"
+rm -f "${status}"
+{ sudo sh "${setup}" "${@}"; printf "%s\n" "${?}" > "${status}"; } 2>&1 | tee "${log}"
+if [ "$(cat "${status}" 2>/dev/null)" = "0" ]; then
+    _read answer "minos is installed. Restart now? [y/N] "
+    case "${answer}" in [yY]*) sudo reboot ;; esac
+    exit 0
+fi
+_end "The install did not finish: what setup said is in ${log}."
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :
+E=O=F
+    chmod 755 "${1}/usr/local/bin/minos-installer"
+}
+
+_write_untrim() { #root => in ROOT, disabled, minos-untrim.service and the script it runs: on a system the
+    #minos installer copied from the live one, which enables it, the packages /var/lib/minos/live-trimmed
+    #lists reinstalled whole (the copy goes without the minos-live filter, _live_only), at the first boot
+    #with a network; while that fails, again every 10 minutes and at each boot; once it works, disabled
+    mkdir -p "${1}/usr/local/sbin" "${1}/etc/systemd/system"
+    cat > "${1}/usr/local/sbin/minos-untrim" << 'E=O=F'
+#!/bin/sh
+#on a system copied from the live session of the minos ISO, run by minos-untrim.service: the kernel
+#modules and firmware the ISO left out, downloaded. The packages that carried them, which
+#/var/lib/minos/live-trimmed lists, are reinstalled whole; the service is disabled once they are
+#usage: minos-untrim
+
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+list="/var/lib/minos/live-trimmed"
+#another apt (a person's, the daily timers) may hold the lock a while: waited for, not a failure
+_apt() { apt-get -y --no-install-recommends -o DPkg::Lock::Timeout=600 "${@}"; }
+
+_missing() { #package => true when it still misses kernel modules or firmware (its documentation stays
+    #out: minos-docs)
+    dpkg --verify "${1}" 2>/dev/null | grep -q -E '^missing +(c +)?/(usr/)?lib/(modules|firmware)/'
+}
+
+printf "%s\n" "minos-untrim: reinstalling $(tr '\n' ' ' < "${list}")"
+rm -f /etc/dpkg/dpkg.cfg.d/minos-live
+#apt-get update leaves with 0 also when it reached no source, and apt-get install --reinstall of a
+#package it cannot download only says so: the package lists say whether the archive was reached
+_apt update
+[ -n "$(find /var/lib/apt/lists -maxdepth 1 -name '*_Packages*' -print)" ] ||
+    { printf "%s\n" "minos-untrim: no package list, no archive reached; again later" >&2; exit 1; }
+#each one at the version installed, or at the archive's newer one
+# shellcheck disable=SC2046 # package names, a word each
+_apt install --reinstall $(cat "${list}")
+#a kernel the archive no longer carries cannot be reinstalled: the archive's current one comes in whole
+#instead, and the next boot runs it
+# shellcheck disable=SC2016,SC2046 # dpkg-query's format, not the shell's; package names, a word each
+_apt install --only-upgrade $(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'linux-image-generic*' \
+    'linux-generic*' 2>/dev/null | awk '$1 == "ii" {print $2}')
+#whole now, but for the modules of a kernel older than the newest one installed
+newest="$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -printf '%f\n' | sort -V | tail -n 1)"; left=""
+while read -r package; do
+    if _missing "${package}"; then
+        case "${package}" in
+            linux-modules-*) [ "${package}" = "linux-modules-${newest}" ] || continue ;;
+        esac
+        left="${left} ${package}"
+    fi
+done < "${list}"
+[ -z "${left}" ] || { printf "%s\n" "minos-untrim: still without some of their files:${left}; again later" >&2; exit 1; }
+systemctl disable minos-untrim.service
+printf "%s\n" "minos-untrim: done, minos-untrim.service disabled"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :
+E=O=F
+    chmod 755 "${1}/usr/local/sbin/minos-untrim"
+    printf "%s\\n" "#a system copied from the live session of the minos ISO: the kernel modules and firmware it left out" \
+        "[Unit]" "Description=minos: the kernel modules and firmware the ISO left out, downloaded" \
+        "Wants=network-online.target" "After=network-online.target" \
+        "ConditionPathExists=/var/lib/minos/live-trimmed" "" \
+        "[Service]" "Type=oneshot" "ExecStart=/usr/local/sbin/minos-untrim" "Restart=on-failure" "RestartSec=10min" "" \
+        "[Install]" "WantedBy=multi-user.target" > "${1}/etc/systemd/system/minos-untrim.service"
+}
+
+_install_plugins() { #root => in ROOT/etc/skel, the vim, tmux and shell plugins minos' configuration names, so
+    #that a home made from it has them with no network: the live user's, whom casper makes at each boot, and
+    #that of the user the minos installer makes in a copy of the live system. minos-core-settings leaves
+    #only the plugin managers there, and its login hook (user-plugins --login) fetches the plugins at the
+    #first login of a user who lacks them. Here its own installer, user-plugins, fetches them for a user
+    #with the live user's name and home, removed afterwards: the links shundle makes in ~/.bin name that
+    #home. /etc/skel takes the three trees from it, and for the live session alone (_live_only) those links
+    #and the marks that tell the login hook nothing is left to install. A copy goes without them: there the
+    #installer configures minos-core-settings again, which puts its own /etc/skel back and runs
+    #user-plugins for the copy's user, who gets marks from it and keeps the vim and tmux plugins. Not the
+    #shell's: undoing its shundle module first, minos-core-settings removes a ~/.shundle that weighs what
+    #/etc/skel's does, and user-plugins, with no network, brings back shundle alone
+    _install_plugins__user="$(sed -n 's/^export USERNAME="\(.*\)"$/\1/p' "${1}/etc/casper.conf")"
+    [ -n "${_install_plugins__user}" ] || _die "${1}/etc/casper.conf names no live user"
+    _install_plugins__home="${1}/home/${_install_plugins__user}"; _install_plugins__skel="${1}/etc/skel"
+    _install_plugins__run="/usr/share/minos/core-settings/user-plugins"
+    [ -f "${1}${_install_plugins__run}" ] || _die "no ${_install_plugins__run} in ${1}: not this minos-core-settings"
+    _step "the vim, tmux and shell plugins, fetched for /etc/skel"
+    _chroot "${1}" useradd --create-home --shell /bin/bash "${_install_plugins__user}"
+    _chroot "${1}" su "${_install_plugins__user}" -c "sh ${_install_plugins__run} vim tmux shundle"
+    _install_plugins__found=""
+    mkdir -p "${_install_plugins__skel}/.minos/plugins" "${_install_plugins__skel}/.bin"
+    for _install_plugins__tree in vim:.vim/bundle tmux:.tmux/plugins shundle:.shundle/bundle; do
+        _install_plugins__module="${_install_plugins__tree%%:*}"; _install_plugins__dir="${_install_plugins__tree#*:}"
+        _install_plugins__count="$(find "${_install_plugins__home}/${_install_plugins__dir}" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+        #the managers say what failed on their screen alone: a module with its manager and nothing else, or
+        #one user-plugins did not mark, was not installed
+        if [ "${_install_plugins__count}" -lt 2 ] || [ ! -f "${_install_plugins__home}/.minos/plugins/${_install_plugins__module}" ]; then
+            tail -n 20 "${log}" >&2
+            _die "the ${_install_plugins__module} plugins were not installed (${_install_plugins__count} in ~/${_install_plugins__dir}), see ${log}"
+        fi
+        _install_plugins__found="${_install_plugins__found}${_install_plugins__found:+, }${_install_plugins__module} ${_install_plugins__count}"
+        rm -rf "${_install_plugins__skel:?}/${_install_plugins__dir%%/*}"
+        cp -a "${_install_plugins__home}/${_install_plugins__dir%%/*}" "${_install_plugins__skel}/"
+        _live_only "${1}" "/etc/skel/.minos/plugins/${_install_plugins__module}"
+        cp -a "${_install_plugins__home}/.minos/plugins/${_install_plugins__module}" "${_install_plugins__skel}/.minos/plugins/"
+    done
+    for _install_plugins__link in "${_install_plugins__home}/.bin/"*; do
+        [ -L "${_install_plugins__link}" ] || continue
+        _live_only "${1}" "/etc/skel/.bin/${_install_plugins__link##*/}"
+        cp -a "${_install_plugins__link}" "${_install_plugins__skel}/.bin/"
+    done
+    chown -R -h 0:0 "${_install_plugins__skel}"
+    _chroot "${1}" userdel --remove "${_install_plugins__user}"
+    #casper makes the live user at boot, and must find neither the user nor a home
+    if [ -e "${_install_plugins__home}" ] || grep -q "^${_install_plugins__user}:" "${1}/etc/passwd" "${1}/etc/group"; then
+        _die "the user ${_install_plugins__user}, made to fetch the plugins, is still in ${1}"
+    fi
+    _step "plugins in /etc/skel: ${_install_plugins__found}; $(find "${_install_plugins__skel}/.bin" -type l | wc -l) commands linked; $(du -s -B 1048576 "${_install_plugins__skel}" | cut -f1) MiB"
+}
+
+_make_initrd() { #root dir => in DIR what boots ROOT: its kernel (vmlinuz), a casper initrd made for that
+    #kernel (initrd), and the initrd's id (uuid), which the ISO carries in .disk so that casper boots from
+    #this ISO and no other
+    _make_initrd__kernel=""
+    for _make_initrd__modules in "${1}/usr/lib/modules/"*; do
+        [ -d "${_make_initrd__modules}" ] || continue
+        [ -z "${_make_initrd__kernel}" ] || _die "two kernels in ${1}: ${_make_initrd__kernel}, ${_make_initrd__modules##*/}"
+        _make_initrd__kernel="${_make_initrd__modules##*/}"
+    done
+    if [ -z "${_make_initrd__kernel}" ] || [ ! -f "${1}/boot/vmlinuz-${_make_initrd__kernel}" ]; then
+        _die "no kernel in ${1}"
+    fi
+    #a copy of the system's initramfs configuration that adds the drivers of any machine (all those the
+    #live system keeps), the id casper's hook writes, and xz, the smallest
+    cp -a "${1}/etc/initramfs-tools" "${1}/tmp/initramfs-tools"
+    printf "%s\\n" "#the initrd of the minos ISO's live session" "MODULES=most" "COMPRESS=xz" \
+        "export CASPER_GENERATE_UUID=1" > "${1}/tmp/initramfs-tools/conf.d/minos-live.conf"
+    _step "casper's initrd, for ${_make_initrd__kernel}"
+    _chroot "${1}" mkinitramfs -d /tmp/initramfs-tools -o /tmp/initrd "${_make_initrd__kernel}"
+    _chroot "${1}" unmkinitramfs /tmp/initrd /tmp/initrd.d
+    _make_initrd__uuid="$(find "${1}/tmp/initrd.d" -path '*/conf/uuid.conf' -exec cat {} +)"
+    case "${_make_initrd__uuid}" in
+        [0-9a-f]*-*-*-*-*[0-9a-f]) ;;
+        *) _die "the initrd carries no id (conf/uuid.conf): '${_make_initrd__uuid}'" ;;
+    esac
+    mkdir -p "${2}"
+    cp "${1}/tmp/initrd" "${2}/initrd"
+    cp "${1}/boot/vmlinuz-${_make_initrd__kernel}" "${2}/vmlinuz"
+    printf "%s\\n" "${_make_initrd__uuid}" > "${2}/uuid"
+    rm -rf "${1}/tmp/initramfs-tools" "${1}/tmp/initrd" "${1}/tmp/initrd.d"
+}
+
+_fetch_boot() { #root dir => in DIR/bootloader the packages that make a system copied from ROOT bootable
+    #with no network, as the minos installer's live mode installs them: GRUB for BIOS (bios.list) and the
+    #signed shim and GRUB for UEFI and Secure Boot (uefi.list), with what each needs that ROOT lacks. The
+    #two sets cannot both be installed (grub-pc and grub-efi-amd64 conflict), so ROOT installs neither and
+    #the ISO carries both. In DIR, from them, the ISO's own boot equipment: shim, GRUB's image for a CD and
+    #the MOK manager, GRUB for BIOS and its font, and GRUB's El Torito image, made by that GRUB
+    _step "the boot loaders: GRUB for BIOS; shim and GRUB, signed, for UEFI"
+    mkdir -p "${2}/bootloader" "${2}/debs"
+    _fetch_debs "${1}" "${2}/bios" grub-pc grub2-common
+    _fetch_debs "${1}" "${2}/uefi" grub-efi-amd64 grub-efi-amd64-signed shim-signed efibootmgr
+    for _fetch_boot__set in bios uefi; do
+        : > "${2}/bootloader/${_fetch_boot__set}.list"
+        while read -r _fetch_boot__deb; do
+            cp "${_fetch_boot__deb}" "${2}/bootloader/"
+            printf "%s\\n" "${_fetch_boot__deb##*/}" >> "${2}/bootloader/${_fetch_boot__set}.list"
+            dpkg-deb -x "${_fetch_boot__deb}" "${2}/debs" || _die "cannot unpack ${_fetch_boot__deb}"
+        done < "${2}/${_fetch_boot__set}"
+    done
+    _fetch_boot__debs="${2}/debs"
+    #shim: the newest one, its SBAT the archive's latest, when the package carries two
+    for _fetch_boot__shim in "${_fetch_boot__debs}/usr/lib/shim/shimx64.efi.signed.latest" \
+        "${_fetch_boot__debs}/usr/lib/shim/shimx64.efi.signed" ""; do
+        [ ! -f "${_fetch_boot__shim}" ] || break
+    done
+    [ -n "${_fetch_boot__shim}" ] || _die "shim-signed carries no shimx64.efi.signed"
+    #GRUB's image for a CD, which finds the medium by its .disk/info and reads /boot/grub/grub.cfg there
+    for _fetch_boot__file in "${_fetch_boot__shim}:bootx64.efi" \
+        "${_fetch_boot__debs}/usr/lib/grub/x86_64-efi-signed/gcdx64.efi.signed:grubx64.efi" \
+        "${_fetch_boot__debs}/usr/lib/shim/mmx64.efi:mmx64.efi" \
+        "${_fetch_boot__debs}/usr/share/grub/unicode.pf2:unicode.pf2" \
+        "${_fetch_boot__debs}/usr/lib/grub/i386-pc/boot_hybrid.img:boot_hybrid.img"; do
+        [ -f "${_fetch_boot__file%:*}" ] || _die "no ${_fetch_boot__file%:*} in the boot loaders' packages"
+        cp "${_fetch_boot__file%:*}" "${2}/${_fetch_boot__file##*:}"
+    done
+    mkdir -p "${2}/i386-pc"
+    cp "${_fetch_boot__debs}/usr/lib/grub/i386-pc/"*.mod "${_fetch_boot__debs}/usr/lib/grub/i386-pc/"*.lst "${2}/i386-pc/"
+    #the El Torito image of BIOS: GRUB's core that reads ISO 9660 through the BIOS, from /boot/grub. Made
+    #in ROOT, by the release's grub-mkimage with the release's modules
+    rm -rf "${1}/tmp/boot"; mkdir -p "${1}/tmp/boot"
+    cp "${_fetch_boot__debs}/usr/bin/grub-mkimage" "${1}/tmp/boot/grub-mkimage"
+    cp -a "${_fetch_boot__debs}/usr/lib/grub/i386-pc" "${1}/tmp/boot/i386-pc"
+    _chroot "${1}" /tmp/boot/grub-mkimage -d /tmp/boot/i386-pc -O i386-pc-eltorito -p /boot/grub \
+        -o /tmp/boot/eltorito.img biosdisk iso9660
+    cp "${1}/tmp/boot/eltorito.img" "${2}/i386-pc/eltorito.img"
+    rm -rf "${1}/tmp/boot"
+}
+
+_squash_root() { #root file => ROOT as one xz squashfs FILE, with FILE's .size (the bytes it holds unpacked)
+    #and .manifest (its packages and their versions). Blocks of 1 MiB and x86's branch filter tried on each
+    #(archiso's settings): on 24.04, 494 MiB where xz's defaults give 533 (1 MiB blocks, 504; the filter
+    #alone, 524), for twice the time
+    _step "squashing ${1}, $(du -s -x -B 1048576 "${1}" | cut -f1) MiB"
+    # shellcheck disable=SC2016 # dpkg-query's format, not the shell's
+    chroot "${1}" dpkg-query -W -f='${Package} ${Version}\n' > "${2%.squashfs}.manifest"
+    du -s -x -B 1 "${1}" | cut -f1 > "${2%.squashfs}.size"
+    mksquashfs "${1}" "${2}" -noappend -no-progress -xattrs -comp xz -b 1M -Xbcj x86 > "${work}/mksquashfs.log" 2>&1 ||
+        { tail -n 20 "${work}/mksquashfs.log" >&2; _die "mksquashfs failed on ${1}"; }
+}
+
+_write_menu() { #file => GRUB's menu, for BIOS and UEFI alike: the live session, after a few seconds. The
+    #kernel keeps the display GRUB leaves (gfxpayload=keep) and simpledrm draws on it. On BIOS that is a
+    #graphics mode GRUB sets (VBE), since text mode leaves simpledrm nothing; on UEFI it is the firmware's
+    #own (the panel's), which GRUB does not touch: when GRUB changes it (gfxterm), the kernel draws on a
+    #framebuffer the display does not scan as drawn
+    printf "%s\\n" "#the menu of the minos ISO" "set timeout=5" "" \
+        "if [ \"\${grub_platform}\" = \"pc\" ]; then" "    insmod all_video" "    if loadfont unicode; then" \
+        "        insmod gfxterm" "        set gfxmode=auto" "        terminal_output gfxterm" "    fi" "fi" "" \
+        "menuentry \"Try minos ${number}\" {" "    set gfxpayload=keep" \
+        "    linux /casper/vmlinuz quiet splash ---" "    initrd /casper/initrd" "}" > "${1}"
+}
+
+_write_efi_image() { #boot image => IMAGE, the EFI system partition of the ISO, a FAT image of just its
+    #size: shim as the firmware's default boot file, GRUB and the MOK manager beside it, where shim looks
+    _write_efi_image__kib="$(du -c -k "${1}/bootx64.efi" "${1}/grubx64.efi" "${1}/mmx64.efi" | awk 'END {print $1 + 512}')"
+    rm -f "${2}"
+    mkfs.vfat -n EFI -C "${2}" "${_write_efi_image__kib}" > /dev/null || _die "cannot make the EFI image ${2}"
+    mmd -i "${2}" ::/EFI ::/EFI/boot || _die "cannot write the EFI image ${2}"
+    for _write_efi_image__file in bootx64.efi grubx64.efi mmx64.efi; do
+        mcopy -i "${2}" "${1}/${_write_efi_image__file}" "::/EFI/boot/${_write_efi_image__file}" ||
+            _die "cannot write the EFI image ${2}"
+    done
+}
+
+_write_tree() { #work => WORK/tree, the ISO's files: casper's (the squashfs, the kernel, the initrd), GRUB's
+    #for BIOS and its menu, the EFI boot files (also in the EFI partition, for firmware that reads the ISO
+    #itself), .disk (the ISO's name, the initrd's id), the minos installer (minos/setup), the boot loaders'
+    #packages for the systems it copies (minos/bootloader) and md5sum.txt, which casper checks every file
+    #against on demand
+    _write_tree__tree="${1}/tree"; _write_tree__boot="${1}/boot"
+    mkdir -p "${_write_tree__tree}/casper" "${_write_tree__tree}/.disk" "${_write_tree__tree}/minos" \
+        "${_write_tree__tree}/boot/grub/fonts" "${_write_tree__tree}/EFI/boot"
+    cp "${_write_tree__boot}/vmlinuz" "${_write_tree__boot}/initrd" "${_write_tree__tree}/casper/"
+    printf "%s\\n" "minos ${number} \"${codename}\" amd64 ($(date -u +%Y%m%d))" > "${_write_tree__tree}/.disk/info"
+    cp "${_write_tree__boot}/uuid" "${_write_tree__tree}/.disk/casper-uuid-minos"
+    cp "${1}/setup" "${_write_tree__tree}/minos/setup"
+    cp -a "${_write_tree__boot}/bootloader" "${_write_tree__tree}/minos/bootloader"
+    cp -a "${_write_tree__boot}/i386-pc" "${_write_tree__tree}/boot/grub/i386-pc"
+    cp "${_write_tree__boot}/unicode.pf2" "${_write_tree__tree}/boot/grub/fonts/"
+    _write_menu "${_write_tree__tree}/boot/grub/grub.cfg"
+    cp "${_write_tree__boot}/bootx64.efi" "${_write_tree__boot}/grubx64.efi" "${_write_tree__boot}/mmx64.efi" \
+        "${_write_tree__tree}/EFI/boot/"
+    _write_efi_image "${_write_tree__boot}" "${1}/efi.img"
+    (cd "${_write_tree__tree}" && find . -type f ! -name eltorito.img -print0 | sort -z | xargs -0 md5sum) \
+        > "${1}/md5sum.txt"
+    mv "${1}/md5sum.txt" "${_write_tree__tree}/md5sum.txt"
+}
+
+_write_iso() { #work iso => WORK/tree written as the ISO, booted as Ubuntu's are: on BIOS by El Torito from
+    #a CD and by the hybrid MBR from a stick, both into GRUB's core; on UEFI by the EFI partition, appended
+    #after the ISO 9660 file system and named both by El Torito and by a GPT
+    rm -f "${2}"
+    xorriso -report_about WARNING -as mkisofs -r -J -joliet-long -l -iso-level 3 \
+        -V "minos ${number} amd64" \
+        --grub2-mbr "${1}/boot/boot_hybrid.img" -partition_offset 16 --mbr-force-bootable \
+        -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b "${1}/efi.img" -appended_part_as_gpt \
+        -iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7 \
+        -c /boot.catalog \
+        -b /boot/grub/i386-pc/eltorito.img -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info \
+        -eltorito-alt-boot -e --interval:appended_partition_2:all:: -no-emul-boot \
+        -o "${2}" "${1}/tree" 2> "${1}/xorriso.log" ||
+        { tail -n 20 "${1}/xorriso.log" >&2; _die "xorriso failed, its messages are in ${1}/xorriso.log"; }
+}
+
+_report_iso() { #iso work => its size, its parts and its boot equipment
+    printf "%s\\n" "iso: ${1} $(stat -c %s "${1}") B ($(($(stat -c %s "${1}") / 1048576)) MiB)"
+    for _report_iso__file in casper/filesystem.squashfs casper/initrd casper/vmlinuz; do
+        printf "%s\\n" "part: ${_report_iso__file} $(($(stat -c %s "${2}/tree/${_report_iso__file}") / 1048576)) MiB"
+    done
+    printf "%s\\n" "part: minos/bootloader $(du -s -B 1048576 "${2}/tree/minos/bootloader" | cut -f1) MiB," \
+        "$(wc -l < "${2}/tree/minos/bootloader/bios.list") packages for BIOS, $(wc -l < "${2}/tree/minos/bootloader/uefi.list") for UEFI" | paste -sd ' ' -
+    #the El Torito images (a CD) and the partition tables (a stick); 28732ac1... is the GPT's EFI type
+    xorriso -report_about WARNING -indev "${1}" -report_el_torito plain -report_system_area plain \
+        > "${2}/boot-report" 2>/dev/null || _die "xorriso cannot read ${1}"
+    awk '
+        /^El Torito boot img :/ {platform[$6] = $7; lba[$6] = $13}
+        /^El Torito img path :/ {path[$6] = $7}
+        /^System area summary:/ {sub(/^System area summary: */, ""); area = $0}
+        /^GPT type GUID *:/ && $6 == "28732ac11ff8d211ba4b00a0c93ec93b" {esp = $5}
+        /^GPT start and size :/ {start[$6] = $7; size[$6] = $8}
+        END {
+            for (i = 1; i in platform; i++) {
+                if (i in path) image = path[i]
+                else if (esp != "" && lba[i] * 4 == start[esp]) image = "the EFI partition"
+                else image = "the image at block " lba[i]
+                printf "boot: El Torito %s, %s\n", platform[i], image
+            }
+            printf "boot: %s", area
+            if (esp != "") printf ", EFI partition %s of %d KiB", esp, size[esp] / 2
+            printf "\n"
+        }' "${2}/boot-report"
+}
+
+cache="${XDG_CACHE_HOME:-${HOME}/.cache}/minos-iso"; work="output/build"; iso=""; setup="https://minos.io/s"
+mirror="http://archive.ubuntu.com/ubuntu/"
+while getopts c:w:o:s:m: _opt; do
+    case "${_opt}" in
+        c) cache="${OPTARG}" ;;
+        w) work="${OPTARG}" ;;
+        o) iso="${OPTARG}" ;;
+        s) setup="${OPTARG}" ;;
+        m) mirror="${OPTARG%/}/" ;;
+        *) sed -n '19,26s/^#//p' "${0}" >&2; exit 2 ;;
+    esac
+done
+shift "$((OPTIND - 1))"
+[ "${#}" = 1 ] || { sed -n '19,26s/^#//p' "${0}" >&2; exit 2; }
+_line="$(_release_line "${1}")"
+[ -n "${_line}" ] || _die "${1}: not a release the ISO is built for ($(_releases | tr '\n' ',' | sed 's/,$//; s/,/, /g'))"
+number="${_line% *}"; codename="${_line#* }"
+[ -n "${iso}" ] || iso="output/minos-${number}-amd64.iso"
+[ "$(id -u)" = 0 ] || _die "runs as root: debootstrap, chroot and the mounts they need"
+for _tool in debootstrap mksquashfs xorriso mkfs.vfat mmd mcopy depmod modinfo dpkg-deb md5sum chroot; do
+    command -v "${_tool}" >/dev/null 2>&1 || _die "no ${_tool}"
+done
+case "${setup}" in *://*) ;; *) setup="$(_absolute "${setup}")" ;; esac
+#apt and debootstrap check what a mirror serves against the archive's signed Release: plain http will do
+case "${mirror}" in http://?*|https://?*) ;; *) _die "${mirror}: the mirror is an http or https URI" ;; esac
+mkdir -p "${cache}"; cache="$(cd "${cache}" && pwd)"
+work="$(_absolute "${work}")"; iso="$(_absolute "${iso}")"
+#the mounts below WORK are read back from /proc/mounts, which escapes what is not plain
+case "${work}${cache}" in *[!A-Za-z0-9/._-]*) _die "${work}, ${cache}: letters, digits and / . _ - only" ;; esac
+trap '_unmount_below "${work}"' EXIT
+trap 'exit 143' INT TERM HUP
+start="$(date +%s)"
+
+_prepare_work "${work}"
+log="${work}/build.log"; root="${work}/root"
+_fetch_setup "${setup}" "${work}/setup"
+_bootstrap_root "${root}"
+_trim_docs "${root}"
+_enter_root "${root}"
+_hold_initramfs "${root}"
+_step "${codename}: updated from its -updates and -security, its messages in ${log}"
+_chroot "${root}" apt-get update
+_chroot "${root}" apt-get dist-upgrade -y
+kernel="$(_kernel_package "${root}")"
+_trim_kernel "${root}" "${kernel}"
+_step "${kernel}: installed"
+_chroot "${root}" apt-get install -y --no-install-recommends "${kernel}"
+_install_minos "${root}"
+_install_bootstrap "${root}"
+_slim_root "${root}"
+_make_live "${root}"
+_install_plugins "${root}"
+_make_initrd "${root}" "${work}/boot"
+_fetch_boot "${root}" "${work}/boot"
+_release_initramfs "${root}"
+_list_trimmed "${root}"
+_write_untrim "${root}"
+_leave_root "${root}"
+mkdir -p "${work}/tree/casper"
+_squash_root "${root}" "${work}/tree/casper/filesystem.squashfs"
+_write_tree "${work}"
+_step "writing ${iso}"
+_write_iso "${work}" "${iso}"
+_report_iso "${iso}" "${work}"
+_step "done"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

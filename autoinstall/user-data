@@ -1,0 +1,163 @@
+#cloud-config
+# The install recipe of minos: what Ubuntu's server installer (subiquity, on the live-server ISO of
+# 22.04, 24.04 and 26.04) is told to do when Packer builds a box (packers/minos.pkr.hcl). The parts of
+# the build (vagrant.yaml, bench.yaml) add what it needs, the user among them, and the template merges
+# them: a key of a part replaces the one here, and a part's early-, late- and error-commands run before
+# the ones here.
+#
+# Read from the boot line of the installer:
+#   minos=core|desktop   what to install, the minos-core or the minos-desktop metapackage (core when absent)
+#   minos.setup=URL      where the minos installer comes from (https://minos.io/s when absent); https, or
+#                        http from the very server this recipe came from (a test build's)
+#
+# minos goes in the way it goes in on an existing Ubuntu: the installer `s` (minos-org.github.com/setup)
+# runs inside the new system, adds the minos archive with the key it carries and installs the
+# metapackage without recommends. It needs the network, for `s` and for the archives.
+autoinstall:
+  version: 1
+  # the smallest base Ubuntu offers; minos brings the rest
+  source:
+    id: ubuntu-server-minimal
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  # one partition for everything: no LVM to explain or to grow
+  storage:
+    layout:
+      name: direct
+  # 26.04's installer reserves memory for a crash kernel and installs its tools (kdump-tools, crash);
+  # older installers do not know the key and pass over it
+  kernel-crash-dumps:
+    enabled: false
+  late-commands:
+    - |
+      set -eu
+      _arg_value() { #the value of KEY=value on the installer's boot line, empty when absent
+          tr ' ' '\n' < /proc/cmdline | awk -v key="${1}=" 'index($0, key) == 1 {value = substr($0, length(key) + 1)} END {print value}'
+      }
+      flavour="$(_arg_value minos)"; flavour="${flavour:-core}"
+      case "${flavour}" in
+          core|desktop) : ;;
+          *) printf "%s\n" "minos=${flavour}: the flavour is core or desktop" >&2; exit 1 ;;
+      esac
+      #setup runs as root in the new system and carries the key of the minos archive: it is the trust
+      #root of the install (installer.md). On an existing Ubuntu the person types the command and sees
+      #where it comes from; here nobody watches the fetch, so it is a download nobody on the path can
+      #swap: https, or plain http only from the server that handed over this recipe (it could rewrite the
+      #recipe itself, so it gains nothing)
+      setup="$(_arg_value minos.setup)"; setup="${setup:-https://minos.io/s}"
+      seed="$(_arg_value ds)"; seed="$(printf "%s" "${seed}" | sed -n 's|^[^;]*;s=\(http://[^/]*\)/.*$|\1/|p')"
+      command -v curl >/dev/null 2>&1 || { printf "%s\n" "curl is missing: cannot fetch ${setup}" >&2; exit 1; }
+      case "${setup}" in
+          https://*) curl --proto '=https' --tlsv1.2 -fsSL -o /target/tmp/minos-setup "${setup}" ;;
+          http://*)
+              if [ -n "${seed}" ] && [ "${setup#"${seed}"}" != "${setup}" ]; then
+                  curl --proto '=http' -fsSL -o /target/tmp/minos-setup "${setup}"
+              else
+                  printf "%s\n" "minos.setup=${setup}: https, or http from the server of this recipe (${seed:-none})" >&2
+                  exit 1
+              fi ;;
+          *) printf "%s\n" "minos.setup=${setup}: https, or http from the server of this recipe" >&2; exit 1 ;;
+      esac
+      #the installer runs from a snap: its HOME and PATH mean nothing inside the new system, and nobody
+      #is there to answer debconf
+      curtin in-target -- env HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin DEBIAN_FRONTEND=noninteractive \
+          sh /tmp/minos-setup "${flavour}" > /target/var/log/minos-setup.log 2>&1
+      rm -f /target/tmp/minos-setup
+      #setup leaves with 0 on a system it does not support: the metapackage installed is the answer
+      curtin in-target -- dpkg-query -W -f='${Status}\n' "minos-${flavour}" | grep -qx 'install ok installed'
+      #the server installer leaves the kernel's default options empty, and plymouth shows minos' boot
+      #animation (plymouth-theme-minos-comet, pulled by minos-desktop) only when the command line says
+      #"splash": without it plymouth-start.service is skipped and the boot prints the kernel's and the
+      #initrd's text. The desktop gets the options GRUB itself writes on an install of its own (setup's
+      #live mode): "quiet splash"
+      if [ "${flavour}" = "desktop" ]; then
+          sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT=.*/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"/' /target/etc/default/grub
+          curtin in-target -- update-grub > /dev/null 2>&1
+      fi
+    - |
+      #minimalism, "as few elements as possible but not less": what Ubuntu's server image brings that
+      #minos does not use goes, as it did from minos' first images (and the app-purge list of
+      #minos-desktop-settings); these are the names today. What minos needs stays: minos-FLAVOUR and
+      #everything it depends on, recursively, and dbus (hostnamectl). Ubuntu's own metapackages may go
+      #with snapd, cloud-init, apport or ubuntu-pro-client, but what they pulled is marked manual first,
+      #so the rest of the base stays. What each step leaves, in MB, goes to the install log as "slim:" lines
+      set -eu
+      log=/target/var/log/minos-setup.log
+      _used() { df -m --output=used /target | tail -1; }
+      _in() { curtin in-target -- env DEBIAN_FRONTEND=noninteractive PATH=/usr/sbin:/usr/bin:/sbin:/bin "${@}"; }
+      _installed() { _in dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' "${@}" 2>/dev/null | awk '$1 ~ /^.i/ {print $2}'; }
+      flavour="$(tr ' ' '\n' < /proc/cmdline | awk 'index($0, "minos=") == 1 {value = substr($0, 7)} END {print value}')"
+      flavour="${flavour:-core}"
+      #what stays whatever a list says: minos and its dependencies, Ubuntu's required packages, and what
+      #boots the system, reaches it, lets it be administered and upgraded
+      keep="$( { _in apt-cache depends --recurse --installed --no-recommends --no-suggests --no-conflicts \
+              --no-breaks --no-replaces --no-enhances "minos-${flavour}" | grep -v '^[ <]'
+          _in dpkg-query -W -f='${db:Status-Abbrev} ${Priority} ${Package}\n' | awk '$1 ~ /^.i/ && $2 == "required" {print $3}'
+          _installed dbus sudo openssh-server netplan.io systemd-resolved systemd-timesyncd 'grub*' 'shim*' \
+              'linux-image-*' 'linux-modules-*' initramfs-tools kbd console-setup keyboard-configuration \
+              locales tzdata ca-certificates dracut dracut-core
+          #how an installed minos moves to the next LTS (do-release-upgrade)
+          _installed ubuntu-release-upgrader-core
+          #they go after the first boot (below), never with something removed now
+          _installed cloud-init snapd
+      } | sort -u)"
+      #an autoremove takes what nothing manual needs any more: once one of Ubuntu's metapackages goes,
+      #what it pulled or only recommended (fdisk...) would follow it, and netplan.io would follow
+      #cloud-init. What stays, what those metapackages pulled and every package of priority required,
+      #important or standard are marked manual first
+      ubuntu="$(_installed ubuntu-minimal ubuntu-server-minimal ubuntu-standard ubuntu-server)" || :
+      pulled=""
+      if [ -n "${ubuntu}" ]; then
+          pulled="$(_in dpkg-query -W -f='${Depends}, ${Pre-Depends}, ${Recommends}\n' ${ubuntu} | tr ',' '\n' |
+              sed 's/[|(].*//; s/:.*//; s/ //g' | grep .)" || :
+      fi
+      manual="$( { [ -z "${pulled}" ] || _installed ${pulled}
+          printf "%s\n" "${keep}"
+          _in dpkg-query -W -f='${db:Status-Abbrev} ${Priority} ${Package}\n' |
+              awk '$1 ~ /^.i/ && $2 ~ /^(required|important|standard)$/ {print $3}'; } | sort -u)"
+      _in apt-mark manual ${manual} > /dev/null
+      _remove() { #$1 what, then packages: purge the installed ones minos does not need, and what only they pulled
+          what="${1}"; shift
+          [ "${#}" -gt 0 ] || return 1 #no names: dpkg-query would list every package
+          pkgs="$(_installed "${@}" | grep -vxF "${keep}")" || :
+          if [ -n "${pkgs}" ] && _in apt-get -s purge ${pkgs} | awk '/^Purg / {print $2}' | grep -qxF "${keep}"; then
+              #one of them takes something minos needs: keep that one, try the others one by one
+              for pkg in ${pkgs}; do
+                  if _in apt-get -s purge "${pkg}" | awk '/^Purg / {print $2}' | grep -qxF "${keep}"; then
+                      printf "slim: %s: %s kept, minos needs it or what goes with it\n" "${what}" "${pkg}" >> "${log}"
+                      pkgs="$(printf "%s\n" ${pkgs} | grep -vx "${pkg}")" || :
+                  fi
+              done
+          fi
+          if [ -n "${pkgs}" ]; then
+              printf "slim: %s purges %s\n" "${what}" "$(_in apt-get -s purge ${pkgs} | awk '/^Purg / {printf "%s ", $2}')" >> "${log}"
+              _in apt-get -y -q purge ${pkgs} >> "${log}" 2>&1
+              _in apt-get -y -q autoremove --purge >> "${log}" 2>&1
+          fi
+          printf "slim: %s %s\n" "${what}" "$(_used)" >> "${log}"
+      }
+      printf "slim: minos installed %s\n" "$(_used)" >> "${log}"
+      _remove "reports, advertising and Ubuntu Pro" apport apport-symptoms apport-core-dump-handler python3-apport \
+          python3-problem-report whoopsie popularity-contest ubuntu-report landscape-common landscape-client \
+          motd-news-config ubuntu-pro-client ubuntu-pro-client-l10n ubuntu-advantage-tools update-notifier-common \
+          pollinate sosreport
+      #cloud-init and snapd go too, after the first boot: up to 24.04 cloud-init creates the user then, and
+      #only a running snapd removes its snaps (an installed system needs a first-boot step for them; the
+      #boxes do it in packers/scripts/box.sh)
+      _remove "cloud tools" cloud-guest-utils cloud-initramfs-copymods cloud-initramfs-dyn-netconf \
+          ubuntu-cloudimage-keyring grub-legacy-ec2 lxd-installer lxd-agent-loader open-vm-tools open-iscsi
+      _remove "tools minos replaces or does not use" byobu screen eatmydata ed pastebinit run-one ltrace lshw \
+          info install-info usbutils psmisc ufw uidmap hdparm laptop-detect irqbalance os-prober needrestart \
+          software-properties-common python3-software-properties packagekit packagekit-tools iso-codes \
+          python3-babel python-babel-localedata xdg-user-dirs shared-mime-info publicsuffix mlocate plocate \
+          nano w3m ppp powermgmt-base ethtool vlan ifenslave fakeroot libc6-dev linux-libc-dev eject \
+          geoip-database krb5-locales 'language-pack-*' fonts-ubuntu-console accountsservice \
+          vim-tiny gawk xauth dmidecode bind9-host bind9-dnsutils dnsutils ftp tnftp inetutils-telnet telnet \
+          crash kdump-tools makedumpfile bpftool manpages-dev manpages binutils binutils-common \
+          'binutils-x86-64-linux-gnu' libbinutils libgprofng0 'libctf*' 'libsframe*' hwctl python3-setuptools
+      _remove "servers minos never wanted (app-purge)" xinetd sasl2-bin 'sendmail*' sensible-mda rmail \
+          bsd-mailx 'apache2*' bind9 rpcbind postfix cifs-utils 'samba*'
+      #the packages apt downloaded to install minos
+      _in apt-get clean
+      printf "slim: apt cache %s\n" "$(_used)" >> "${log}"

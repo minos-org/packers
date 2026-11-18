@@ -1,0 +1,186 @@
+#!/bin/sh
+#boot an ISO's live session in QEMU with KVM as a machine boots it, from a CD or from the ISO written to a
+#USB stick, and use it as a person would: GRUB's menu boots its entry on its own, and once i3 is up (minos'
+#wallpaper on the screen) a terminal (Win+Enter) runs a probe from a second CD as root (the live user's
+#sudo asks no password). The probe writes on the serial port, as "probe: " lines in the format ci/verdict
+#reads, what the live session says about itself: the boot (firmware, Secure Boot, kernel), the display (the
+#card's driver, its modes), where the medium and its squashfs are mounted, what slim waited for, the plugins
+#the image brought; then what every minos system must show, ci/probe-common, which the CD carries beside it
+#(the network and whether names resolve, sudo, tmux, i3's configuration, slim, the units that failed).
+#usage: [CABLE=no] live-check ISO FIRMWARE MEDIUM OUTPUT [MINUTES]
+#  FIRMWARE    bios (SeaBIOS), uefi (OVMF) or secureboot (OVMF with Secure Boot on, Microsoft's keys)
+#  MEDIUM      cd or usb
+#  CABLE=no    the network card's cable out from power on: NAME gets -nocable, and nothing must wait for it
+#  => in OUTPUT, for NAME=FIRMWARE-MEDIUM: NAME.serial.log (the probe) and the screen at GRUB's menu, on the
+#     desktop, with the probe's terminal and with the installer's (Win+i):
+#     NAME-{menu,desktop,terminal,installer}.png; exit 0 when the desktop came up within MINUTES (10), the
+#     probe found an address and resolved a name (with no cable: found no address), and with secureboot
+#     the session booted with Secure Boot on
+#needs qemu-system-x86_64, KVM, socat, xorriso and netpbm (pngtopnm, pamcut, pamchannel, pamsumm); OVMF
+#for uefi and secureboot
+
+set -eu
+iso="${1:-}"; firmware="${2:-}"; medium="${3:-}"; out="${4:-}"; minutes="${5:-10}"
+if [ ! -f "${iso}" ] || [ -z "${medium}" ] || [ -z "${out}" ]; then sed -n '8,15s/^#//p' "${0}" >&2; exit 2; fi
+cable="${CABLE:-yes}"
+name="${firmware}-${medium}"; [ "${cable}" = yes ] || name="${name}-nocable"
+
+_die() { #message => on stderr, exit 1
+    printf "%s\\n" "live-check: ${name}: ${*}" >&2
+    exit 1
+}
+
+_step() { #message => one line on stdout, with the seconds since the start
+    printf "%5ss  %s\\n" "$(($(date +%s) - start))" "${*}"
+}
+
+# shellcheck source=iso/qemu-lib
+. "$(dirname "${0}")/qemu-lib"
+
+_write_probe() { #dir => DIR/probe.iso, a CD labelled PROBE that carries the probe and ci/probe-common
+    mkdir -p "${1}/probe"
+    cp "$(dirname "${0}")/../ci/probe-common" "${1}/probe/probe-common" || _die "no ci/probe-common beside iso/"
+    cat > "${1}/probe/probe" << 'E=O=F'
+#!/bin/sh
+#live-check's probe, run as root in the live session: what it says about itself, on the serial port as
+#"probe: " lines in ci/verdict's format; first what a live session alone shows, then probe-common
+_say() { printf "probe: %-34s %s\n" "${1}" "${2}" > /dev/ttyS0; }
+hz="$(getconf CLK_TCK)"; btime="$(awk '$1 == "btime" {print $2}' /proc/stat)"
+#the 22nd field of stat, the start in ticks since the kernel started; the 2nd may hold spaces
+i3_start="$(($(cut -d')' -f2 "/proc/$(pgrep -o -x i3)/stat" | awk '{print $20}') / hz))"
+_say "i3 started" "${i3_start} s after the kernel, at $((btime + i3_start)) (epoch); uptime $(cut -d' ' -f1 /proc/uptime) s"
+secure="off"
+for var in /sys/firmware/efi/efivars/SecureBoot-*; do
+    [ -f "${var}" ] && [ "$(od -An -t u1 "${var}" | awk '{print $NF}')" = 1 ] && secure="on"
+done
+_say "firmware" "$([ -d /sys/firmware/efi ] && printf uefi || printf bios), Secure Boot ${secure}; $(dmesg | grep -m 1 -o 'Secure boot [a-z]*')"
+_say "kernel command line" "$(wc -l < /proc/modules) modules loaded; $(cat /proc/cmdline)"
+#the display: the drivers of virtual machines' cards the ISO carries (iso/build's _modules_wanted), where
+#modprobe finds them; then each card's driver and the modes its outputs offer: the firmware's framebuffer
+#(simple-framebuffer) has the one it was left in, a card's own driver has more
+drivers=""; missing=""
+for module in vmwgfx vboxvideo virtio-gpu bochs; do
+    if [ -f "$(modinfo -n "${module}" 2>/dev/null)" ]; then drivers="${drivers} ${module}"; else missing="${missing} ${module}"; fi
+done
+_say "display" "drivers${drivers}${missing:+, missing${missing}}; $(for card in /sys/class/drm/card[0-9]; do printf "%s %s, %s modes; " "${card##*/}" "$(basename "$(readlink "${card}/device/driver")")" "$(cat "${card}/${card##*/}"-*/modes 2>/dev/null | sort -u | wc -l)"; done)fb: $(tr '\n' ' ' < /proc/fb); X: $(grep -o -m 3 -E '(modeset|fbdev|vesa)\([0-9]\): [^,]*' /var/log/Xorg.0.log | tr '\n' ' ')"
+_say "medium" "$(awk '$3 == "iso9660" || $3 == "squashfs" || $2 == "/" || $2 == "/cdrom" {printf "%s on %s (%s), ", $1, $2, $3}' /proc/mounts)"
+_say "loops" "$(losetup -l -n -O NAME,BACK-FILE 2>/dev/null | tr '\n' ' ' | tr -s ' ')"
+_say "root written (MiB)" "$(df -m / | awk 'NR == 2 {print $3}')"
+#what slim waited for, the unit it started after first: a network that never comes would show here
+_say "slim's chain" "$(systemd-analyze critical-chain slim.service 2>/dev/null | sed -n '/^slim\.service/,$p' | sed 's/^[^a-zA-Z]*//' | head -n 6 | paste -sd ',' - | sed 's/,/ <- /g')"
+_say "live user" "$(id minos)"
+#the vim, tmux and shell plugins of the live user, each manager among its own, and what minos-core-settings'
+#login hook did about them: it marks a module once it has installed it, and a mark older than this session
+#came with the image
+installing=""
+for module in vim tmux shundle; do
+    mark="/home/minos/.minos/plugins/${module}"
+    { [ -f "${mark}" ] && [ "$(stat -c %Y "${mark}")" -lt "$((btime + i3_start))" ]; } || installing="${installing} ${module}"
+done
+_say "plugins" "vim $(ls /home/minos/.vim/bundle 2>/dev/null | wc -l), tmux $(ls /home/minos/.tmux/plugins 2>/dev/null | wc -l), shundle $(ls /home/minos/.shundle/bundle 2>/dev/null | wc -l); login hook: $([ -z "${installing}" ] && printf "nothing to install" || printf "the image brought no%s" "${installing}")"
+#what every minos system shows; probe-common waits up to a minute for an address and a name, since the
+#desktop may come up before the lease (with no cable, the minute goes by)
+sh "$(dirname "${0}")/probe-common" desktop minos > /tmp/probe-common 2>&1
+sed 's/^/probe: /' /tmp/probe-common > /dev/ttyS0
+if ! grep -q '^dns  *archive\.ubuntu\.com [0-9a-f:.][0-9a-f:.]* after' /tmp/probe-common; then
+    networkctl list --no-legend 2>&1 | while read -r line; do _say "networkctl" "${line}"; done
+    connmanctl services 2>&1 | while read -r line; do _say "connman" "${line}"; done
+    journalctl -b -u systemd-networkd --no-pager -q -o short-monotonic | tail -n 25 |
+        while read -r line; do _say "networkd" "${line}"; done
+fi
+journalctl -b -p err --no-pager -q | tail -n 10 | while read -r line; do _say "journal error" "${line}"; done
+_say "done" ""
+E=O=F
+    xorriso -report_about WARNING -as mkisofs -V PROBE -J -r -o "${1}/probe.iso" "${1}/probe" 2>/dev/null ||
+        _die "cannot write the probe's CD"
+}
+
+case "${firmware}" in
+    bios) machine="q35"; firmware_options="" ;;
+    uefi) machine="q35"
+          firmware_options="-drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd"
+          vars="/usr/share/OVMF/OVMF_VARS_4M.fd" ;;
+    #Secure Boot needs the firmware's own memory (SMM) and its flash locked to it
+    secureboot) machine="q35,smm=on"
+          firmware_options="-global driver=cfi.pflash01,property=secure,value=on"
+          firmware_options="${firmware_options} -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd"
+          vars="/usr/share/OVMF/OVMF_VARS_4M.ms.fd" ;;
+    *) _die "the firmware is bios, uefi or secureboot" ;;
+esac
+#the ISO is never written: snapshot=on keeps a stick's writes in a temporary file
+case "${medium}" in
+    cd)  medium_options="-drive if=none,id=boot,media=cdrom,readonly=on,format=raw,file=${iso} -device ide-cd,drive=boot,bus=ide.0,bootindex=0" ;;
+    usb) medium_options="-drive if=none,id=boot,snapshot=on,format=raw,file=${iso} -device qemu-xhci -device usb-storage,drive=boot,removable=on,bootindex=0" ;;
+    *) _die "the medium is cd or usb" ;;
+esac
+[ -c /dev/kvm ] || _die "no /dev/kvm"
+mkdir -p "${out}"; out="$(cd "${out}" && pwd)"
+run="$(mktemp -d)"; qemu=""
+trap '[ -z "${qemu}" ] || kill "${qemu}" 2>/dev/null; rm -rf "${run}"' EXIT
+trap 'exit 143' INT TERM HUP
+start="$(date +%s)"
+serial="${out}/${name}.serial.log"; rm -f "${serial}" "${out}/${name}"-*.png
+_write_probe "${run}"
+if [ "${firmware}" != bios ]; then
+    cp "${vars}" "${run}/vars.fd"
+    firmware_options="${firmware_options} -drive if=pflash,format=raw,unit=1,file=${run}/vars.fd"
+fi
+
+#the medium, the probe on the next SATA port, a network card, the serial port to a file
+_step "booting the live session of $(basename "${iso}") (${firmware}, ${medium})"
+# shellcheck disable=SC2086 # lists of options
+qemu-system-x86_64 -enable-kvm -machine "${machine}" -cpu host -smp 2 -m 4096 ${firmware_options} ${medium_options} \
+    -drive "if=none,id=probe,media=cdrom,readonly=on,format=raw,file=${run}/probe.iso" -device ide-cd,drive=probe,bus=ide.1 \
+    -netdev user,id=net0 -device virtio-net-pci,netdev=net0,id=nic0 -vga std -display none -serial "file:${serial}" \
+    -monitor "unix:${run}/monitor,server,nowait" -no-reboot -daemonize -pidfile "${run}/qemu.pid" -S
+qemu="$(cat "${run}/qemu.pid")"
+#the machine waits, stopped, for the cable to be pulled out or left in
+[ "${cable}" = yes ] || _monitor "set_link nic0 off" >/dev/null
+_monitor cont >/dev/null
+#GRUB's menu boots its entry after 5 s: the firmware is through in a few
+sleep 4
+_screen menu
+until _on_desktop; do
+    kill -0 "${qemu}" 2>/dev/null || _die "the machine stopped"
+    [ "$(($(date +%s) - start))" -lt "$((minutes * 60))" ] || { _screen timeout; _die "no desktop after ${minutes} min"; }
+    sleep 2
+done
+_step "the desktop"
+_screen desktop
+#a terminal (Win+Enter), and in it the probe. The wallpaper may be painted before i3 takes the keyboard:
+#a while first, and the terminal asked for again when the probe says nothing. Its first line says the
+#terminal opened; its end may take minutes more (probe-common waits a minute for a network, which with
+#no cable never comes), and is waited for apart: a slow probe is not a terminal that never opened
+sleep 10
+for _try in 1 2 3; do
+    _press meta_l-ret
+    sleep 5
+    _type "sudo mount -r -L PROBE /mnt; sudo sh /mnt/probe"
+    _press ret
+    if _wait_serial "probe: " 60; then
+        _wait_serial "probe: done" 300 || { _screen probe; _die "the probe began and did not end in 5 minutes"; }
+        break
+    fi
+    _screen "probe-${_try}"
+    [ "${_try}" != 3 ] || _die "the probe said nothing"
+done
+_screen terminal
+#the installer's key, Win+i: its terminal, full screen
+_press meta_l-i
+sleep 5
+_screen installer
+_monitor quit >/dev/null
+qemu=""
+sed -n 's/^probe: //p' "${serial}"
+if [ "${cable}" = yes ]; then
+    { grep -q "^probe: network  *[a-z][a-z0-9]* [0-9.]*/[0-9]" "${serial}" &&
+      grep -q "^probe: dns  *archive\.ubuntu\.com [0-9a-f:.][0-9a-f:.]* after" "${serial}"; } ||
+        _die "no network in the live session: no address, or no name resolved"
+else
+    grep -q "^probe: network  *no address" "${serial}" || _die "an address with the cable out"
+fi
+[ "${firmware}" != secureboot ] || grep -q "^probe: firmware  *uefi, Secure Boot on" "${serial}" ||
+    _die "booted by secureboot with Secure Boot off"
+_step "checked: ${serial}"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

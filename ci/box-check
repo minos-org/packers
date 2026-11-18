@@ -1,0 +1,178 @@
+#!/bin/sh
+#inside a booted minos box, as root: what every minos system must show (ci/probe-common, beside this
+#file), then what a box alone must: what minos' bench checks of an install in a container, asked of the
+#box's own user, and what a box must give Vagrant. One line per check; ci/verdict reads them.
+#usage: box-check FLAVOUR USER [MANIFEST]   (ci/boxes copies it and probe-common in and runs it with sudo)
+
+flavour="${1:?usage: box-check FLAVOUR USER}"; user="${2:?}"
+_line() { printf "%-34s %s\\n" "${1}" "${2}"; }
+
+#first, while the box is idle: probe-common measures the memory at idle before anything starts
+sh "$(dirname "${0}")/probe-common" "${flavour}" "${user}" || _line "probe-common" "FAIL  exited ${?}"
+_line "kernel modules" "$(for m in ahci e1000 virtio_net vboxguest vboxsf; do modinfo -n "${m}" >/dev/null 2>&1 && printf "%s " "${m}" || printf "%s " "NO-${m}"; done)"
+#what a guest needs of the kernel after the drivers it never uses were taken out (packers/scripts/box.sh)
+_line "modprobe, kept drivers" "$(for m in virtio_net virtio_blk virtio_scsi e1000 e1000e ahci sd_mod zram ext4 vfat nf_tables overlay vboxguest vboxsf vboxvideo vmwgfx; do modprobe -n -q "${m}" 2>/dev/null && printf "%s " "${m}" || printf "%s " "MISSING-${m}"; done)"
+#the modules left find every symbol they need: one that links against a trimmed one fails when it loads,
+#which the dry run above cannot tell (on 5.15 drm_kms_helper needs cec, and every graphics driver needs it)
+map="/boot/System.map-$(uname -r)"
+_line "modules missing a symbol" "$([ -f "${map}" ] || printf "%s" "no ${map}: ")$(depmod -n -e -F "${map}" "$(uname -r)" 2>&1 >/dev/null | sed -n 's|.*/\([^/]*\.ko[.a-z]*\) needs unknown symbol.*|\1|p' | sort -u | tr '\n' ' ' | cut -c1-300 | grep . || echo none)"
+#what network-online.target waits for: Vagrant's /vagrant (_netdev) puts it before the login, and the boxes
+#leave connman's wait out of it (packers/scripts/box.sh)
+state="$(systemctl is-enabled connman-wait-online.service 2>/dev/null)"
+_line "network-online.target" "connman-wait-online ${state:-not installed}; waits for: $(systemctl list-dependencies --plain --no-pager network-online.target 2>/dev/null | sed 1d | awk '{printf "%s ", $1}' | grep . || echo nothing)"
+_line "/tmp" "$(findmnt -n -o FSTYPE,OPTIONS /tmp)"
+
+#learn's commands, through shundle, in the user's interactive shell
+su - "${user}" -c 'bash -ic "command -v wcd fuck diff-so-fancy battery cmdfound > /var/tmp/box-commands; cmdfound --version > /var/tmp/box-version"' >/dev/null 2>&1
+_line "the owner's commands, by shundle" "$(tr '\n' ' ' < /var/tmp/box-commands 2>/dev/null | cut -c1-170 | grep . || echo "NOT ON THE PATH"); $(su - "${user}" -c 'ls ~/.bin 2>/dev/null | wc -l' 2>/dev/null | tail -1) commands in ~/.bin"
+#a command that isn't installed must reach cmdfound: the handler of the user's shell => fuck => cmdfound.
+#A stand-in takes cmdfound's place while the question is asked and writes down what it was called with
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "reached with: ${*}" > /var/tmp/box-reached' > /var/tmp/stand-in-cmdfound && chmod 755 /var/tmp/stand-in-cmdfound
+su - "${user}" -c 'mv ~/.bin/cmdfound ~/.bin/cmdfound.real && ln -s /var/tmp/stand-in-cmdfound ~/.bin/cmdfound; bash -ic "surely-not-installed --flag"; mv -f ~/.bin/cmdfound.real ~/.bin/cmdfound' >/dev/null 2>&1
+_line "cmdfound" "$(head -1 /var/tmp/box-version 2>/dev/null | cut -c1-40 | grep . || echo "DOES NOT RUN"); a missing command of ${user}: $(cut -c1-80 /var/tmp/box-reached 2>/dev/null | grep . || echo "NOT REACHED")"
+rm -f /var/tmp/box-commands /var/tmp/box-version /var/tmp/box-reached /var/tmp/stand-in-cmdfound
+
+#what Ubuntu's server seed brings, no minos package asks for and packers/scripts/box.sh purges (polkit
+#from the core boxes only): none is left
+leftovers="unattended-upgrades networkd-dispatcher dbus-user-session"
+[ "${flavour}" = "desktop" ] || leftovers="${leftovers} polkitd pkexec policykit-1"
+# shellcheck disable=SC2086 # a list of packages
+_line "leftovers" "$(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' ${leftovers} 2>/dev/null | awk '$1 ~ /^.i/ {printf "%s ", $2}' | grep . || echo none)"
+
+if [ "${flavour}" = "desktop" ]; then
+    #i3 and the compositor on the display slim's Xorg holds, before anyone logs in (each still running
+    #when its 5 seconds are over)
+    xauth="$(ls /var/run/slim.auth 2>/dev/null)"
+    DISPLAY=:0 XAUTHORITY="${xauth}" timeout 5 compton --config /etc/xdg/compton.conf >/var/tmp/box-compton 2>&1; up="${?}"
+    _line "compton on :0" "$([ "${up}" = "124" ] && echo "starts and stays up" || echo "EXITED (${up}): $(head -2 /var/tmp/box-compton | tr '\n' ' ' | cut -c1-120)")"
+    DISPLAY=:0 XAUTHORITY="${xauth}" timeout 5 i3 -c /etc/i3/config >/var/tmp/box-i3 2>&1; up="${?}"
+    _line "i3 on :0" "$([ "${up}" = "124" ] && echo "starts and stays up" || echo "EXITED (${up}): $(grep -iE 'error|cannot' /var/tmp/box-i3 | head -2 | tr '\n' ' ' | cut -c1-120)")"
+    rm -f /var/tmp/box-compton /var/tmp/box-i3
+    #the boot animation: plymouth starts only with "splash" on the kernel's command line, draws only on a card
+    #whose driver is in the initramfs (GRUB starts the kernel on a text console on VirtualBox's and VMware's
+    #cards, so there is no firmware framebuffer to fall back on), and shows the theme only when the theme's
+    #own files are in the initramfs: a theme directory that is a link to /lib copies as the link alone, and
+    #plymouthd falls back to Ubuntu's text splash
+    plymouth="$(readlink -f /usr/share/plymouth/themes/default.plymouth)"
+    theme="$(basename "${plymouth}" .plymouth)"
+    script="$(sed -n 's|^ScriptFile=.*/plymouth/||p' "${plymouth}" 2>/dev/null)"
+    initrd="$( (lsinitrd "/boot/initrd.img-$(uname -r)" || lsinitramfs "/boot/initrd.img-$(uname -r)") 2>/dev/null)"
+    found=""; missing=""
+    # shellcheck disable=SC2086 # script is one path, or nothing for a theme without one
+    for item in sbin/plymouthd "themes/${theme}/${theme}.plymouth" ${script} vboxvideo.ko vmwgfx.ko bochs.ko virtio-gpu.ko; do
+        if printf '%s\n' "${initrd}" | grep -q -- "${item}"; then found="${found} ${item##*/}"; else missing="${missing} ${item##*/}"; fi
+    done
+    _line "boot splash" "$(grep -qw splash /proc/cmdline && echo "splash" || echo "NO splash on the command line"); theme ${theme}; in the initramfs:${found:- nothing}; missing:${missing:- none}"
+    #minos' Qt theme for Qt 6 programs (cmst from 26.04 on): qt6ct, the user's configuration, the palette it names
+    conf="$(getent passwd "${user}" | cut -d: -f6)/.config/qt6ct/qt6ct.conf"
+    palette="$(sed -n 's/^color_scheme_path=//p' "${conf}" 2>/dev/null)"
+    # shellcheck disable=SC2088 # ~/.config/... is printed as the user knows the file, never opened
+    _line "Qt 6 theme" "qt6ct $(dpkg-query -W -f='${Version}' qt6ct 2>/dev/null | grep . || echo MISSING); $([ -f "${conf}" ] && echo "~/.config/qt6ct/qt6ct.conf" || echo "NO ${conf}"); palette ${palette:-none} $([ -f "${palette}" ] && echo present || echo MISSING); $(sed -n 's/^\(style\|icon_theme\)=/\1 /p' "${conf}" 2>/dev/null | tr '\n' ' '); QT_QPA_PLATFORMTHEME $(grep -rhs 'QT_QPA_PLATFORMTHEME' /etc/environment /etc/environment.d /etc/X11/Xsession.d /etc/profile.d "$(dirname "$(dirname "${conf}")")/.."/.xsession* 2>/dev/null | head -1 | cut -c1-60 | grep . || echo "not set")"
+    #the sound cards of the machine (ci/boxes gives it Intel HDA and AC'97) and their drivers
+    _line "sound cards" "$( (command -v aplay >/dev/null 2>&1 && aplay -l 2>&1 || cat /proc/asound/cards 2>&1) | grep -E '^card|^ *[0-9] \[' | cut -c1-60 | tr '\n' ';' | grep . || echo NONE); $(for m in snd_hda_intel snd_intel8x0; do lsmod | grep -q "^${m} " && printf "%s loaded " "${m}" || printf "%s NOT loaded " "${m}"; done)$(command -v aplay >/dev/null 2>&1 || echo "(no aplay: /proc/asound/cards)")"
+fi
+
+#where the weight is. Packages by their Installed-Size, in groups: the kernel and what comes with it,
+#what minos pulls (minos-FLAVOUR and its dependencies, recursively) that the base did not have, the
+#base (the installer's minimal layer, its manifest given as $3), and the rest
+manifest="${3:-}"
+dpkg-query -W -f='${db:Status-Abbrev} ${Installed-Size} ${Package}\n' | awk '$1 ~ /^.i/ {print $2, $3}' > /var/tmp/box-sizes
+apt-cache depends --recurse --installed --no-recommends --no-suggests --no-conflicts --no-breaks \
+    --no-replaces --no-enhances "minos-${flavour}" 2>/dev/null | grep -v '^[ <]' | sort -u > /var/tmp/box-minos
+[ -f "${manifest}" ] && cut -f1 "${manifest}" | sed 's/:.*//' | sort -u > /var/tmp/box-base || : > /var/tmp/box-base
+awk 'FILENAME ~ /box-minos/ {minos[$1] = 1; next}
+     FILENAME ~ /box-base/  {base[$1] = 1; next}
+     { group = "rest"
+       if ($2 ~ /^linux-(image|modules|headers|firmware|tools|perf|main-modules)/) group = "kernel"
+       else if ($2 in base) group = "base"
+       else if ($2 in minos) group = "minos"
+       print $1, $2, group }' /var/tmp/box-minos /var/tmp/box-base /var/tmp/box-sizes > /var/tmp/box-groups
+_line "weight by origin (MB, packages)" "$(awk '{kb[$3] += $1; n[$3]++} END {for (g in kb) printf "%s %d (%d)  ", g, kb[g] / 1024, n[g]}' /var/tmp/box-groups)$([ -s /var/tmp/box-base ] || echo "(no manifest: base unknown)")"
+_line "heaviest packages (MB, origin)" "$(sort -n /var/tmp/box-groups | tail -12 | awk '{printf "%s %d %s, ", $2, $1 / 1024, $3}')"
+_line "heaviest of the rest (MB)" "$(awk '$3 == "rest"' /var/tmp/box-groups | sort -n | tail -8 | awk '{printf "%s %d, ", $2, $1 / 1024}')"
+#who asks for the heaviest packages that are neither kernel nor minos: the installed packages that depend on them
+_line "who pulls them" "$(awk '$3 != "kernel" && $3 != "minos"' /var/tmp/box-groups | sort -n | tail -6 | while read -r _ pkg _; do
+    printf "%s <= %s; " "${pkg}" "$(apt-cache rdepends --installed --no-recommends --no-suggests --no-conflicts --no-breaks \
+        --no-replaces --no-enhances "${pkg}" 2>/dev/null | sed -n '3,6s/^ *//p' | tr '\n' ' ')"; done | cut -c1-600)"
+#what Ubuntu's own metapackages hold that minos does not use: removing it would take them (simulated only)
+held="$(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' snapd cloud-init apport ubuntu-pro-client ubuntu-advantage-tools 2>/dev/null | awk '$1 ~ /^.i/ {print $2}')"
+if [ -n "${held}" ]; then
+    # shellcheck disable=SC2086 # a list of packages
+    apt-get -s purge --auto-remove ${held} 2>/dev/null | awk '/^Purg / {print $2}' > /var/tmp/box-held
+    _line "held by Ubuntu's metapackages" "$(echo ${held}): $(awk 'FILENAME ~ /box-held/ {gone[$1] = 1; next} ($2 in gone) {s += $1; n++} END {printf "%d MB in %d packages", s / 1024, n}' /var/tmp/box-held /var/tmp/box-groups) + snaps $(du -sxm /var/lib/snapd 2>/dev/null | cut -f1) MB; would take $(grep -E '^(ubuntu-|minos-)' /var/tmp/box-held | tr '\n' ' ')"
+    rm -f /var/tmp/box-held
+fi
+#the leaves: installed packages no other installed package depends on (Depends, Pre-Depends, through
+#Provides too); what is there by a recommendation, by hand or by the installer
+_line "leaves, nothing depends on them" "$(awk '
+    function names(field,   n, i, parts, name) {
+        n = split(field, parts, /[,|]/)
+        for (i = 1; i <= n; i++) { name = parts[i]; sub(/^[ \t]+/, "", name); sub(/[ \t(:].*/, "", name); if (name != "") needed[name] = 1 }
+    }
+    /^Package:/ {pkg = $2} /^Status:/ {ok = ($0 ~ / installed$/)} /^Installed-Size:/ {size = $2}
+    /^(Depends|Pre-Depends):/ {if (ok) names(substr($0, index($0, ":") + 1))}
+    /^Provides:/ {provides = substr($0, index($0, ":") + 1)}
+    /^$/ {if (ok && pkg != "") {installed[pkg] = size; prov[pkg] = provides} pkg = ""; ok = 0; size = 0; provides = ""}
+    END {
+        for (p in installed) {
+            leaf = !(p in needed); n = split(prov[p], parts, ",")
+            for (i = 1; i <= n; i++) { name = parts[i]; sub(/^[ \t]+/, "", name); sub(/[ \t(].*/, "", name); if (name in needed) leaf = 0 }
+            if (leaf) printf "%d %s\n", installed[p], p
+        }
+    }' /var/lib/dpkg/status | sort -rn | awk '{printf "%s %.1f, ", $2, $1 / 1024}' | cut -c1-900)"
+_du() { du -sxm "${@}" 2>/dev/null | awk '{s += $1} END {print s + 0}'; }
+_line "weight by place (MB)" "docs $(_du /usr/share/doc), man $(_du /usr/share/man), locales $(_du /usr/share/locale /usr/lib/locale), apt lists $(_du /var/lib/apt/lists), apt cache $(_du /var/cache/apt), snapd $(_du /var/lib/snapd /snap) ($(snap list 2>/dev/null | awk 'NR > 1 {printf "%s ", $1}')), logs $(_du /var/log), python $(_du /usr/lib/python3*)"
+#what no package lists among its files: written at install or at first boot
+_line "outside the packages (MB)" "/boot $(_du /boot), compiled python $(find /usr -name __pycache__ -type d -prune -exec du -sxk {} + 2>/dev/null | awk '{s += $1} END {print int(s / 1024)}'), /home $(_du /home) (git $(find /home -name .git -type d -prune -exec du -sxk {} + 2>/dev/null | awk '{s += $1} END {print int(s / 1024)}')), /root $(_du /root), /etc/skel $(_du /etc/skel), minos caches $(_du /usr/share/minos), dpkg $(_du /var/lib/dpkg), journal $(_du /var/log/journal)"
+#the journal of this boot (this machine's id) against what came in the box; /boot; the kernel's modules by
+#directory, the largest first
+id="$(cat /etc/machine-id 2>/dev/null)"
+_line "journal (MB)" "this boot $(_du "/var/log/journal/${id}"), shipped $(du -sxm /var/log/journal/* 2>/dev/null | grep -v "/${id}$" | awk '{s += $1} END {print s + 0}')"
+_line "/boot (MB)" "$(du -sxm /boot/* 2>/dev/null | sort -rn | head -4 | awk '{printf "%s %s, ", $2, $1}')"
+_line "kernel modules (MB)" "$(du -sxm "/lib/modules/$(uname -r)" | cut -f1) in all; $(du -sxm "/lib/modules/$(uname -r)"/kernel/* "/lib/modules/$(uname -r)"/kernel/drivers/* 2>/dev/null | grep -v '/kernel/drivers$' | sort -rn | head -10 | awk '{n = $2; sub(/.*\/kernel\//, "", n); printf "%s %s, ", n, $1}')"
+_line "heaviest in /home (MB)" "$(du -sxm /home/*/.[!.]* /home/*/* 2>/dev/null | sort -rn | head -5 | awk '{printf "%s %s, ", $2, $1}')$(du -sxm /home/*/.shundle/bundle/* 2>/dev/null | sort -rn | head -3 | awk '{printf "%s %s, ", $2, $1}')"
+_line "filesystem (MB)" "used $(df -m --output=used / | tail -1), files $(_du /), packages $(awk '{s += $1} END {print int(s / 1024)}' /var/tmp/box-sizes)"
+rm -f /var/tmp/box-sizes /var/tmp/box-minos /var/tmp/box-base /var/tmp/box-groups
+
+_line "cloud-init" "$(cloud-init status 2>/dev/null | tr '\n' ' ')"
+_line "largest packages (MB)" "$(dpkg-query -W -f='${Installed-Size} ${Package}\n' | sort -n | tail -6 | awk '{printf "%s %d, ", $2, $1 / 1024}')"
+
+#the box as a person has it, logged in and idle: a desktop through slim (slim's own auto_login, on this
+#boot only: it runs from a throwaway snapshot), a core box through this ssh session. Every process with
+#its PSS (its own pages plus its share of the shared ones, so that they add up), the package of its program
+#(a script's own file, not its interpreter's) and its command, the largest first, in /var/tmp/box-processes
+#(ci/boxes keeps it as processes.txt)
+if [ "${flavour}" = "desktop" ]; then
+    #what the i3 run above started as root (its m-autostart: the scratchpad's tmux, redshift...) goes first
+    tmux kill-server 2>/dev/null
+    pkill -u root -x 'redshift|autocutsel|compton|conky|minos-statusbar' 2>/dev/null
+    sed -i -e "s/^#*[[:space:]]*default_user[[:space:]].*/default_user        ${user}/" \
+        -e 's/^#*[[:space:]]*auto_login[[:space:]].*/auto_login          yes/' /etc/slim.conf
+    systemctl restart slim
+    sleep 40 #i3, its bar, the compositor and the user's startup settle
+    _line "logged in through slim" "$(pgrep -u "${user}" -x i3 >/dev/null && echo "i3 of ${user} up" || echo "NO i3 of ${user}"); sessions: $(loginctl list-sessions --no-legend 2>/dev/null | awk '{printf "%s %s %s; ", $3, $4, $5}')"
+fi
+ps -e -o pid= | while read -r pid; do
+    pss="$(awk '/^Pss:/ {print $2}' "/proc/${pid}/smaps_rollup" 2>/dev/null)"
+    [ "${pss:-0}" -gt 0 ] || continue #a kernel thread maps nothing
+    exe="$(readlink "/proc/${pid}/exe" 2>/dev/null)"; program="${exe}"
+    args="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null | cut -c1-160)"
+    case "${exe##*/}" in python3*|perl*|bash|dash|sh)
+        for arg in $(printf "%s\\n" "${args}" | cut -d' ' -f2-4); do
+            case "${arg}" in -*) continue ;; /*) [ -f "${arg}" ] && program="${arg}" ;; esac
+            break
+        done ;;
+    esac
+    printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "${pss}" "${pid}" "$(stat -c %U "/proc/${pid}" 2>/dev/null)" "${program}" "${args}"
+done | sort -rn > /var/tmp/box-procs
+#dpkg knows a file by the path its package ships it at, with /usr or without: both are asked, in one call
+cut -f4 /var/tmp/box-procs | sort -u | awk '/^\// {print; p = $0; if (sub(/^\/usr/, "", p)) print p; else print "/usr" $0}' > /var/tmp/box-paths
+# shellcheck disable=SC2046 # a list of paths
+dpkg -S $(cat /var/tmp/box-paths) > /var/tmp/box-owners 2>/dev/null
+awk -F'\t' 'FILENAME ~ /box-owners/ {i = index($0, ": "); owner[substr($0, i + 2)] = substr($0, 1, i - 1); next}
+    {o = owner[$4]; p = $4; if (o == "") {if (sub(/^\/usr/, "", p)) o = owner[p]; else o = owner["/usr" p]}
+     printf "%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, (o == "" ? "-" : o), $4, $5}' /var/tmp/box-owners /var/tmp/box-procs > /var/tmp/box-processes
+_line "memory logged in (MB)" "used $(free -m | awk '/^Mem:/ {print $3}'), PSS $(awk -F'\t' '{s += $1} END {printf "%d in %d processes", s / 1024, NR}' /var/tmp/box-processes); heaviest: $(head -8 /var/tmp/box-processes | awk -F'\t' '{n = $5; sub(/.*\//, "", n); printf "%s %.1f, ", n, $1 / 1024}')"
+rm -f /var/tmp/box-procs /var/tmp/box-paths /var/tmp/box-owners
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

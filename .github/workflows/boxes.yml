@@ -1,0 +1,413 @@
+# The minos boxes and the minos ISOs, built and checked on GitHub-hosted runners with KVM. A box: Packer
+# installs Ubuntu's live-server ISO with minos' recipe (minos.pkr.hcl), ci/boxes boots the result the way
+# VirtualBox and QEMU would and checks minos inside it. An ISO, one per release: ci/iso builds it from
+# scratch (iso/build) and uses it in QEMU as a person would, its live session and an install from it.
+# Both fetch Ubuntu's packages from $MIRROR (ci/mirror), and what they keep reads archive.ubuntu.com
+# whatever it is. ci/verdict says whether each passed, judging what every minos system must show
+# (ci/probe-common) alike for both. They stay as artifacts of the run for a few days. On master, once the
+# six boxes and the three ISOs pass, ci/publish makes them the one release of this repository (the older
+# ones are deleted), and minos-org/vagrant lists the boxes in the catalogs Vagrant reads
+# (minos.io/vagrant/<box>.json) within the hour. Another branch builds and checks only when run by hand
+# (the push trigger is master's), and publishes nothing.
+#
+# The boxes and the ISO are built from this repository, the minos archive and the installer at minos.io/s:
+# - a push to master that changes what they are made of here builds them all;
+# - the scheduled run builds them when the archive or the installer changed since the last ones that
+#   passed (ci/fingerprint; the fingerprint of the ones that passed is kept as a cache key);
+# - a run by hand builds them all.
+name: boxes
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - minos.pkr.hcl
+      - autoinstall/**
+      - scripts/**
+      - iso/**
+      - ci/**
+      - .github/workflows/boxes.yml
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: boxes-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash # bash -eo pipefail: a pipe fails when what feeds it fails
+
+env:
+  MIRROR: http://archive.ubuntu.com/ubuntu/ # empty: the runner's own mirror, which ci/mirror reads from its apt sources
+
+jobs:
+  decide:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      publish: ${{ steps.decide.outputs.publish }}
+      fingerprint: ${{ steps.fingerprint.outputs.hash }}
+      known: ${{ steps.known.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: fingerprint of the minos archive and the installer
+        id: fingerprint
+        run: |
+          sh ci/fingerprint > fingerprint.txt
+          hash="$(sha256sum fingerprint.txt | cut -d' ' -f1)"
+          printf 'hash=%s\n' "${hash}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "fingerprint ${hash}" "$(wc -l < fingerprint.txt) lines:"
+          cat fingerprint.txt
+
+      - name: boxes built from this fingerprint before
+        id: known
+        uses: actions/cache/restore@v6
+        with:
+          path: fingerprint.txt
+          key: boxes-fingerprint-${{ steps.fingerprint.outputs.hash }}
+          lookup-only: true
+
+      - name: decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          KNOWN: ${{ steps.known.outputs.cache-hit }}
+          HASH: ${{ steps.fingerprint.outputs.hash }}
+        run: |
+          if [ "${KNOWN}" = "true" ]; then
+              scheduled="skip: boxes of fingerprint ${HASH} passed already"
+          else
+              scheduled="build: no boxes of fingerprint ${HASH} passed yet"
+          fi
+          case "${EVENT}" in
+              schedule) build="$([ "${KNOWN}" = "true" ] && printf false || printf true)"; why="${scheduled}" ;;
+              *) build=true; why="a ${EVENT} builds them all" ;;
+          esac
+          # only master's boxes and ISOs become a release, and only when all of them pass (publish needs box and iso)
+          case "${REF}" in
+              refs/heads/master) publish="${build}"; whence="the boxes of master, if all six pass" ;;
+              *) publish=false; whence="only master publishes, this is ${REF}" ;;
+          esac
+          printf '%s\n' "build=${build}" "publish=${publish}" >> "${GITHUB_OUTPUT}"
+          printf '%s\n' "a scheduled run would ${scheduled}" "this ${EVENT} run: build=${build} (${why})" \
+              "publish=${publish} (${whence})" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  box:
+    name: ${{ matrix.flavour }}-${{ matrix.release }}
+    needs: decide
+    if: needs.decide.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { flavour: core, release: "22.04" }
+          - { flavour: core, release: "24.04" }
+          - { flavour: core, release: "26.04" }
+          - { flavour: desktop, release: "22.04" }
+          - { flavour: desktop, release: "24.04" }
+          - { flavour: desktop, release: "26.04" }
+    env:
+      FLAVOUR: ${{ matrix.flavour }}
+      RELEASE: ${{ matrix.release }}
+      NAME: minos-${{ matrix.flavour }}-${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: the runner's user opens /dev/kvm
+        run: |
+          printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+              sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          printf '%s\n' "$(nproc) cpus, $(free -m | awk '/^Mem:/ {print $2}') MB, $(df -h --output=avail / | tail -1) free on /"
+
+      # The packages come from a mirror that served 19.5 MB in 34 s to 1m42s, so their files are cached,
+      # under the names and versions apt would fetch. The Ubuntu ISOs are not: the cache gave one back
+      # no faster than releases.ubuntu.com (4 GB in 67 s both ways), and the three would fill most of
+      # the repository's cache
+      # apt says each file it fetches, and gives up on a connection silent for a minute (Acquire::*::Timeout,
+      # 120 s by default); a mirror that trickles is stopped by the step's limit
+      - name: cache keys
+        id: keys
+        timeout-minutes: 10
+        run: |
+          printf '%s\n' 'Acquire::http::Timeout "60";' 'Acquire::https::Timeout "60";' |
+              sudo tee /etc/apt/apt.conf.d/99minos-timeouts >/dev/null
+          printf '%s\n' qemu-system-x86 qemu-utils xorriso openssh-client curl unzip ca-certificates file \
+              libxml2-utils zerofree > "${RUNNER_TEMP}/packages"
+          sudo apt-get update -q
+          apt="$(xargs sudo apt-get install -qq --no-install-recommends --print-uris < "${RUNNER_TEMP}/packages" |
+              awk '{print $2}' | sort | sha256sum | cut -c1-16)"
+          tools="$(sed -n 's/^packer_version="\([^"]*\)"; vagrant_version="\([^"]*\)"$/packer-\1-vagrant-\2/p' ci/boxes)"
+          [ -n "${tools}" ] || { printf '%s\n' "no packer_version and vagrant_version in ci/boxes"; exit 1; }
+          printf '%s\n' "apt=${apt}" "tools=${tools}" | tee -a "${GITHUB_OUTPUT}"
+          sudo install -d -o "$(id -u)" /var/cache/minos-boxes-apt
+
+      - name: the packages' files (cache)
+        id: apt
+        uses: actions/cache/restore@v6
+        with:
+          path: /var/cache/minos-boxes-apt
+          key: boxes-apt-${{ steps.keys.outputs.apt }}
+
+      - name: QEMU and the tools of the checks
+        id: install
+        timeout-minutes: 15
+        run: |
+          start="$(date +%s)"
+          # no man pages index and no service restarts: they cost minutes on a runner thrown away after
+          sudo rm -f /var/lib/man-db/auto-update
+          # apt fetches as _apt into partial/
+          sudo install -d -o _apt /var/cache/minos-boxes-apt/partial
+          xargs sudo NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              -o Dir::Cache::Archives=/var/cache/minos-boxes-apt < "${RUNNER_TEMP}/packages"
+          # the cache is written by this user: apt's lock is root's and only readable by it
+          sudo rm -f /var/cache/minos-boxes-apt/lock
+          sudo chown -R "$(id -u)" /var/cache/minos-boxes-apt
+          printf '%s\n' "installed in $(($(date +%s) - start))s; $(qemu-system-x86_64 --version | head -1)"
+
+      - name: Packer, its plugin, Vagrant, the OVF schemas (cache)
+        id: tools
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/minos-boxes-cache/bin
+            ~/minos-boxes-cache/plugins
+            ~/minos-boxes-cache/keys
+            ~/minos-boxes-cache/ovf
+            ~/minos-boxes-cache/vagrant_*.deb
+          key: boxes-tools-${{ steps.keys.outputs.tools }}
+
+      - name: build and check ${{ env.NAME }}
+        run: FLAVOURS="${FLAVOUR}" sh ci/boxes "${RELEASE}" 2>&1 | tee "${RUNNER_TEMP}/checks.log"
+
+      - name: verdict
+        if: success() || failure()
+        run: |
+          mkdir -p ~/minos-boxes-out/logs/"${NAME}"
+          if [ -f "${RUNNER_TEMP}/checks.log" ]; then cp "${RUNNER_TEMP}/checks.log" ~/minos-boxes-out/logs/"${NAME}"/; fi
+          sh ci/verdict "${FLAVOUR}" "${RELEASE}" "${RUNNER_TEMP}/checks.log" | tee ~/minos-boxes-out/logs/"${NAME}"/verdict.log
+
+      - name: summary
+        if: success() || failure()
+        run: |
+          {   printf '### %s\n\n```\n' "${NAME}"
+              for log in checks verdict; do
+                  if [ -f ~/minos-boxes-out/logs/"${NAME}/${log}.log" ]; then cat ~/minos-boxes-out/logs/"${NAME}/${log}.log"; fi
+              done
+              printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # only tools that are all there are kept: ci/boxes fetches what is missing, packer init the plugin
+      - name: the tools are whole
+        id: tools_whole
+        if: (success() || failure()) && steps.tools.outputs.cache-hit != 'true'
+        run: |
+          cd ~/minos-boxes-cache
+          whole=false
+          if [ -x bin/packer ] && ls vagrant_*.deb keys/vagrant.key.ed25519 keys/vagrant.key.rsa ovf/dsp8023_1.1.0.xsd >/dev/null 2>&1 &&
+             [ -n "$(find plugins -type f -name 'packer-plugin-qemu*' 2>/dev/null)" ]; then whole=true; fi
+          printf 'whole=%s\n' "${whole}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: keep the tools (cache)
+        if: (success() || failure()) && steps.tools_whole.outputs.whole == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/minos-boxes-cache/bin
+            ~/minos-boxes-cache/plugins
+            ~/minos-boxes-cache/keys
+            ~/minos-boxes-cache/ovf
+            ~/minos-boxes-cache/vagrant_*.deb
+          key: boxes-tools-${{ steps.keys.outputs.tools }}
+
+      # the files of an install that went through; one job of the matrix writes them, the others find
+      # the key taken
+      - name: keep the packages' files (cache)
+        if: (success() || failure()) && steps.install.outcome == 'success' && steps.apt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: /var/cache/minos-boxes-apt
+          key: boxes-apt-${{ steps.keys.outputs.apt }}
+
+      - name: the box and its checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ~/minos-boxes-out/${{ env.NAME }}.box
+            ~/minos-boxes-out/${{ env.NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: the logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ env.NAME }}
+          path: ~/minos-boxes-out/logs/${{ env.NAME }}/
+          if-no-files-found: warn
+          retention-days: 3
+
+  # the ISO of minos-desktop of each release, built from scratch and used in QEMU as a person uses it
+  # (ci/iso): its live session by BIOS from a CD, by UEFI with Secure Boot from a USB stick and with the
+  # network's cable out; minos installed from it onto an empty disk with no network, by UEFI and by BIOS,
+  # and that disk alone
+  iso:
+    name: iso-${{ matrix.release }}
+    needs: decide
+    if: needs.decide.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 130
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["22.04", "24.04", "26.04"]
+    env:
+      RELEASE: ${{ matrix.release }}
+      NAME: minos-${{ matrix.release }}-amd64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: the runner's user opens /dev/kvm
+        run: |
+          printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+              sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          printf '%s\n' "$(nproc) cpus, $(free -m | awk '/^Mem:/ {print $2}') MB, $(df -h --output=avail / | tail -1) free on /"
+
+      # fetched from the runner's mirror, uncached (61 s once): apt says each file it fetches and gives up on
+      # a connection silent for a minute; a mirror that trickles is stopped by the step's limit, which once
+      # let it hang for the job's three hours with nothing in the log
+      - name: the tools of the build and of the checks
+        timeout-minutes: 15
+        run: |
+          start="$(date +%s)"
+          sudo rm -f /var/lib/man-db/auto-update
+          printf '%s\n' 'Acquire::http::Timeout "60";' 'Acquire::https::Timeout "60";' |
+              sudo tee /etc/apt/apt.conf.d/99minos-timeouts >/dev/null
+          sudo apt-get update -q
+          sudo NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              debootstrap squashfs-tools xorriso dosfstools mtools kmod wget \
+              qemu-system-x86 qemu-utils ovmf socat netpbm
+          printf '%s\n' "installed in $(($(date +%s) - start))s; $(qemu-system-x86_64 --version | head -1); debootstrap $(dpkg-query -W -f='${Version}' debootstrap)"
+
+      # as root: iso/build bootstraps a system and mounts in it, iso/install-check mounts the disks it installed.
+      # Measured once at 55 min, 35 of them the build (27 debootstrap's downloads from a slow archive);
+      # ci/iso stops the build at 60 min, the checks have their own limits
+      - name: build and check ${{ env.NAME }}.iso
+        timeout-minutes: 100
+        run: |
+          sudo env ISO_OUT="${HOME}/minos-iso-out" ISO_CACHE="${HOME}/minos-iso-cache" ISO_WORK="${RUNNER_TEMP}/minos-iso" \
+              MIRROR="${MIRROR}" sh ci/iso "${RELEASE}" 2>&1 | tee "${RUNNER_TEMP}/checks.log"
+
+      - name: verdict
+        if: success() || failure()
+        run: |
+          sudo chown -R "$(id -u)" ~/minos-iso-out 2>/dev/null || :
+          mkdir -p ~/minos-iso-out/logs/"${NAME}"
+          if [ -f "${RUNNER_TEMP}/checks.log" ]; then cp "${RUNNER_TEMP}/checks.log" ~/minos-iso-out/logs/"${NAME}"/; fi
+          sh ci/verdict iso "${RELEASE}" "${RUNNER_TEMP}/checks.log" | tee ~/minos-iso-out/logs/"${NAME}"/verdict.log
+
+      - name: summary
+        if: success() || failure()
+        run: |
+          {   printf '### %s.iso\n\n```\n' "${NAME}"
+              for log in checks verdict; do
+                  if [ -f ~/minos-iso-out/logs/"${NAME}/${log}.log" ]; then cat ~/minos-iso-out/logs/"${NAME}/${log}.log"; fi
+              done
+              printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: the ISO and its checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ~/minos-iso-out/${{ env.NAME }}.iso
+            ~/minos-iso-out/${{ env.NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: the logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-${{ env.NAME }}
+          path: ~/minos-iso-out/logs/${{ env.NAME }}/
+          if-no-files-found: warn
+          retention-days: 3
+
+  # the six boxes and the three ISOs of master, all passed, as the one release: ci/publish uploads them to a
+  # draft and checks what GitHub got against their .sha256; then it deletes the older releases with their
+  # tags and publishes the draft under the day's tag
+  publish:
+    needs: [decide, box, iso]
+    if: needs.decide.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write # the release, its tag, and the deletion of old ones
+    steps:
+      - uses: actions/checkout@v7
+
+      # one folder per box (minos-FLAVOUR-RELEASE/), each with its .box and .sha256, and one per ISO
+      # (minos-RELEASE-amd64/) with its .iso and .sha256; not the logs
+      - name: the boxes and the ISOs of this run
+        uses: actions/download-artifact@v8
+        with:
+          pattern: minos-*
+          path: ${{ runner.temp }}/boxes
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh ci/publish "${RUNNER_TEMP}/boxes" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  # the fingerprint of boxes and ISOs that all passed, and on master were published: the scheduled run
+  # skips it from now on. A publish that failed leaves it unknown, so the next scheduled run builds and
+  # publishes
+  remember:
+    needs: [decide, box, iso, publish]
+    if: >-
+      !cancelled() && needs.decide.outputs.known != 'true' && needs.box.result == 'success' &&
+      needs.iso.result == 'success' &&
+      (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: the fingerprint
+        env:
+          HASH: ${{ needs.decide.outputs.fingerprint }}
+        run: printf '%s\n' "${HASH} ${GITHUB_SHA} $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee fingerprint.txt
+
+      - uses: actions/cache/save@v6
+        with:
+          path: fingerprint.txt
+          key: boxes-fingerprint-${{ needs.decide.outputs.fingerprint }}
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # warnings and errors; the info and style notes are not gated
+      - name: shellcheck ci/ and iso/
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
+          shellcheck --version | sed -n 's/^version: /shellcheck /p'
+          shellcheck -s sh -S warning ci/boxes ci/box-check ci/probe-common ci/verdict ci/fingerprint ci/publish ci/iso \
+              ci/mirror iso/build iso/live-check iso/install-check iso/qemu-lib

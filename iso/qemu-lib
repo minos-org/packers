@@ -1,0 +1,81 @@
+# shellcheck shell=sh disable=SC2154 # run, out, name, serial and qemu: the caller's
+#the hands and eyes of live-check and install-check on a machine QEMU runs: sourced, not run. They read
+#the caller's run (its working directory, where the QEMU monitor's socket is), out (where screens go),
+#name (the run's name), serial (the serial port's log) and qemu (QEMU's pid), and call its _die
+
+_monitor() { #command => sent to the QEMU monitor, what it answers on stdout
+    printf "%s\\n" "${1}" | socat - "UNIX-CONNECT:${run}/monitor"
+}
+
+_press() { #key... => each one pressed, as the QEMU monitor names keys
+    for _press__key; do
+        _monitor "sendkey ${_press__key}" >/dev/null
+        sleep 0.2
+    done
+}
+
+_type() { #text => typed, a character at a time, as a us keyboard has them
+    _type__rest="${1}"
+    while [ -n "${_type__rest}" ]; do
+        _type__next="${_type__rest#?}"; _type__char="${_type__rest%"${_type__next}"}"
+        case "${_type__char}" in
+            [a-z0-9]) _type__key="${_type__char}" ;;
+            [A-Z]) _type__key="shift-$(printf "%s" "${_type__char}" | tr '[:upper:]' '[:lower:]')" ;;
+            " ") _type__key="spc" ;;
+            "-") _type__key="minus" ;;
+            ".") _type__key="dot" ;;
+            "/") _type__key="slash" ;;
+            "&") _type__key="shift-7" ;;
+            ";") _type__key="semicolon" ;;
+            *) _die "no key for '${_type__char}'" ;;
+        esac
+        _press "${_type__key}"
+        _type__rest="${_type__next}"
+    done
+}
+
+_screen() { #name => the screen now, as OUTPUT/NAME-SCREEN.png
+    _monitor "screendump ${out}/${name}-${1}.png -f png" >/dev/null
+    sleep 1
+}
+
+_on_desktop() { #=> true when the screen shows minos' wallpaper, which i3's autostart paints: the sun on
+    #the horizon, in the middle of the screen, redder than blue (60 more on a desktop, 0 on a console)
+    _monitor "screendump ${run}/now.png -f png" >/dev/null
+    sleep 1
+    pngtopnm "${run}/now.png" > "${run}/now.ppm" 2>/dev/null || return 1
+    # shellcheck disable=SC2046 # the width and the height, two words
+    set -- $(pamfile "${run}/now.ppm" | sed 's/.* \([0-9]*\) by \([0-9]*\) .*/\1 \2/')
+    pamcut -left "$((${1} * 2 / 5))" -width "$((${1} / 5))" -top "$((${2} * 47 / 100))" -height "$((${2} * 4 / 100))" \
+        "${run}/now.ppm" > "${run}/sun.ppm"
+    _on_desktop__red="$(pamchannel -infile "${run}/sun.ppm" 0 | pamsumm -mean -brief | cut -d. -f1)"
+    _on_desktop__blue="$(pamchannel -infile "${run}/sun.ppm" 2 | pamsumm -mean -brief | cut -d. -f1)"
+    [ "$((_on_desktop__red - _on_desktop__blue))" -gt 30 ]
+}
+
+_wait_serial() { #text seconds => true when the serial log says TEXT within SECONDS
+    _wait_serial__end="$(($(date +%s) + ${2}))"
+    until grep -q "${1}" "${serial}" 2>/dev/null; do
+        [ "$(date +%s)" -lt "${_wait_serial__end}" ] || return 1
+        kill -0 "${qemu}" 2>/dev/null || _die "the machine stopped"
+        sleep 2
+    done
+}
+
+_firmware_options() { #firmware vars => QEMU's options for FIRMWARE (bios, uefi, secureboot) on stdout,
+    #VARS the file that keeps its variables (made from OVMF's when missing; nothing for bios)
+    case "${1}" in
+        bios) printf "%s" "-machine q35" ;;
+        uefi) [ -f "${2}" ] || cp /usr/share/OVMF/OVMF_VARS_4M.fd "${2}"
+              printf "%s" "-machine q35 -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd" \
+                  " -drive if=pflash,format=raw,unit=1,file=${2}" ;;
+        #Secure Boot needs the firmware's own memory (SMM) and its flash locked to it
+        secureboot) [ -f "${2}" ] || cp /usr/share/OVMF/OVMF_VARS_4M.ms.fd "${2}"
+              printf "%s" "-machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on" \
+                  " -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd" \
+                  " -drive if=pflash,format=raw,unit=1,file=${2}" ;;
+        *) _die "the firmware is bios, uefi or secureboot" ;;
+    esac
+}
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

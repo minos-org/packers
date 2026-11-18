@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- VirtualBox's vbox:Machine (scripts/export.sh) as the OVF envelope's schema wants a vendor's section: a
+     member of the ovf:Section substitution group, an Info first. What follows the Info is VirtualBox's own
+     settings format, which only VirtualBox reads: it is taken as it is. ci/boxes validates the OVF against
+     this schema, which imports DMTF's (dsp8023_1.1.0.xsd, beside it) for everything else -->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
+    targetNamespace="http://www.virtualbox.org/ovf/machine" elementFormDefault="qualified">
+  <xs:import namespace="http://schemas.dmtf.org/ovf/envelope/1" schemaLocation="dsp8023_1.1.0.xsd"/>
+  <xs:element name="Machine" substitutionGroup="ovf:Section">
+    <xs:complexType>
+      <xs:complexContent>
+        <xs:extension base="ovf:Section_Type">
+          <xs:sequence>
+            <xs:any namespace="##any" processContents="skip" minOccurs="0" maxOccurs="unbounded"/>
+          </xs:sequence>
+        </xs:extension>
+      </xs:complexContent>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

@@ -1,0 +1,81 @@
+#cloud-config
+# The Vagrant box part: what packers/minos.pkr.hcl adds to the install recipe (user-data) when it builds
+# a box. Nothing here belongs to minos itself; it is what Packer needs to drive the installer and reach
+# the new system, and what Vagrant expects of a base box:
+# https://developer.hashicorp.com/vagrant/docs/boxes/base
+#
+# Merged into user-data by the template: these keys replace the recipe's, these commands run before the
+# recipe's (so the box is prepared when minos goes in).
+autoinstall:
+  # boxes travel: the main archive and UTC, not the country of the machine that built them
+  apt:
+    geoip: false
+  # a virtual machine needs no firmware and no modules for real hardware
+  kernel:
+    package: linux-image-virtual
+  # no swap file inside the image: it would ship as data
+  storage:
+    layout:
+      name: direct
+    swap:
+      size: 0
+  # the user and the password every base box has, plus Vagrant's insecure public keys (RSA for Vagrant
+  # before 2.3.8, ED25519 after), which Vagrant replaces with a key of its own on the first `vagrant up`.
+  # Over ssh only the keys open it: minos' libpam-captcha asks a captcha of every password login
+  identity:
+    hostname: minos
+    realname: vagrant
+    username: vagrant
+    password: "$6$minosvagrant$gONz6YhdeTr/ymxKElHJKp6lICuOTeP0r1cIU7EzUXK/GMnPfZ94uJjym2A/W84CpjCWIbmtws4Kl0rbBBDtt."
+  ssh:
+    install-server: true
+    allow-pw: true
+    authorized-keys:
+      - ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEA6NF8iallvQVp22WDkTkyrtvp9eWW6A8YVr+kz4TjGYe7gHzIw+niNltGEFHzD8+v1I2YJ6oXevct1YeS0o9HZyN1Q9qgCgzUFtdOKLv6IedplqoPkcmF0aYet2PkEDo3MlTBckFXPITAMzF8dJSIFo9D8HfdOV0IAdx4O7PtixWKn5y2hMNG0zQPyUecp4pzC6kivAIhyfHilFR61RGL+GPXQ2MWZWFYbAGjyiYJnAmCP3NOTd0jMZEnDkbUvxhMmBYSdETk1rRgm+R4LOzFUGaHqHDLKLX+FIPKcF96hrucXzcWyLbIbEgE98OHlnVYCzRdK8jlqm8tehUc9c9WhQ== vagrant insecure public key
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN1YdxBpNlzxDqfJyw/QKow1F+wvG9hXGoqiysfJOn5Y vagrant insecure public key
+  early-commands:
+    # the live installer runs an ssh server of its own: Packer would try the key there, fail and give
+    # up before the new system is up
+    - systemctl stop ssh.socket ssh.service
+  late-commands:
+    # a virtual machine loads no firmware: dpkg leaves the firmware tree out of every package the box
+    # installs from here on (minos-desktop pulls linux-firmware with the generic kernel, #50); what the
+    # image already carries goes in packers/scripts/box.sh. The wireless regulatory database stays: the
+    # desktop keeps the kernel's wireless stack, which reads it
+    - |
+      mkdir -p /target/etc/dpkg/dpkg.cfg.d
+      printf '%s\n' 'path-exclude=/lib/firmware/*' 'path-exclude=/usr/lib/firmware/*' \
+          'path-include=/lib/firmware/regulatory.db*' 'path-include=/usr/lib/firmware/regulatory.db*' \
+          > /target/etc/dpkg/dpkg.cfg.d/minos-box-firmware
+    # no documentation in a box, as in Ubuntu's minimized images: dpkg leaves /usr/share/doc (all but the
+    # copyright files, for the licences) and /usr/share/info out of every package from here on; what
+    # was unpacked before goes in packers/scripts/box.sh
+    - |
+      printf '%s\n' 'path-exclude=/usr/share/doc/*' 'path-include=/usr/share/doc/*/copyright' \
+          'path-exclude=/usr/share/info/*' > /target/etc/dpkg/dpkg.cfg.d/minos-box-docs
+    # vagrant runs sudo without a password
+    - |
+      printf '%s\n' 'vagrant ALL=(ALL) NOPASSWD: ALL' > /target/etc/sudoers.d/vagrant
+      chmod 440 /target/etc/sudoers.d/vagrant
+    # the first network card is eth0 whatever the hypervisor (QEMU builds the box, VirtualBox runs it, and
+    # each names a card after its own slot) and takes DHCP; Vagrant configures the cards it adds itself.
+    # cloud-init would write the installer's view of the network again on the first boot
+    - |
+      set -e
+      sed -i 's/^GRUB_CMDLINE_LINUX="/&net.ifnames=0 biosdevname=0 /' /target/etc/default/grub
+      curtin in-target -- update-grub
+      rm -f /target/etc/netplan/*.yaml
+      printf '%s\n' 'network:' '  version: 2' '  ethernets:' '    eth0:' '      dhcp4: true' > /target/etc/netplan/01-eth0.yaml
+      chmod 600 /target/etc/netplan/01-eth0.yaml
+      printf '%s\n' 'network: {config: disabled}' > /target/etc/cloud/cloud.cfg.d/99-box-network.cfg
+    # minos mounts /tmp as a tmpfs without exec (minos-core-settings, tmpfs module); Vagrant and Packer
+    # upload their scripts there and run them. The mount stays minos', only its options change
+    - |
+      mkdir -p /target/etc/systemd/system/tmp.mount.d
+      printf '%s\n' '[Mount]' 'Options=defaults,noatime,nosuid,nodev,size=10%' > /target/etc/systemd/system/tmp.mount.d/exec.conf
+  error-commands:
+    # the build's only window is the serial port, which the template writes to a file
+    - |
+      for log in /target/var/log/minos-setup.log /var/log/installer/subiquity-server-debug.log; do
+          if [ -f "${log}" ]; then printf '=== %s\n' "${log}"; tail -n 120 "${log}"; fi
+      done > /dev/ttyS0

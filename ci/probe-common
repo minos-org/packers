@@ -1,0 +1,70 @@
+#!/bin/sh
+#inside a running minos system, as root: what every minos system must show, whatever made it. A box runs
+#it from ci/box-check, the ISO's live session from the probe's CD (iso/live-check). One line per check, in
+#the format ci/verdict reads; ci/verdict judges these lines the same way for a box and for the ISO.
+#usage: probe-common FLAVOUR USER   => FLAVOUR core or desktop, USER the system's user (vagrant, minos)
+#       waits up to $NETWORK_WAIT seconds (60) for an address and a name resolved: a session may come up
+#       before its lease
+
+flavour="${1:?usage: probe-common FLAVOUR USER}"; user="${2:?}"
+_line() { printf "%-34s %s\\n" "${1}" "${2}"; }
+
+_line "minos-${flavour}" "$(dpkg-query -W -f='${Status} ${Version}' "minos-${flavour}" 2>&1)"
+_line "release" "$(. /etc/os-release; printf "%s" "${VERSION}")"
+#where apt fetches from, each source with its suites, read from both formats of sources with no package list
+#needed: Ubuntu's own archive, whatever mirror the system was built from (ci/mirror)
+_line "apt sources" "$(apt-get -o Debug::NoLocking=1 update --print-uris 2>/dev/null |
+    sed -n "s|^'\(.*/\)dists/\([^/]*\)/InRelease'.*|\1 \2|p" | sort -u |
+    awk '$1 != uri {printf "%s%s", (n++ ? "; " : ""), $1; uri = $1} {printf " %s", $2} END {print ""}')"
+#the kernel's metapackage: of those dpkg knows of, the one installed
+_line "kernel" "$(uname -r) ($(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 'linux-image-virtual' 'linux-image-generic' 'linux-image-generic-hwe-*' 2>/dev/null | awk '$1 ~ /^.i/ {printf "%s%s", (n++ ? " " : ""), $2}'))"
+#what runs at idle once the boot is over, before these checks start anything: the memory in use, the
+#heaviest processes (a script by its name, not its interpreter's), and each service up with the package
+#its unit comes from
+timeout 120 systemctl is-system-running --wait >/dev/null 2>&1
+_line "memory at idle (MB)" "$(free -m | awk '/^Mem:/ {printf "used %d, available %d of %d", $3, $7, $2}'); heaviest: $(ps -e -o rss=,args= --sort=-rss | head -8 | awk '{
+    name = $2; if (name ~ /(python|perl)[0-9.]*$/) for (i = 3; i <= NF; i++) if ($i !~ /^-/) { name = $i; break }
+    sub(/.*\//, "", name); printf "%s %.1f, ", name, $1 / 1024 }')"
+systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}' |
+    while read -r unit; do printf "%s %s\\n" "${unit}" "$(systemctl show -P FragmentPath "${unit}" 2>/dev/null)"; done > /var/tmp/probe-services
+#dpkg knows a unit by the path its package ships it at, /lib or /usr/lib: both are asked, in one call
+# shellcheck disable=SC2046 # a list of paths
+dpkg -S $(awk '$2 != "" {print $2; sub(/^\/usr/, "", $2); print $2}' /var/tmp/probe-services) > /var/tmp/probe-units 2>/dev/null
+_line "services running" "$(awk 'FILENAME ~ /probe-units/ {i = index($0, ": "); owner[substr($0, i + 2)] = substr($0, 1, i - 1); next}
+    {u = $1; sub(/\.service$/, "", u); f = $2; o = owner[f]; if (o == "") {sub(/^\/usr/, "", f); o = owner[f]}
+     printf "%s (%s), ", u, (o == "" ? "no package" : o)}' /var/tmp/probe-units /var/tmp/probe-services | sed 's/, $//')"
+rm -f /var/tmp/probe-services /var/tmp/probe-units
+
+#the network: an address, and a name resolved through the system's resolver (Vagrant, apt and the
+#installer all need one)
+waited=0
+while :; do
+    address="$(ip -o -4 addr show scope global | awk '{printf "%s %s ", $2, $4}')"
+    resolved="$(getent hosts archive.ubuntu.com | awk '{print $1}' | head -n 1)"
+    if { [ -n "${address}" ] && [ -n "${resolved}" ]; } || [ "${waited}" -ge "${NETWORK_WAIT:-60}" ]; then break; fi
+    sleep 2; waited="$((waited + 2))"
+done
+_line "network" "${address:-no address }$(grep -o 'net.ifnames=0' /proc/cmdline)"
+_line "dns" "archive.ubuntu.com ${resolved:-NOT RESOLVED} after ${waited}s; $(ip -4 route show default | head -n 1 | cut -d' ' -f1-5); $(resolvectl dns 2>/dev/null | tr '\n' ' ' | tr -s ' ' | cut -c1-100)"
+_line "sudo without password (${user})" "$(su - "${user}" -c 'sudo -n true' >/dev/null 2>&1 && echo ok || echo FAIL)"
+
+#does this tmux take minos' configuration, the user's copy?
+_line "tmux -V" "$(tmux -V 2>&1) ($(dpkg -S "$(readlink -f "$(command -v tmux)")" 2>/dev/null | cut -d: -f1))"
+_line "tmux source-file ~/.tmux.conf" "$(su - "${user}" -c 'tmux -f /dev/null -L probe new-session -d && tmux -L probe source-file ~/.tmux.conf; tmux -L probe kill-server' 2>&1 | head -3 | tr '\n' ' ' | cut -c1-170 | grep . || echo "no errors")"
+
+#the firmware this boot asked the kernel for, and what there is of it
+_line "firmware asked for (dmesg)" "$(dmesg 2>/dev/null | grep -iE 'firmware.*(fail|direct-load|not found)|failed to load.*firmware' | head -3 | tr '\n' ' ' | cut -c1-200 | grep . || echo none); $(find /usr/lib/firmware -type f 2>/dev/null | wc -l) files in /usr/lib/firmware"
+
+if [ "${flavour}" = "desktop" ]; then
+    _line "i3 $(i3 --version 2>/dev/null | cut -d' ' -f3)" "$(i3 -C -c /etc/i3/config 2>&1 | grep -ciE 'error') config errors"
+    _line "display manager" "$(systemctl is-enabled display-manager.service 2>&1) $(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null)"
+    #what comes up on this machine's own screen: slim and its Xorg, on the graphics card's driver
+    _line "slim, Xorg" "slim $(systemctl is-active slim 2>&1); Xorg $(pgrep -x Xorg >/dev/null && echo up || echo DOWN) on $(for card in /sys/class/drm/card[0-9]; do [ -e "${card}/device/driver" ] && printf "%s " "$(basename "$(readlink "${card}/device/driver")")"; done | grep . || echo "no graphics card")"
+fi
+
+_line "boot" "$(systemd-analyze 2>/dev/null | head -1 | cut -c1-120); slowest: $(systemd-analyze blame 2>/dev/null | head -n 4 | tr -s ' ' | sed 's/^ //' | tr '\n' ',' | sed 's/,$//')"
+_line "failed units" "$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{printf "%s ", $1}' | grep . || echo none)"
+_line "packages installed" "$(dpkg -l | grep -c '^ii')"
+_line "disk used" "$(df -m --output=used / | tail -1) MB of $(df -m --output=size / | tail -1) MB"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

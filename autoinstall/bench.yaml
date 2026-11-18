@@ -1,0 +1,25 @@
+#cloud-config
+# The bench part, for test builds only (origin = "bench" in packers/minos.pkr.hcl): minos from packages
+# built by the bench instead of the minos archive, for the releases the archive has nothing for yet.
+#
+# The template attaches those packages (a directory with a Packages index) as a CD labelled "bench" and
+# serves the setup script it is given; the boot line names that copy with minos.setup=. These commands
+# copy the packages into the new system and leave a hook (setup sources ~/.minos/hooks/A*) that points
+# setup at them; packers/scripts/box.sh removes both after the first boot.
+autoinstall:
+  late-commands:
+    - |
+      set -e
+      mkdir -p /run/bench /target/var/cache/minos-bench /target/root/.minos/hooks
+      mount -o ro /dev/disk/by-label/bench /run/bench
+      cp /run/bench/*.deb /run/bench/Packages /target/var/cache/minos-bench/
+      umount /run/bench
+      cat > /target/root/.minos/hooks/A01-bench-repository << 'E=O=F'
+      _add_minos_repository() { #the packages of the bench instead of the minos archive
+          _printfl "Adding repositories"
+          printf "%s\\n" "deb [trusted=yes] file:/var/cache/minos-bench ./" > /etc/apt/sources.list.d/bench.list
+          _add_repository "deb http://archive.ubuntu.com/ubuntu/ ${1} multiverse"
+          _add_repository "deb http://archive.ubuntu.com/ubuntu/ ${1}-updates multiverse"
+          _apt_update 0
+      }
+      E=O=F

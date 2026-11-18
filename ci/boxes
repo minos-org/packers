@@ -1,0 +1,310 @@
+#!/bin/sh
+#on a machine with KVM (a GitHub-hosted runner, .github/workflows/boxes.yml): Packer builds the box from
+#the release's live-server ISO with minos.pkr.hcl, installing minos from the minos archive the way users
+#do; then the disk inside the box boots the way VirtualBox starts an imported machine (BIOS, a SATA disk,
+#an e1000 card), the keys Vagrant uses log in, minos is checked inside (ci/box-check, which runs
+#ci/probe-common), the same disk boots
+#on virtio, and Vagrant adds the box through a catalog. One line per check; ci/verdict reads them.
+#usage: [FLAVOURS="core desktop"] [ORIGIN=bench BENCH=DIR SETUP=FILE] [MIRROR=URI] ci/boxes RELEASE...
+#       MIRROR, the Ubuntu archive the installer fetches from (minos.pkr.hcl's mirror): by default the one
+#       this machine's apt reads (ci/mirror), on a GitHub-hosted runner its cloud's; the box keeps
+#       archive.ubuntu.com and security.ubuntu.com in its sources (scripts/box.sh)
+#       ORIGIN=bench, for test builds: minos from the packages in DIR/SERIES (minos' bench leaves them in
+#       out/SERIES) and the setup script FILE, instead of the minos archive and minos.io/s (minos.pkr.hcl,
+#       origin bench); it needs dpkg-scanpackages (dpkg-dev). ci/verdict passes only boxes of the archive
+#       needs packer's and the boxes' tools on the PATH: qemu-system-x86, qemu-utils, xorriso, curl, unzip,
+#       file, libxml2-utils, openssh-client, zerofree, e2fsprogs, xz-utils, and sudo for installing
+#       Vagrant's package and for the qemu-nbd of scripts/export.sh
+#       ISOs, Packer, its plugin, Vagrant and the OVF schemas stay in $BOXES_CACHE (~/minos-boxes-cache);
+#       the artifacts and their logs go to $BOXES_OUT (~/minos-boxes-out)
+
+w="$(cd "$(dirname "${0}")/.." && pwd)"
+cache="${BOXES_CACHE:-${HOME}/minos-boxes-cache}"; out="${BOXES_OUT:-${HOME}/minos-boxes-out}"
+tmp="${TMPDIR:-/tmp}/minos-boxes"
+#the Ubuntu archive the installer fetches from: $MIRROR, else the one this machine's apt reads (ci/mirror)
+mirror="$(sh "${w}/ci/mirror")"
+packer_version="1.16.2"; vagrant_version="2.4.9"
+
+_line() { printf "%-34s %s\\n" "${1}" "${2}"; }
+
+_codename() {
+    case "${1}" in 22.04) printf jammy ;; 24.04) printf noble ;; 26.04) printf resolute ;; esac
+}
+
+_fetch_checked() { #$1 url, $2 the url of its SHA256SUMS, $3 file => the file, when its checksum is listed
+    [ -f "${3}" ] && return 0
+    curl -fsSL -o "${3}.part" "${1}" || return 1
+    sum="$(curl -fsSL "${2}" | awk -v file="$(basename "${1}")" '$2 == file {print $1}')"
+    if [ -z "${sum}" ] || [ "$(sha256sum "${3}.part" | cut -d' ' -f1)" != "${sum}" ]; then
+        printf "%s\\n" "checksum of ${1}: not ${sum:-listed}" >&2; rm -f "${3}.part"; return 1
+    fi
+    mv "${3}.part" "${3}"
+}
+
+_tools() { #packer, vagrant, Vagrant's insecure private keys, the OVF schemas
+    mkdir -p "${cache}/bin" "${cache}/keys" "${cache}/ovf"
+    if [ ! -x "${cache}/bin/packer" ]; then
+        base="https://releases.hashicorp.com/packer/${packer_version}"
+        _fetch_checked "${base}/packer_${packer_version}_linux_amd64.zip" \
+            "${base}/packer_${packer_version}_SHA256SUMS" "${cache}/packer.zip" || return 1
+        unzip -qo "${cache}/packer.zip" -d "${cache}/bin" && rm -f "${cache}/packer.zip"
+    fi
+    base="https://releases.hashicorp.com/vagrant/${vagrant_version}"
+    _fetch_checked "${base}/vagrant_${vagrant_version}-1_amd64.deb" \
+        "${base}/vagrant_${vagrant_version}_SHA256SUMS" "${cache}/vagrant_${vagrant_version}-1_amd64.deb" || return 1
+    for key in vagrant.key.ed25519 vagrant.key.rsa; do #public by design: every Vagrant carries them
+        [ -f "${cache}/keys/${key}" ] || curl -fsSL -o "${cache}/keys/${key}" \
+            "https://raw.githubusercontent.com/hashicorp/vagrant/main/keys/${key}" || return 1
+        chmod 600 "${cache}/keys/${key}"
+    done
+    if [ ! -f "${cache}/ovf/dsp8023_1.1.0.xsd" ]; then #the DMTF schema and what it imports, read from here
+        for url in https://schemas.dmtf.org/ovf/envelope/1/dsp8023_1.1.0.xsd https://www.w3.org/2001/xml.xsd \
+                   https://schemas.dmtf.org/wbem/wscim/1/common.xsd \
+                   https://schemas.dmtf.org/wbem/wscim/1/cim-schema/2.22.0/CIM_VirtualSystemSettingData.xsd \
+                   https://schemas.dmtf.org/wbem/wscim/1/cim-schema/2.22.0/CIM_ResourceAllocationSettingData.xsd; do
+            curl -fsSL -o "${cache}/ovf/$(basename "${url}")" "${url}" || return 1
+        done
+        sed -i -e 's|http://www.w3.org/20[0-9/]*/xml.xsd|xml.xsd|' \
+               -e 's|http://schemas.dmtf.org/wbem/wscim/1/common.xsd|common.xsd|' \
+               -e 's|http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2.22.0/\(CIM_[A-Za-z]*\.xsd\)|\1|' "${cache}"/ovf/*.xsd
+    fi
+}
+
+_ssh() { #$1 key, then the command, against the box booted by _boot
+    _ssh__key="${1}"; shift
+    ssh -i "${_ssh__key}" -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=5 vagrant@127.0.0.1 "${@}"
+}
+
+_boot() { #$1 vmdk, $2 serial log, $3 flavour: boot it on the hardware VirtualBox gives an imported Ubuntu_64;
+          #a desktop gets the sound cards VirtualBox offers, Intel HDA (its default) and AC'97
+    _boot__sound=""
+    [ "${3:-}" = "desktop" ] && _boot__sound="-audiodev none,id=sound -device intel-hda -device hda-duplex,audiodev=sound -device AC97,audiodev=sound"
+    # shellcheck disable=SC2086 # a list of options
+    qemu-system-x86_64 -enable-kvm -machine pc -cpu host -smp 2 -m 1024 ${_boot__sound} \
+        -device ahci,id=sata -drive id=disk,file="${1}",format=vmdk,if=none,snapshot=on \
+        -device ide-hd,drive=disk,bus=sata.0 \
+        -netdev user,id=nat,hostfwd=tcp:127.0.0.1:2222-:22 -device e1000,netdev=nat \
+        -display none -serial file:"${2}" -daemonize -pidfile "${tmp}/box.pid"
+}
+
+_manifest() { #$1 release => $cache/manifest/RELEASE.list, the packages of the installer's minimal layer
+    [ -s "${cache}/manifest/${1}.list" ] && return 0
+    mkdir -p "${cache}/manifest"
+    for _manifest__iso in "${cache}"/packer/*.iso; do
+        xorriso -osirrox on -indev "${_manifest__iso}" -extract /.disk/info "${tmp}/info" >/dev/null 2>&1 || continue
+        grep -q " ${1}[. ]" "${tmp}/info" || continue
+        xorriso -osirrox on -indev "${_manifest__iso}" \
+            -extract /casper/ubuntu-server-minimal.manifest "${tmp}/manifest" >/dev/null 2>&1 || return 1
+        #the ISO writes it as a diff against an empty layer below: "+package version" lines
+        sed -e '/^---/d' -e '/^+++/d' -e '/^@@/d' -e 's/^+//' "${tmp}/manifest" > "${cache}/manifest/${1}.list"
+        return 0
+    done
+    return 1
+}
+
+_box() { #build, check and add one box
+    release="${1}"; flavour="${2}"
+    name="minos-${flavour}-${release}"
+    logs="${out}/logs/${name}"
+    rm -rf "${out:?}/${name}" "${out}/${name}".* "${logs}" "${tmp}"; mkdir -p "${logs}" "${tmp}"
+    _tools > "${logs}/tools.log" 2>&1 || { _line "tools" "FAIL  $(tail -2 "${logs}/tools.log" | tr '\n' ' ')"; return 1; }
+    export PATH="${cache}/bin:${PATH}" PACKER_CACHE_DIR="${cache}/packer" PACKER_PLUGIN_PATH="${cache}/plugins" CHECKPOINT_DISABLE=1
+
+    vars="-var release=${release} -var flavour=${flavour} -var origin=${origin} -var output=${out}"
+    vars="${vars} -var ssh_key=${cache}/keys/vagrant.key.ed25519 -var mirror=${mirror}"
+    if [ "${origin}" = "bench" ]; then
+        #the release's packages and their index, which the template attaches as a CD (autoinstall/bench.yaml)
+        repo="${tmp}/bench"; series="$(_codename "${release}")"
+        mkdir -p "${repo}"
+        cp "${bench}/${series}"/*.deb "${repo}/" 2>/dev/null || { _line "bench packages" "FAIL  no .deb in ${bench}/${series}"; return 1; }
+        (cd "${repo}" && dpkg-scanpackages -m . > Packages 2>/dev/null) || { _line "bench packages" "FAIL  no index of ${bench}/${series}"; return 1; }
+        _line "bench packages" "$(grep -c '^Package:' "${repo}/Packages") from ${bench}/${series}; minos-${flavour} $(awk -v p="minos-${flavour}" '$1 == "Package:" {n = $2} $1 == "Version:" && n == p {print $2}' "${repo}/Packages" | sort | tail -1)"
+        vars="${vars} -var bench=${repo} -var setup=${setup}"
+    fi
+
+    #the build: install from the ISO, first boot, box.sh, export.sh
+    start="$(date +%s)"
+    # shellcheck disable=SC2086 # vars is a list of options
+    (cd "${w}" && packer init . && exec packer build -color=false ${vars} .) > "${logs}/packer.log" 2>&1 &
+    packer="${!}"
+    #a boot line that did not take leaves the disk empty while Packer waits 90 minutes for ssh. The
+    #watchdog writes nowhere else: its sleep outlives the kill below, and while it held this script's
+    #output a pipe reading it (the workflow's tee) waited the 15 minutes out
+    (   sleep 900; disk="${out}/${name}/${name}.qcow2"
+        if [ -f "${disk}" ] && [ "$(du -k "${disk}" | cut -f1)" -lt 10240 ]; then
+            printf "%s\\n" "Error: the installer wrote nothing to the disk in 15 minutes: the boot line did not take" >> "${logs}/packer.log"
+            kill "${packer}"
+        fi
+    ) > /dev/null 2>&1 &
+    watchdog="${!}"
+    wait "${packer}"; status="${?}"; secs="$(($(date +%s) - start))"
+    kill "${watchdog}" 2>/dev/null
+    [ -f "${out}/${name}.serial.log" ] && cp "${out}/${name}.serial.log" "${logs}/"
+    if [ "${status}" != "0" ]; then
+        _line "packer build" "FAIL  (${status}) ${secs}s $(grep -E 'Error|error' "${logs}/packer.log" | tail -2 | tr '\n' ' ' | cut -c1-220)"
+        return 1
+    fi
+    _line "packer build (${origin})" "ok    ${secs}s; $(grep -o 'export: .*' "${logs}/packer.log" | tail -1)"
+    _line "packer mirror" "${mirror}; $(grep -o 'mirror: .*, replaced by .*' "${logs}/packer.log" | tail -1 | cut -c1-120)"
+    #what each slimming step left, in MB of the new system (user-data and box.sh print them)
+    _line "slimming steps (MB used)" "$(grep -ho 'slim: .*' "${logs}/packer.log" | sed 's/^slim: //' | tr '\n' ',' | sed 's/,$//; s/,/, /g' | cut -c1-300)"
+    #what export.sh made zeros of before the disk became the VMDK
+    _line "zeros at export" "$(grep -ho 'zeros: .*' "${logs}/packer.log" | sed 's/^zeros: //' | awk '{printf "%s%s", (NR > 1 ? "; " : ""), $0}' | cut -c1-300)"
+    _line "sha256" "$(awk '{printf "%s %s  ", $2, $1}' "${out}/${name}.sha256")"
+
+    #the box as the one package of a release: its .sha256 true of it, and, unpacked, what Vagrant imports and
+    #what VirtualBox alone imports (VBoxManage import box.ovf): the OVF and the disk it names, beside it.
+    #The box is a tar compressed with xz, listed as it is unpacked, in one pass that takes as long as the
+    #unpacking a person waits for in vagrant box add (xz on one thread)
+    box="${tmp}/box"; rm -rf "${box}"; mkdir -p "${box}"
+    start="$(date +%s)"
+    tar -xvvf "${out}/${name}.box" -C "${box}" > "${tmp}/members" 2>&1
+    _line "box members" "$(awk '{printf "%s ", $NF}' "${tmp}/members")($(head -1 "${tmp}/members" | cut -c1-10), $(file -b "${out}/${name}.box" | cut -d, -f1); unpacked in $(($(date +%s) - start))s)"
+    _line "box checksum" "$(cd "${out}" && sha256sum -c "${name}.sha256" 2>&1 | tr '\n' ' ')"
+    #DMTF's schema, with VirtualBox's section declared the way the schema takes a vendor's (ci/vbox-machine.xsd)
+    cp "${w}/ci/vbox-machine.xsd" "${cache}/ovf/"
+    _line "ovf schema (DMTF 1.1.0)" "$(xmllint --noout --nonet --schema "${cache}/ovf/vbox-machine.xsd" "${box}/box.ovf" 2>&1 | tail -2 | tr '\n' ' ' | cut -c1-200)"
+    #the machine VirtualBox builds from the OVF's vbox:Machine (export.sh): one SATA port, holding the disk of
+    #the package (an Image that names no disk of the DiskSection stops VirtualBox's import)
+    ovf_ports="$(xmllint --xpath 'string(//*[local-name()="StorageController"][@type="AHCI"]/@PortCount)' "${box}/box.ovf" 2>&1)"
+    ovf_image="$(xmllint --xpath 'string(//*[local-name()="AttachedDevice"]/*[local-name()="Image"]/@uuid)' "${box}/box.ovf" 2>&1)"
+    ovf_disk="$(xmllint --xpath 'string(//*[local-name()="Disk"]/@*[local-name()="uuid"])' "${box}/box.ovf" 2>&1)"
+    _line "ovf vbox:Machine" "SATA ports ${ovf_ports:-none}; disk ${ovf_image:-none} $([ "${ovf_image}" = "{${ovf_disk}}" ] && printf "= DiskSection" || printf "MISMATCH DiskSection %s" "${ovf_disk:-none}")"
+    #the disk is the file the OVF's References name, beside the OVF, as an import opens it
+    href="$(xmllint --xpath 'string(//*[local-name()="References"]/*[local-name()="File"]/@*[local-name()="href"])' "${box}/box.ovf" 2>&1)"
+    vmdk="${box}/${href}"
+    #the schema takes any text for the sizes: they are compared with the disk itself
+    capacity="$(tr '\n' ' ' < "${box}/box.ovf" | sed -n 's/.*ovf:capacity="\([^"]*\)".*/\1/p')"
+    href_size="$(tr '\n' ' ' < "${box}/box.ovf" | sed -n 's/.*ovf:size="\([^"]*\)".*/\1/p')"
+    virtual="$(qemu-img info "${vmdk}" | sed -n 's/^virtual size: .*(\([0-9]*\) bytes).*/\1/p')"
+    #the format the OVF gives the disk, by which VirtualBox reads it, after the disk's own create type
+    format="$(xmllint --xpath 'string(//*[local-name()="Disk"]/@*[local-name()="format"])' "${box}/box.ovf" 2>&1)"
+    _line "vmdk" "${href:-no File in box.ovf}: $(qemu-img info "${vmdk}" | awk -F': ' '/^file format|^disk size|create type/ {printf "%s; ", $2}')ovf ${format##*/}; capacity ${capacity} $([ "${capacity}" = "${virtual}" ] && printf "= disk" || printf "MISMATCH disk %s" "${virtual}"), size ${href_size} $([ "${href_size}" = "$(stat -c %s "${vmdk}")" ] && printf "= file" || printf "MISMATCH file %s" "$(stat -c %s "${vmdk}")")"
+
+    #the disk of the box booted like VirtualBox would, and logged into like Vagrant would
+    key="${cache}/keys/vagrant.key.ed25519"
+    start="$(date +%s)"
+    _boot "${vmdk}" "${logs}/check-serial.log" "${flavour}" || { _line "boot" "FAIL  qemu did not start"; return 1; }
+    qemu="$(cat "${tmp}/box.pid")"
+    until _ssh "${key}" true 2>/dev/null; do
+        [ "$(($(date +%s) - start))" -gt 300 ] && break
+        sleep 3
+    done
+    _line "ssh vagrant, ed25519 key" "$(_ssh "${key}" 'echo ok' 2>&1 | tail -1) after $(($(date +%s) - start))s"
+    _line "ssh vagrant, rsa key" "$(_ssh "${cache}/keys/vagrant.key.rsa" 'echo ok' 2>&1 | tail -1)"
+    #Vagrant runs its commands by writing them to config.ssh.shell (bash -l by default) without a terminal
+    _line "vagrant's channel, bash -l" "$(printf 'echo ok\n' | _ssh "${key}" bash -l 2>&1 | tail -2 | tr '\n' ' ' | cut -c1-120)"
+    _line "vagrant's channel, bash" "$(printf 'echo ok\n' | _ssh "${key}" bash 2>&1 | tail -2 | tr '\n' ' ' | cut -c1-120)"
+    #box-check runs probe-common, the checks every minos system answers, from beside it
+    _ssh "${key}" 'cat > /var/tmp/box-check' < "${w}/ci/box-check"
+    _ssh "${key}" 'cat > /var/tmp/probe-common' < "${w}/ci/probe-common"
+    manifest=""
+    if _manifest "${release}"; then
+        _ssh "${key}" 'cat > /var/tmp/box-base.manifest' < "${cache}/manifest/${release}.list"
+        manifest="/var/tmp/box-base.manifest"
+    fi
+    _ssh "${key}" "sudo sh /var/tmp/box-check ${flavour} vagrant ${manifest}; rm -f /var/tmp/box-check /var/tmp/probe-common ${manifest}" 2>&1
+    _ssh "${key}" 'cat /var/log/minos-setup.log' > "${logs}/minos-setup.log" 2>&1
+    #every process of the box logged in and idle, with its PSS in kB and its package (ci/box-check)
+    _ssh "${key}" 'cat /var/tmp/box-processes' > "${logs}/processes.txt" 2>&1
+    #every installed package with its size and priority, to compare boxes and releases
+    _ssh "${key}" "dpkg-query -W -f='\${db:Status-Abbrev} \${Installed-Size} \${Priority} \${Package}\n' | awk '\$1 ~ /^.i/ {print \$2, \$3, \$4}' | sort -rn" > "${logs}/packages.txt" 2>&1
+    #what explains a failed unit, read nowhere but here: the journal of this boot and, on a desktop, what
+    #X and gpu-manager said and which graphics driver the kernel has, finds and loads
+    _ssh "${key}" 'sudo journalctl -b --no-pager -o short-monotonic' > "${logs}/journal.log" 2>&1
+    if [ "${flavour}" = "desktop" ]; then
+        _ssh "${key}" 'for log in /var/log/Xorg.0.log /var/log/gpu-manager.log; do printf "=== %s\n" "${log}"; sudo cat "${log}"; done
+            printf "=== cmdline\n"; cat /proc/cmdline
+            printf "=== lsmod (drm)\n"; lsmod | grep -iE "drm|bochs|fb"
+            printf "=== modprobe -nv bochs\n"; sudo modprobe -nv bochs 2>&1
+            printf "=== drm modules on disk\n"; ls -l "/lib/modules/$(uname -r)/kernel/drivers/gpu/drm" "/lib/modules/$(uname -r)/kernel/drivers/gpu/drm/tiny" 2>&1
+            printf "=== modprobe.d\n"; grep -rH . /etc/modprobe.d /lib/modprobe.d 2>&1 | grep -viE "wdt|^[^:]*:#"' > "${logs}/graphics.log" 2>&1
+    fi
+    #what could hold the poweroff: systemd's pending jobs, and an unattended upgrade at work
+    _line "running at poweroff" "$(_ssh "${key}" "systemctl list-jobs --no-legend 2>/dev/null | awk '{print \$2, \$4}' | head -4 | tr '\n' ';'; pgrep -a -f 'unattended-upgrade' | cut -c1-60 | tr '\n' ';'; uptime -p" 2>&1 | tr '\n' ' ' | cut -c1-200)"
+    _ssh "${key}" 'sudo poweroff' >/dev/null 2>&1
+    start="$(date +%s)"
+    while kill -0 "${qemu}" 2>/dev/null; do
+        [ "$(($(date +%s) - start))" -gt 60 ] && { _line "poweroff" "FAIL  still up after 60s"; kill "${qemu}"; }
+        sleep 1
+    done
+
+    #the same disk on virtio (QEMU, KVM), the other kind of machine the box must boot
+    start="$(date +%s)"
+    qemu-system-x86_64 -enable-kvm -machine pc -cpu host -smp 2 -m 1024 \
+        -drive file="${vmdk}",format=vmdk,if=virtio,snapshot=on \
+        -netdev user,id=nat,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=nat \
+        -display none -serial file:"${logs}/check-virtio-serial.log" -daemonize -pidfile "${tmp}/box.pid"
+    qemu="$(cat "${tmp}/box.pid")"
+    until _ssh "${key}" true 2>/dev/null; do
+        [ "$(($(date +%s) - start))" -gt 300 ] && break
+        sleep 3
+    done
+    _line "boot on virtio, ssh" "$(_ssh "${key}" 'echo ok' 2>&1 | tail -1) after $(($(date +%s) - start))s"
+    _ssh "${key}" 'sudo poweroff' >/dev/null 2>&1
+    start="$(date +%s)"
+    while kill -0 "${qemu}" 2>/dev/null; do
+        [ "$(($(date +%s) - start))" -gt 60 ] && { _line "poweroff" "FAIL  still up after 60s"; kill "${qemu}"; }
+        sleep 1
+    done
+
+    #the catalog Vagrant reads, pointing at this file instead of where the boxes are published
+    cat > "${tmp}/catalog.json" << E=O=F
+{
+  "name": "minos/${flavour}-${release}",
+  "description": "minos ${flavour} on Ubuntu ${release} LTS",
+  "versions": [{
+    "version": "$(date +%Y.%m.%d)",
+    "providers": [{
+      "name": "virtualbox",
+      "url": "file://${out}/${name}.box",
+      "checksum_type": "sha256",
+      "checksum": "$(awk -v f="${name}.box" '$2 == f {print $1}' "${out}/${name}.sha256")",
+      "architecture": "amd64",
+      "default_architecture": true
+    }]
+  }]
+}
+E=O=F
+    # shellcheck disable=SC2024 # the log is this user's: only dpkg needs root
+    sudo dpkg -i "${cache}/vagrant_${vagrant_version}-1_amd64.deb" > "${logs}/vagrant.log" 2>&1
+    vagrant box add "${tmp}/catalog.json" >> "${logs}/vagrant.log" 2>&1
+    #what Vagrant keeps, unpacked by its own bsdtar: the disk is the one tar unpacked above
+    stored="$(ls -d ~/.vagrant.d/boxes/*/*/amd64/virtualbox 2>/dev/null | head -1)"
+    _line "vagrant ${vagrant_version} box add catalog" "$(vagrant box list 2>&1 | tr '\n' ' ' | cut -c1-120); $(ls "${stored}" 2>/dev/null | tr '\n' ' ')(vmdk $(cmp -s "${stored}/box-disk1.vmdk" "${vmdk}" && printf "= the box's" || printf "DIFFERS from the box's"))"
+}
+
+[ -c /dev/kvm ] && [ -w /dev/kvm ] || { printf "%s\\n" "no usable /dev/kvm on $(hostname): boxes are built with KVM only"; exit 1; }
+[ "${#}" -gt 0 ] || set -- 24.04
+for release; do
+    [ -n "$(_codename "${release}")" ] || { printf "%s\\n" "${release}: the releases are 22.04, 24.04 and 26.04" >&2; exit 2; }
+done
+origin="${ORIGIN:-ppa}"
+case "${origin}" in
+    ppa) : ;;
+    bench)
+        if [ ! -d "${BENCH:-}" ] || [ ! -f "${SETUP:-}" ]; then
+            printf "%s\\n" "ORIGIN=bench: BENCH names a directory of SERIES/*.deb, SETUP the setup script" >&2; exit 2
+        fi
+        command -v dpkg-scanpackages >/dev/null 2>&1 || { printf "%s\\n" "ORIGIN=bench needs dpkg-scanpackages (dpkg-dev)" >&2; exit 2; }
+        #packer runs from the repository: the paths it is given are absolute
+        bench="$(cd "${BENCH}" && pwd)"; setup="$(cd "$(dirname "${SETUP}")" && pwd)/$(basename "${SETUP}")" ;;
+    *) printf "%s\\n" "ORIGIN=${origin}: the origin is ppa or bench" >&2; exit 2 ;;
+esac
+mkdir -p "${cache}" "${out}"
+
+#a stopped run takes the machine it booted with it
+trap '[ -f "${tmp}/box.pid" ] && kill "$(cat "${tmp}/box.pid")" 2>/dev/null; exit 143' INT TERM HUP
+status=0
+for release; do
+    for flavour in ${FLAVOURS:-core}; do
+        printf "\\n=== minos-%s-%s (%s) ===\\n" "${flavour}" "${release}" "${origin}"
+        began="$(date +%s)" #_box runs in this shell and keeps its own times in start
+        _box "${release}" "${flavour}" || status=1
+        printf "%s\\n" "--- minos-${flavour}-${release} took $(($(date +%s) - began))s"
+    done
+done
+exit "${status}"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :
