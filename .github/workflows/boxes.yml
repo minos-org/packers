@@ -410,4 +410,5 @@ jobs:
           command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
           shellcheck --version | sed -n 's/^version: /shellcheck /p'
           shellcheck -s sh -S warning ci/boxes ci/box-check ci/probe-common ci/verdict ci/fingerprint ci/publish ci/iso \
-              ci/mirror iso/build iso/live-check iso/install-check iso/qemu-lib
+              ci/mirror iso/build iso/live-check iso/install-check iso/qemu-lib iso/installer/minos-installer \
+              iso/installer/minos-installer-engine

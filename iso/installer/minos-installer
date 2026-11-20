@@ -1,0 +1,415 @@
+#!/bin/sh
+#the installer of the minos ISO's live session (Win+i), as screens in a terminal (whiptail): it shows what
+#the engine beside it (minos-installer-engine) says of this machine, asks where minos goes and for whom,
+#has the engine make a plan, shows that plan, and after one confirmation has it applied. It knows nothing
+#of disks itself and writes nothing to one: another interface can take its place over the same engine.
+#Every screen goes back, and Esc quits. It runs as the user who opened it and asks sudo for the engine
+#alone: when its window is closed it ends, where a whole installer under sudo would stay behind (sudo-rs
+#passes a signal on to the one command it started, not to that command's children).
+#usage: minos-installer [--window] [--try [--firmware uefi|bios]]
+#  --window     in a terminal of its own (urxvt) the size of the screens: what Win+i runs
+#  --try        on a machine that is not the live session, to try the screens: the disk chosen is
+#               partitioned and formatted for real, then the setup command is shown, not run
+#  --firmware   with --try, the firmware the questions are for, whatever this machine started by
+#needs whiptail, cfdisk (fdisk) for the partitions made by hand, what the engine needs, and for another
+#user than root, sudo without a password
+
+set -u
+#a screen, in characters. The terminal around it is 4 more each way, for the title above and the shadow
+#whiptail draws, and the one --window opens 2 more still: i3 takes the border of a floating window out
+#of the size asked for
+box_columns=76; box_rows=20
+
+_usage() { #=> the usage, on stderr, exit 2
+    sed -n '9,13s/^#//p' "${0}" >&2
+    exit 2
+}
+
+_end() { #message... => said on the terminal, which stays open until Enter: for what goes wrong before
+    #there are screens
+    printf "%s\n" "minos installer" "" "${@}" "" "Press Enter to close."
+    IFS= read -r _ || :
+    exit 1
+}
+
+_open_window() { #argument... => the installer with ARGUMENTS in a terminal of its own, the size of its
+    #screens, which i3 floats in the middle of the screen (the for_window of its instance name); when
+    #one is open already, that one comes to the front instead
+    if pgrep -f "urxvt -name minos-installer" >/dev/null 2>&1; then
+        i3-msg '[instance="^minos-installer$"] focus' >/dev/null 2>&1
+        exit 0
+    fi
+    exec urxvt -name minos-installer -title "minos installer" -geometry "$((box_columns + 6))x$((box_rows + 6))" \
+        -e sh "${0}" "${@}"
+}
+
+_as_root() { #command... => COMMAND run as root: through sudo when this is another user
+    if [ "$(id -u)" = 0 ]; then
+        "${@}"
+    else
+        sudo "${@}"
+    fi
+}
+
+_engine() { #verb argument... => the engine, as root, told what this installer was told (--try, --firmware)
+    if [ -n "${firmware}" ]; then
+        _as_root sh "${engine}" --try --firmware "${firmware}" "${@}"
+    elif [ -n "${try}" ]; then
+        _as_root sh "${engine}" --try "${@}"
+    else
+        _as_root sh "${engine}" "${@}"
+    fi
+}
+
+_text() { #line... => the lines, one text
+    printf "%s\n" "${@}"
+}
+
+_split_lines() { #text => lines, the lines of TEXT as words for eval "set -- ${lines}": each one quoted,
+    #whatever it holds
+    lines="$(printf "%s\n" "${1}" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/" | tr '\n' ' ')"
+}
+
+################################################################################
+# The screens: every one goes through these functions, so another toolkit takes
+# whiptail's place by changing them alone. One that asks leaves the answer in
+# the variable answer and returns 0; 1 when the person goes back (the second
+# button); 2 after an Esc that did not quit, for the same screen to be shown again
+################################################################################
+
+_ui() { #whiptail's options... => the box, in the installer's colours; on stdout what the person chose or
+    #typed. whiptail draws on its stdout and answers on its stderr: the two change places around it
+    NEWT_COLORS="${colours}" whiptail --backtitle "${backtitle}" "${@}" 3>&1 1>&2 2>&3
+}
+
+_ui_status() { #whiptail's exit status => 0 and 1 as they are; Esc (255) asks whether to quit, and then 2
+    case "${1}" in
+        0|1) return "${1}" ;;
+    esac
+    #whiptail also leaves that way when its terminal is gone: nobody is there to ask
+    stty size >/dev/null 2>&1 || exit 129
+    if _ui --title "Quit" --yes-button "Quit" --no-button "Stay" --defaultno \
+        --yesno "Quit the installer? ${written}" 8 60; then
+        clear
+        exit 0
+    fi
+    return 2
+}
+
+_ui_message() { #title text [button] => TEXT, until the person presses BUTTON (Continue)
+    _ui --title "${1}" --ok-button "${3:-Continue}" --msgbox "${2}" "${box_rows}" "${box_columns}" || :
+}
+
+_ui_confirm() { #title text yes no [default] => 0 when the person takes YES, 1 for NO; DEFAULT no leaves
+    #the cursor on NO
+    if [ "${5:-yes}" = "no" ]; then
+        _ui --title "${1}" --yes-button "${3}" --no-button "${4}" --defaultno --yesno "${2}" "${box_rows}" "${box_columns}"
+    else
+        _ui --title "${1}" --yes-button "${3}" --no-button "${4}" --yesno "${2}" "${box_rows}" "${box_columns}"
+    fi
+    _ui_status "${?}"
+}
+
+_ui_choose() { #title text default name item... => one ITEM chosen from a list, its NAME in answer; the
+    #cursor starts on the item named DEFAULT
+    _ui_choose__title="${1}"; _ui_choose__text="${2}"; _ui_choose__default="${3}"; shift 3
+    answer="$(_ui --title "${_ui_choose__title}" --ok-button "Continue" --cancel-button "Back" --notags \
+        --default-item "${_ui_choose__default}" --menu "${_ui_choose__text}" "${box_rows}" "${box_columns}" \
+        "$((${#} / 2))" "${@}")"
+    _ui_status "${?}"
+}
+
+_ui_ask() { #title text default => a line typed over DEFAULT, in answer
+    answer="$(_ui --title "${1}" --ok-button "Continue" --cancel-button "Back" \
+        --inputbox "${2}" "${box_rows}" "${box_columns}" "${3}")"
+    _ui_status "${?}"
+}
+
+_ui_password() { #title text => a password typed, shown as stars, in answer
+    answer="$(_ui --title "${1}" --ok-button "Continue" --cancel-button "Back" \
+        --passwordbox "${2}" "${box_rows}" "${box_columns}")"
+    _ui_status "${?}"
+}
+
+################################################################################
+# The questions, in the order of _steps. Each returns 0 to go on, 1 to go back,
+# 2 to be asked again, and 3 when it has nothing to ask (one disk only, no EFI
+# system partition on BIOS): the next one in the person's direction is asked
+################################################################################
+
+_steps() { #=> the questions of the mode chosen, in order
+    case "${mode}" in
+        partitions) printf "%s " welcome disk mode cfdisk root keep esp chosen user password summary ;;
+        *) printf "%s " welcome disk mode whole user password summary ;;
+    esac
+}
+
+_describe_disk() { #disk => its name, size and model, from the engine's list: sdb (16G, VBOX HARDDISK)
+    _engine disks | awk -F '\t' -v disk="${1}" '$1 == disk {printf "%s (%s%s)", substr($1, 6), $2, ($3 == "-" ? "" : ", " $3)}'
+}
+
+_describe_partitions() { #use [disk] => whiptail's items for the partitions the engine says can be USE
+    #(root, esp), of DISK or of every disk: its device, then a line about it, each on a line of its own
+    _engine partitions ${2:+"${2}"} | awk -F '\t' -v use="${1}" '
+        $3 == use {printf "%s\n%-10s %6s  %-22s %s\n", $1, substr($1, 6), $2, substr($4, 1, 22), substr($5, 1, 24)}'
+}
+
+_ask_welcome() { #=> what is about to happen
+    _ui_confirm "Install minos" "$(_text \
+        "This copies minos, as it runs here, to a disk of this computer. It" \
+        "takes a few minutes and needs no network." "" \
+        "You choose the disk, a user name and a password. Nothing is written" \
+        "to the disk before the last screen, which asks once more.")" "Continue" "Quit"
+}
+
+_ask_disk() { #=> disk, the one minos goes to: asked when the machine has several it can go to
+    _ask_disk__disks="$(_engine disks | awk -F '\t' '$4 == "-" {print $1}')"
+    if [ -z "${_ask_disk__disks}" ]; then
+        _ui_message "No disk" "$(_text "There is no disk minos can go to:" "" \
+            "$(_engine disks | awk -F '\t' '{printf "  %s (%s): %s\n", substr($1, 6), $2, $4}')" "" \
+            "Attach a disk, or free one of these, and open the installer again.")" "Close"
+        clear; exit 1
+    fi
+    if [ "$(printf "%s\n" "${_ask_disk__disks}" | grep -c .)" = 1 ]; then
+        disk="${_ask_disk__disks}"
+        return 3
+    fi
+    set --
+    for _ask_disk__name in ${_ask_disk__disks}; do
+        set -- "${@}" "${_ask_disk__name}" "$(_engine disks | awk -F '\t' -v disk="${_ask_disk__name}" \
+            '$1 == disk {printf "%-10s %7s  %s", substr($1, 6), $2, ($3 == "-" ? "" : $3)}')"
+    done
+    _ui_choose "The disk" "$(_text "Which disk does minos go to?" "" \
+        "The one this session runs from, and any with a partition in use, are" "not offered.")" \
+        "${disk}" "${@}" || return "${?}"
+    [ "${answer}" = "${disk}" ] || { root=""; esp=""; }
+    disk="${answer}"
+}
+
+_ask_mode() { #=> mode: whole, the disk erased and partitioned by the engine, or partitions, chosen by hand
+    _ui_choose "The partitions" "$(_text "minos goes to $(_describe_disk "${disk}")." "" \
+        "It can take the whole disk, or partitions you make or pick yourself," \
+        "beside what the disk already holds.")" "${mode}" \
+        whole "Use the whole disk (suggested): everything on it is erased" \
+        partitions "Choose partitions (advanced): with cfdisk, then from a list" || return "${?}"
+    mode="${answer}"
+}
+
+_ask_whole() { #=> the engine's plan for the whole disk: what the disk holds now, and what it gets instead
+    _engine plan whole "${disk}" > "${plan}"
+    if ! _ask_whole__problems="$(_engine check "${plan}" 2>&1)"; then
+        _ui_message "Use the whole disk" "$(_text "${_ask_whole__problems}" "" "Go back and choose another disk.")" "Back"
+        return 1
+    fi
+    _ui_confirm "Use the whole disk" "$(_text "$(_engine show "${disk}")" "" "With the whole disk:" "" \
+        "$(_engine describe "${plan}")" "" \
+        "Nothing is written yet: the last screen asks once more.")" "Continue" "Back"
+}
+
+_ask_cfdisk() { #=> the partitions made by hand: what this firmware needs, as the engine says it, and cfdisk
+    #for as long as the person wants it
+    _ask_cfdisk__default="cfdisk"
+    [ -z "$(_describe_partitions root "${disk}")" ] || _ask_cfdisk__default="ready"
+    #a list leaves the text above it 11 lines: the needs without their blank lines, 5 lines of the disk
+    _ui_choose "Choose partitions" "$(_text "$(_engine needs | grep .)" \
+        "cfdisk makes them: New, Type, Write (it asks you to type yes), Quit." "" \
+        "$(_engine show "${disk}" | grep . | awk 'NR <= 5 {print} END {if (NR > 5) print "  ..."}')")" "${_ask_cfdisk__default}" \
+        cfdisk "Open cfdisk on ${disk#/dev/}, to make or change partitions" \
+        ready "The partitions are there: choose among them" || return "${?}"
+    if [ "${answer}" = "cfdisk" ]; then
+        _as_root cfdisk "${disk}"
+        udevadm settle
+        root=""; esp=""
+        return 2
+    fi
+    return 0
+}
+
+_ask_root() { #=> root, the partition minos is copied to, from those of the disk the engine says can be
+    _ask_root__items="$(_describe_partitions root "${disk}")"
+    if [ -z "${_ask_root__items}" ]; then
+        _ui_message "The partition for minos" "$(_text "${disk#/dev/} has no partition minos can go to." "" "$(_engine needs)")" "Back"
+        return 1
+    fi
+    _split_lines "${_ask_root__items}"; eval "set -- ${lines}"
+    _ui_choose "The partition for minos" "$(_text "Which partition of ${disk#/dev/} does minos go to?" "" \
+        "It becomes /, the whole system and your files.")" "${root:-${1}}" "${@}" || return "${?}"
+    root="${answer}"
+}
+
+_ask_keep() { #=> keep: yes when a partition that is ext4 already keeps its file system
+    keep=""
+    _ask_keep__holds="$(_engine partitions "${disk}" | awk -F '\t' -v root="${root}" '$1 == root {print $4}')"
+    case "${_ask_keep__holds}" in ext4*) ;; *) return 3 ;; esac
+    _ui_choose "The partition for minos" "$(_text "${root#/dev/} holds a file system already: ${_ask_keep__holds}." "" \
+        "Keep it only when you made it for minos just now: minos is copied" \
+        "over whatever files it holds.")" format \
+        format "Format ${root#/dev/} as ext4 (suggested): what it holds is erased" \
+        keep "Keep its file system, and the files on it" || return "${?}"
+    [ "${answer}" = "format" ] || keep="yes"
+}
+
+_ask_esp() { #=> esp, the EFI system partition the boot loader goes to (UEFI only): those of the disk
+    #first, then the other disks'
+    esp=""
+    [ "$(_engine facts | awk '$1 == "firmware" {print $2}')" = "uefi" ] || return 3
+    _ask_esp__items="$(_describe_partitions esp "${disk}"; _describe_partitions esp | awk -v disk="${disk}" '
+        NR % 2 == 1 {skip = (index($0, disk) == 1)} !skip')"
+    if [ -z "${_ask_esp__items}" ]; then
+        _ui_message "The EFI system partition" "$(_text "There is no EFI system partition." "" "$(_engine needs)")" "Back"
+        return 1
+    fi
+    _split_lines "${_ask_esp__items}"; eval "set -- ${lines}"
+    _ui_choose "The EFI system partition" "$(_text "Which EFI system partition does the boot loader go to?" "" \
+        "UEFI starts minos from it. One that is FAT already is not formatted:" \
+        "the boot loaders of other systems on it stay.")" "${1}" "${@}" || return "${?}"
+    esp="${answer}"
+}
+
+_ask_chosen() { #=> the engine's plan for the partitions chosen; asks nothing unless the engine finds
+    #something that stops it
+    _engine plan partitions "${root}" ${esp:+"${esp}"} ${keep:+keep} > "${plan}"
+    if ! _ask_chosen__problems="$(_engine check "${plan}" 2>&1)"; then
+        _ui_message "Choose partitions" "$(_text "These partitions will not do:" "" "${_ask_chosen__problems}")" "Back"
+        return 1
+    fi
+    return 3
+}
+
+_ask_user() { #=> user, the name of the account minos is installed for
+    _ui_ask "Your user" "$(_text "The name you will log in with." "" \
+        "Lower case letters, digits, - and _, a letter first.")" "${user}" || return "${?}"
+    if ! _ask_user__problem="$(_engine user "${answer}" 2>&1)"; then
+        _ui_message "Your user" "${_ask_user__problem}" "Back"
+        return 2
+    fi
+    user="${answer}"
+}
+
+_ask_password() { #=> pass, the password of user, typed twice
+    _ui_password "Your password" "A password for ${user}:" || return "${?}"
+    _ask_password__first="${answer}"
+    if ! _ask_password__problem="$(printf "%s\n" "${answer}" | _engine password 2>&1)"; then
+        _ui_message "Your password" "${_ask_password__problem}" "Back"
+        return 2
+    fi
+    _ui_password "Your password" "The same password again:" || return 2
+    if [ "${answer}" != "${_ask_password__first}" ]; then
+        _ui_message "Your password" "The two passwords differ. Type them again." "Back"
+        return 2
+    fi
+    pass="${answer}"
+}
+
+_ask_summary() { #=> the plan as the engine describes it, and the one confirmation
+    _ui_confirm "Ready to install" "$(_text "The installer has written nothing so far. With Install:" "" \
+        "$(_engine describe "${plan}")" "User:    ${user}")" "Install" "Back" no
+}
+
+################################################################################
+# Main
+################################################################################
+
+if [ "${1:-}" = "--window" ]; then
+    shift
+    _open_window "${@}"
+fi
+
+try=""; firmware=""
+while [ "${#}" -gt 0 ]; do
+    case "${1}" in
+        --try) try="yes"; shift ;;
+        --firmware) [ "${#}" -ge 2 ] || _usage; firmware="${2}"; shift 2 ;;
+        *) _usage ;;
+    esac
+done
+case "${firmware}" in
+    "") ;;
+    uefi|bios) [ -n "${try}" ] || _usage ;;
+    *) _usage ;;
+esac
+engine="$(dirname "$(readlink -f "${0}")")/minos-installer-engine"
+[ -f "${engine}" ] || _end "The installer is not whole: there is no ${engine}."
+command -v whiptail >/dev/null 2>&1 || _end "The installer needs whiptail (package whiptail)."
+_as_root true 2>/dev/null < /dev/null || _end "The installer needs sudo without a password for $(id -un), or root."
+#cfdisk is in root's path, not always in a user's
+_as_root sh -c "command -v cfdisk" >/dev/null 2>&1 || _end "The installer needs cfdisk (package fdisk)."
+#what the engine cannot do here, it says
+facts="$(_engine facts 2>&1)" || _end "${facts}"
+log="$(printf "%s\n" "${facts}" | awk '$1 == "log" {print $2}')"
+
+#mostly black, as minos is: light grey on black, the choice under the cursor in reverse
+colours="root=lightgray,black roottext=gray,black window=lightgray,black border=gray,black shadow=black,black
+title=white,black textbox=lightgray,black acttextbox=black,lightgray button=black,lightgray
+actbutton=black,white compactbutton=lightgray,black listbox=lightgray,black actlistbox=black,lightgray
+sellistbox=lightgray,black actsellistbox=black,lightgray entry=white,gray disentry=gray,black
+label=lightgray,black helpline=gray,black"
+backtitle="minos installer${try:+, try mode} - arrows and Tab move, Enter chooses, Esc quits"
+# shellcheck disable=SC2046 # the rows and the columns, two words
+set -- $(stty size 2>/dev/null || printf "%s" "0 0")
+if [ "${1}" -lt "$((box_rows + 4))" ] || [ "${2}" -lt "$((box_columns + 4))" ]; then
+    _end "The installer needs a terminal of $((box_columns + 4)) columns by $((box_rows + 4)) rows: this one has ${2} by ${1}."
+fi
+written="It has written nothing to the disk."
+answer=""; disk=""; mode="whole"; root=""; esp=""; keep=""; user=""; pass=""
+plan="$(mktemp)" || _end "No temporary file for the plan."
+trap 'rm -f "${plan}"' EXIT
+trap 'exit 130' INT TERM HUP
+
+if [ -n "${try}" ] && [ -z "${firmware}" ]; then
+    _ui_choose "Try mode" "$(_text "The installer of the minos ISO, tried on this machine." "" \
+        "The disk you choose is partitioned and formatted for real. Then the" \
+        "command that would install minos is shown, not run." "" \
+        "The questions depend on how a computer started. Ask those of:")" "uefi" \
+        uefi "UEFI" bios "BIOS" || { clear; exit 0; }
+    firmware="${answer}"
+fi
+
+position=1; direction=1
+while :; do
+    # shellcheck disable=SC2046 # the names of the questions, a word each
+    set -- $(_steps)
+    [ "${position}" -ge 1 ] || { clear; exit 0; }
+    [ "${position}" -le "${#}" ] || break
+    shift "$((position - 1))"
+    "_ask_${1}"
+    case "${?}" in
+        0) direction=1; position="$((position + 1))" ;;
+        1) direction=-1; position="$((position - 1))" ;;
+        3) position="$((position + direction))" ;;
+    esac
+done
+
+#the plan applied: what the engine and the tools say is the screen now
+clear
+printf "%s\n" "${pass}" | _engine apply "${plan}" "${user}"
+code="${?}"
+if [ "${code}" != 0 ]; then
+    _ui_message "The install stopped" "$(_text "minos is not installed. The last that was said:" "" \
+        "$(sed "s/$(printf '\033')\\[[0-9;]*m//g" "${log}" 2>/dev/null | tr '\r' '\n' | tr -d '\b' | grep '[^ ]' | tail -n 8 | cut -c1-72)" "" \
+        "All of it is in ${log}. Open the installer again to start over.")" "Close"
+    clear
+    exit 1
+fi
+if [ -n "${try}" ]; then
+    _ui_message "Try mode" "$(_text "Try mode stops here: the disk is written, minos is not installed." "" \
+        "minos would now be installed with:" "$(grep -A 1 'minos would now be installed with' "${log}" | tail -n 1)" "" \
+        "$(_engine show "${disk}")")"
+    if _ui_confirm "Try mode" "$(_text "Empty ${disk#/dev/} again, for the next try?" "" \
+        "Its partition table and file systems go, and it is as a new disk.")" "Empty it" "Leave it as it is"; then
+        _engine empty "${disk}" || _ui_message "Try mode" "${disk#/dev/} could not be emptied." "Close"
+    fi
+fi
+note=""
+[ -z "${try}" ] || note="(Try mode: nothing was installed, and Restart now does not restart.)"
+#a live session started by UEFI waits for a key before it restarts, on a screen that says nothing (casper
+#asks for the medium to be taken out through plymouth, whose theme shows no messages)
+if _ui_confirm "minos is installed" "$(_text "minos is on ${disk#/dev/}, for the user ${user}." "" \
+    "Restart to start it. If the screen then stays dark, it is waiting for" \
+    "you: take the installation medium out (the USB stick or the CD) and" \
+    "press Enter." "" "${note}")" "Restart now" "Stay in the live session"; then
+    [ -n "${try}" ] || _as_root reboot
+fi
+clear
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

@@ -2,3 +2,6 @@ packer_cache/
 Vagrantfile
 *.box
 output/
+!/iso/installer/Vagrantfile
+/iso/installer/.vagrant/
+/iso/installer/target.vdi

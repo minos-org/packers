@@ -129,18 +129,45 @@ uses and run in the system), so a copy of it is the system live mode would boots
 
 The live session: casper's user `minos`, whom slim logs into i3; the network is minos-desktop's own,
 connman for the wired and the wireless cards, its name server reached through systemd-resolved (the
-`connman` module of minos-desktop-settings). In i3, `Win+i` opens `minos-installer` full
-screen in `urxvt`, and minos' help (`F1`) lists that key. It shows the disks, offers `cfdisk` (it
-partitions nothing by itself), asks for the partition for minos, on UEFI for the EFI system partition
-(the one on the same disk unless another is named), for a user and its password, and once the partition's
-name has been typed, formats what needs it (the partition, unless it is ext4 already and is to be kept; an
-EFI system partition only when it holds no file system) and runs the installer the medium carries,
-`sh /cdrom/minos/setup live desktop PARTITION USER PASSWORD [--esp ESP]`. What it said stays in
-`/tmp/minos-installer.log`.
+`connman` module of minos-desktop-settings). In i3, `Win+i` opens the installer in a window of its own
+that floats in the middle of the screen, and minos' help (`F1`) lists that key.
+
+The installer is two files, `iso/installer/minos-installer` and `iso/installer/minos-installer-engine`,
+copied to `/usr/local/bin` as they are. The engine knows the machine and writes the disk; it asks nothing
+and draws nothing:
+
+    # minos-installer-engine disks                    # the disks, and why minos cannot go to one
+    # minos-installer-engine plan whole /dev/sda > plan     # or: plan partitions ROOT [ESP] [keep]
+    # minos-installer-engine check plan && minos-installer-engine describe plan
+    # echo PASSWORD | minos-installer-engine apply plan USER
+
+A plan is text, an action a line (`table`, `partition`, `format`, `esp`, `root`), applied from the top and
+only by `apply`: for a whole disk, a GPT with an EFI system partition of 512 MiB and one for minos when
+the session started by UEFI, an MBR with one partition when it started by BIOS (a GPT with GRUB's own
+partition on a disk over 2 TiB); for partitions that exist, the one for minos formatted unless it is ext4
+and kept, and an EFI system partition formatted unless it is FAT already. `check` says what stops a plan
+on this machine (a disk in use or the one the session runs from, a partition too small, no EFI system
+partition on UEFI, a GPT with no partition for GRUB on BIOS), `describe` says it for people, and `apply`
+ends with the installer the medium carries, `sh /cdrom/minos/setup live desktop PARTITION USER PASSWORD
+[--esp ESP]`. What was said stays in `/tmp/minos-installer.log`, and how it ended in
+`/tmp/minos-installer.status`. `minos-installer` is an interface over it, screens drawn by whiptail: the
+disk (asked when there are several), the whole disk or partitions made with `cfdisk` and picked from a
+list, a user and its password, the plan as the engine describes it, and one confirmation. It runs as the
+session's user and asks sudo for the engine alone; another interface can take its place without touching
+the engine.
+
+Both take `--try` on a machine that is not the live session: the disk chosen is partitioned and formatted
+for real, the `setup` command is shown, not run, and `--firmware uefi|bios` says which firmware the
+questions are for. `iso/installer/Vagrantfile` is that machine: the minos desktop box with a second, empty
+disk of 16 GB, whiptail added, and `Win+i` bound to the installer of that folder (`/vagrant` in the box),
+so a change to either file shows the next time the key is pressed:
+
+    $ cd iso/installer && vagrant up     # log in (vagrant / vagrant), then Win+i
 
 Every file the build changes or adds for the live session alone (casper's configuration, slim's
-autologin, the installer's key in i3's configuration and in minos' help, `minos-installer`, the
-`minos-live` filter and the plugins' links and marks below) is named in `/var/lib/minos/live-only`,
+autologin, the installer's key in i3's configuration and in minos' help, `minos-installer` and
+`minos-installer-engine`, the `minos-live` filter and the plugins' links and marks below) is named in
+`/var/lib/minos/live-only`,
 and what it was before is kept in `/var/lib/minos/live-only.d`. The minos installer, copying the live
 system (`/rofs`) to a disk, puts those copies back and removes the files that had none, purges casper,
 and installs GRUB from `minos/bootloader`.
@@ -231,8 +258,9 @@ It keeps the screen at GRUB's menu, on the desktop, with the probe and with the 
     $ iso/live-check output/minos-24.04-amd64.iso secureboot usb output/live
 
 `iso/install-check` installs minos from the live session onto an empty disk (SATA or NVMe) with no
-network, as a person would: a probe partitions the disk, and the installer's key (`Win+i`) is answered key
-by key. Then the disk boots alone, still with no network, to slim, where the user logs in, and to i3, and
+network: the installer's key (`Win+i`) must open its window, and a probe has the installer's engine plan
+the whole disk and apply that plan (the screens are not answered: their questions are still changing).
+Then the disk boots alone, still with no network, to slim, where the user logs in, and to i3, and
 stays up until `minos-untrim` has had its try (after connman's 2 minutes of waiting for a network), which
 must fail and leave the unit enabled; and, with `PHASES="install boot untrim"`, once more with a network,
 until `minos-untrim` is through. After each

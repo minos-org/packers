@@ -465,170 +465,29 @@ _make_live() { #root => ROOT made the live session of the ISO: casper, its user 
         \$1 == \"default_user\" {\$0 = \"default_user        ${_make_live__user}\"; user = 1}
         \$1 == \"auto_login\" {\$0 = \"auto_login          yes\"; auto = 1}
         {print} END {exit !(user && auto)}"
-    #i3: minos' own configuration, and the installer one key away, \$Win+i, in a terminal of its own, full screen
+    #i3: minos' own configuration, and the installer one key away, \$Win+i, in a terminal of its own that
+    #floats in the middle of the screen, the size of the installer's screens (minos-installer --window)
     # shellcheck disable=SC2016 # i3's variables, not the shell's
     _replace_file "${1}" /etc/i3/config '
         /^set \$Win / {win = 1} {print}
         END {
             print ""
             print "#the live session of the minos ISO: the installer, one key away"
-            print "for_window [class=\"^URxvt$\" instance=\"^minos-installer$\"] fullscreen"
+            print "for_window [class=\"^URxvt$\" instance=\"^minos-installer$\"] floating enable, move position center"
             print "#        $Win+i"
-            print "bindcode $Win+31 exec urxvt -name minos-installer -title \"minos installer\" -e minos-installer"
+            print "bindcode $Win+31 exec minos-installer --window"
             exit !win
         }'
     #the key in minos' help (F1), which the welcome of the first login points to
     _replace_file "${1}" /etc/minos/help '{print} /<f1>/ && !done {print "      <win><i>       ⇨  install minos (the live session)"; done = 1}
         END {exit !done}'
+    #the installer and its engine, as they are in iso/installer
     mkdir -p "${1}/usr/local/bin"
-    _live_only "${1}" /usr/local/bin/minos-installer
-    cat > "${1}/usr/local/bin/minos-installer" << 'E=O=F'
-#!/bin/sh
-# shellcheck disable=SC2154 # answer, user, again and confirm: set by _read
-#the minos installer of the live session (Win+i), in this terminal: asks where minos goes and for whom,
-#then copies this live system there with the minos installer the medium carries (setup live desktop),
-#which needs no network. It partitions nothing by itself, cfdisk is offered for that, and it formats only
-#the partitions named here, once the name of the one for minos has been typed. What setup says also goes
-#to /tmp/minos-installer.log, and how it ended (its exit status) to /tmp/minos-installer.status
-#usage: minos-installer
-
-setup="/cdrom/minos/setup"; log="/tmp/minos-installer.log"; status="/tmp/minos-installer.status"
-trap 'stty echo 2>/dev/null' EXIT
-trap 'exit 130' INT TERM HUP
-
-_read() { #variable prompt => a line read into VARIABLE as typed; the input closed ends the installer
-    printf "%s" "${2}"
-    IFS= read -r "${1}" || { printf "\n"; exit 1; }
-}
-
-_end() { #message => said, and the terminal kept open until Enter
-    printf "%s\n" "${1}" "" "Press Enter to close."
-    IFS= read -r _end__line || :
-    exit 1
-}
-
-_partition() { #name => /dev/NAME, when it is a partition
-    _partition__dev="/dev/${1#/dev/}"
-    [ "$(lsblk -dno TYPE "${_partition__dev}" 2>/dev/null)" = "part" ] || return 1
-    printf "%s" "${_partition__dev}"
-}
-
-_fstype() { #partition => the file system on it, nothing when it has none
-    sudo blkid -o value -s TYPE "${1}" 2>/dev/null
-}
-
-printf "%s\n" "minos installer" "" \
-    "minos-desktop goes onto a partition of a disk, copied from this live system: no network is needed." \
-    "Nothing is written until the end, after you type the name of that partition."
-while :; do
-    printf "\n"; lsblk -e 7,11 -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT; printf "\n"
-    _read disk "To make or change partitions first, name a disk for cfdisk (sda, nvme0n1...), or press Enter to go on: "
-    [ -n "${disk}" ] || break
-    sudo cfdisk "/dev/${disk#/dev/}"
-done
-
-#the disk this live system runs from, when it is not a CD: none of its partitions
-medium="$(lsblk -dno PKNAME "$(findmnt -no SOURCE /cdrom 2>/dev/null)" 2>/dev/null)"
-while :; do
-    _read root "The partition for minos, mounted on / (sda2, nvme0n1p2...): "
-    if ! root="$(_partition "${root}")"; then
-        printf "%s\n" "That is not a partition."
-    elif [ -n "$(lsblk -no MOUNTPOINT "${root}")" ]; then
-        printf "%s\n" "${root} is in use, mounted on $(lsblk -no MOUNTPOINT "${root}" | head -n 1)."
-    elif [ -n "${medium}" ] && [ "$(lsblk -dno PKNAME "${root}")" = "${medium}" ]; then
-        printf "%s\n" "${root} is on the disk this live system runs from."
-    else
-        break
-    fi
-done
-#ext4 may stay, with the files on it; anything else is formatted
-format_root="yes"
-if [ "$(_fstype "${root}")" = "ext4" ]; then
-    _read answer "${root} is ext4 already: format it, erasing everything on it? [y/N] "
-    case "${answer}" in [yY]*) ;; *) format_root="" ;; esac
-fi
-
-#UEFI boots from an EFI system partition: the one on the disk of /, or another one named. One that holds
-#a file system already stays as it is: it may hold the boot loaders of other systems
-esp=""; format_esp=""
-if [ -d /sys/firmware/efi ]; then
-    found="$(lsblk -lnpo NAME,PARTTYPE "/dev/$(lsblk -dno PKNAME "${root}")" | awk '
-        tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" || tolower($2) == "0xef" {print $1; exit}')"
-    while :; do
-        _read esp "The EFI system partition, mounted on /boot/efi${found:+ (Enter for ${found})}: "
-        [ -n "${esp}" ] || esp="${found}"
-        if ! esp="$(_partition "${esp}")"; then
-            printf "%s\n" "That is not a partition."
-        elif [ "${esp}" = "${root}" ]; then
-            printf "%s\n" "That is the partition for minos."
-        else
-            case "$(_fstype "${esp}")" in
-                vfat) break ;;
-                "") format_esp="yes"; break ;;
-                *) printf "%s\n" "${esp} holds $(_fstype "${esp}"), and an EFI system partition is FAT." ;;
-            esac
-        fi
+    for _make_live__file in minos-installer minos-installer-engine; do
+        _live_only "${1}" "/usr/local/bin/${_make_live__file}"
+        cp "${here}/installer/${_make_live__file}" "${1}/usr/local/bin/${_make_live__file}"
+        chmod 755 "${1}/usr/local/bin/${_make_live__file}"
     done
-fi
-
-while :; do
-    _read user "Your user name (lower case letters, digits, - and _, a letter first): "
-    case "${user}" in
-        ""|[!a-z]*|*[!a-z0-9_-]*) printf "%s\n" "That is not a user name minos takes." ;;
-        *) if grep -q "^${user}:" /rofs/etc/passwd; then
-               printf "%s\n" "${user} is one of the system's own users."
-           else
-               break
-           fi ;;
-    esac
-done
-while :; do
-    stty -echo 2>/dev/null
-    _read pass "Its password: "; printf "\n"
-    _read again "The password again: "; printf "\n"
-    stty echo 2>/dev/null
-    if [ -z "${pass}" ]; then
-        printf "%s\n" "The password is empty."
-    elif [ "${pass}" != "${again}" ]; then
-        printf "%s\n" "The two differ."
-    else
-        break
-    fi
-done
-
-printf "\n%s\n" "minos-desktop goes to ${root}${format_root:+, formatted as ext4 first: everything on it is erased}."
-[ -z "${esp}" ] || printf "%s\n" "Its boot loader goes to ${esp}${format_esp:+, formatted as FAT32 first}."
-printf "%s\n\n" "The user is ${user}."
-_read confirm "Type ${root#/dev/} to install minos there, anything else to cancel: "
-[ "${confirm#/dev/}" = "${root#/dev/}" ] || _end "Cancelled: nothing was written."
-
-if [ -n "${format_root}" ]; then
-    printf "%s\n" "Formatting ${root} as ext4 ..."
-    sudo mkfs.ext4 -q -F "${root}" || _end "${root} could not be formatted."
-fi
-if [ -n "${format_esp}" ]; then
-    printf "%s\n" "Formatting ${esp} as FAT32 ..."
-    if command -v mkfs.vfat >/dev/null 2>&1; then
-        sudo mkfs.vfat -F 32 "${esp}"
-    else
-        sudo busybox mkdosfs -F 32 "${esp}"
-    fi || _end "${esp} could not be formatted."
-fi
-
-set -- live desktop "${root}" "${user}" "${pass}"
-[ -z "${esp}" ] || set -- "${@}" --esp "${esp}"
-rm -f "${status}"
-{ sudo sh "${setup}" "${@}"; printf "%s\n" "${?}" > "${status}"; } 2>&1 | tee "${log}"
-if [ "$(cat "${status}" 2>/dev/null)" = "0" ]; then
-    _read answer "minos is installed. Restart now? [y/N] "
-    case "${answer}" in [yY]*) sudo reboot ;; esac
-    exit 0
-fi
-_end "The install did not finish: what setup said is in ${log}."
-
-# vim: set ts=8 sw=4 tw=0 ft=sh :
-E=O=F
-    chmod 755 "${1}/usr/local/bin/minos-installer"
 }
 
 _write_untrim() { #root => in ROOT, disabled, minos-untrim.service and the script it runs: on a system the
@@ -950,6 +809,11 @@ number="${_line% *}"; codename="${_line#* }"
 [ "$(id -u)" = 0 ] || _die "runs as root: debootstrap, chroot and the mounts they need"
 for _tool in debootstrap mksquashfs xorriso mkfs.vfat mmd mcopy depmod modinfo dpkg-deb md5sum chroot; do
     command -v "${_tool}" >/dev/null 2>&1 || _die "no ${_tool}"
+done
+#the live session's installer, beside this script
+here="$(cd "$(dirname "${0}")" && pwd)"
+for _file in minos-installer minos-installer-engine; do
+    [ -f "${here}/installer/${_file}" ] || _die "no ${here}/installer/${_file}"
 done
 case "${setup}" in *://*) ;; *) setup="$(_absolute "${setup}")" ;; esac
 #apt and debootstrap check what a mirror serves against the archive's signed Release: plain http will do

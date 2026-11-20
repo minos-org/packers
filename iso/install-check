@@ -1,17 +1,17 @@
 #!/bin/sh
-#install minos from an ISO's live session onto an empty disk, with no network, as a person would, then
-#boot that disk alone, in QEMU with KVM, by BIOS (SeaBIOS), UEFI (OVMF) or UEFI with Secure Boot on. The
-#live session boots from a CD; a probe from a second CD partitions the disk (one partition on BIOS; an
-#EFI system partition and one for minos on UEFI) and leaves it unformatted, and the installer's key
-#(Win+i) is answered key by key: no cfdisk, the partition, the EFI partition it finds, a user, its
-#password twice, the partition's name to confirm. Then the disk boots alone, still with no network, to
+#install minos from an ISO's live session onto an empty disk, with no network, then boot that disk alone,
+#in QEMU with KVM, by BIOS (SeaBIOS), UEFI (OVMF) or UEFI with Secure Boot on. The live session boots
+#from a CD. The installer's key (Win+i) must open its window, which is kept as a screen and closed; then
+#a probe from a second CD has the installer's engine do what the screens would have it do: a plan for the
+#whole of the empty disk, for the firmware the session started by, checked, described and applied for a
+#user. The screens themselves are not answered here. Then the disk boots alone, still with no network, to
 #slim, where the user logs in, and to i3, and stays up until minos-untrim has had its try, which must fail
 #and leave the unit enabled. The disk is read here after each boot: the files dpkg --verify finds
 #missing, what the copy left out, the boot loader, the boot's journal.
 #usage: [PHASES="install boot [untrim]"] install-check ISO FIRMWARE DISK OUTPUT [MINUTES]
 #  FIRMWARE    bios, uefi or secureboot
 #  DISK        sata or nvme, the disk minos goes to
-#  PHASES      install (the live session, the installer), boot (the disk alone, no network), untrim (the
+#  PHASES      install (the live session, the engine), boot (the disk alone, no network), untrim (the
 #              disk alone with a network, read once minos-untrim is through). boot and untrim alone use
 #              the disk OUTPUT/NAME.img an earlier run, or another installer, left; ISO is then unused
 #  => in OUTPUT, for NAME=FIRMWARE-DISK: NAME.img (the disk), NAME.serial.log (the probe in the live
@@ -41,30 +41,43 @@ _step() { #message => one line on stdout, with the seconds since the start
 # shellcheck source=iso/qemu-lib
 . "$(dirname "${0}")/qemu-lib"
 
-_write_probe() { #dir => DIR/probe.iso, a CD labelled PROBE: prepare partitions the disk and leaves watch
-    #behind, which says on the serial port how the installer ended and what it said
+_write_probe() { #dir => DIR/probe.iso, a CD labelled PROBE: prepare has the installer's engine plan the
+    #whole disk and apply that plan, and leaves watch behind, which says on the serial port how the install
+    #ended and what was said
     mkdir -p "${1}/probe"
     cat > "${1}/probe/prepare" << 'E=O=F'
 #!/bin/sh
-#install-check's probe, run as root in the live session: DISK partitioned as LABEL (dos: one partition;
-#gpt: an EFI system partition of 256 MiB and one for minos), nothing formatted
+#install-check's probe, run as root in the live session: the installer's window, which Win+i must open
+#once this says ready, seen and closed; then the installer's engine asked for a plan that takes the
+#whole of DISK, and that plan applied for USER with PASSWORD
 _say() { printf "probe: %s\n" "${*}" > /dev/ttyS0; }
-case "${2}" in
-    dos) printf "%s\n" "label: dos" ",,L" | sfdisk -q "${1}" ;;
-    gpt) printf "%s\n" "label: gpt" ",256M,U" ",,L" | sfdisk -q "${1}" ;;
-esac || { _say "sfdisk failed on ${1}"; exit 1; }
-udevadm settle
-_say "partitioned ${1}: $(lsblk -lnpo NAME,SIZE,PARTTYPE "${1}" | tr -s ' ' | tr '\n' ',')"
+#typed again when the first time was slow to answer: once is enough
+mkdir /tmp/probe.once 2>/dev/null || exit 0
+engine="/usr/local/bin/minos-installer-engine"
 _say "network: $(ip -4 -o address show scope global | awk '{print $2 " " $4}' | head -n 1) (none expected)"
+_say "ready"
+waited=0
+until pgrep -f "urxvt -name minos-installer" > /dev/null; do
+    sleep 1; waited="$((waited + 1))"
+    [ "${waited}" -lt 90 ] || { _say "installer: no window after ${waited} s"; exit 1; }
+done
+_say "installer: open"
+#the screen is taken meanwhile
+sleep 15
+pkill -f "urxvt -name minos-installer"
+_say "disk: $(lsblk -lnpo NAME,SIZE,TYPE,FSTYPE "${1}" | tr -s ' ' | tr '\n' ',')"
+_say "engine: $("${engine}" facts 2>&1 | tr '\n' ',')"
+"${engine}" plan whole "${1}" > /tmp/probe.plan 2> /tmp/probe.said || { _say "plan: none, $(cat /tmp/probe.said)"; exit 1; }
+"${engine}" check /tmp/probe.plan > /tmp/probe.said 2>&1 || { _say "plan: refused, $(tr '\n' ' ' < /tmp/probe.said)"; exit 1; }
+"${engine}" describe /tmp/probe.plan | while IFS= read -r line; do _say "plan: ${line}"; done
 setsid sh /mnt/watch < /dev/null > /dev/null 2>&1 &
+printf "%s\n" "${3}" | setsid sh "${engine}" apply /tmp/probe.plan "${2}" > /dev/null 2>&1 &
 _say "prepared"
 E=O=F
     cat > "${1}/probe/watch" << 'E=O=F'
 #!/bin/sh
-#install-check's watcher: how the installer ended, and what setup said, on the serial port
+#install-check's watcher: how the install ended, and what the engine and setup said, on the serial port
 _say() { printf "probe: %s\n" "${*}" > /dev/ttyS0; }
-until pgrep -f /usr/local/bin/minos-installer > /dev/null; do sleep 1; done
-_say "installer: open"
 until pgrep -f "/cdrom/minos/setup live" > /dev/null || [ -f /tmp/minos-installer.status ]; do sleep 1; done
 _say "install: started"
 waited=0
@@ -75,7 +88,7 @@ done
 sync
 sed 's/\x1b\[[0-9;]*m//g; s/\r/\n/g' /tmp/minos-installer.log | tr -d '\b' |
     while IFS= read -r line; do _say "log: ${line}"; done
-_say "install: setup exited $(cat /tmp/minos-installer.status) after ${waited} s"
+_say "install: the engine exited $(cat /tmp/minos-installer.status) after ${waited} s"
 _say "install: done"
 E=O=F
     xorriso -report_about WARNING -as mkisofs -V PROBE -J -r -o "${1}/probe.iso" "${1}/probe" 2>/dev/null ||
@@ -153,7 +166,7 @@ _read_disk() { #title => NAME.facts gets TITLE and what the disk holds: the file
         # shellcheck disable=SC2016 # dpkg-query's format, not the shell's
         printf "casper: %s\n" "$(chroot "${_read_disk__root}" dpkg-query -W -f='${db:Status-Abbrev}${Version}' casper 2>/dev/null || printf "not installed")"
         for _read_disk__path in /etc/dpkg/dpkg.cfg.d/minos-live /var/lib/minos/live-only /usr/local/bin/minos-installer \
-            /etc/netplan/90-minos-live.yaml /etc/casper.conf /etc/systemd/system/systemd-networkd-wait-online.service \
+            /usr/local/bin/minos-installer-engine /etc/netplan/90-minos-live.yaml /etc/casper.conf /etc/systemd/system/systemd-networkd-wait-online.service \
             /var/lib/minos/live-trimmed /etc/dpkg/dpkg.cfg.d/minos-docs; do
             if [ -e "${_read_disk__root}${_read_disk__path}" ] || [ -L "${_read_disk__root}${_read_disk__path}" ]; then
                 printf "present: %s\n" "${_read_disk__path}"
@@ -211,12 +224,12 @@ _read_disk() { #title => NAME.facts gets TITLE and what the disk holds: the file
     losetup -d "${_read_disk__loop}"
 }
 
-case "${firmware}" in bios) layout="dos"; root_number=1; esp_number="" ;; *) layout="gpt"; root_number=2; esp_number=1 ;; esac
+#what the engine's plan for a whole disk gives: one partition on BIOS, the EFI system partition and then
+#the one for minos on UEFI
+case "${firmware}" in bios) root_number=1; esp_number="" ;; *) root_number=2; esp_number=1 ;; esac
 case "${disk}" in
-    sata) device="sda"; partition="sda${root_number}"
-          target_device="ide-hd,drive=target,bus=ide.2,serial=MINOS0001" ;;
-    nvme) device="nvme0n1"; partition="nvme0n1p${root_number}"
-          target_device="nvme,drive=target,serial=MINOS0001" ;;
+    sata) device="sda"; target_device="ide-hd,drive=target,bus=ide.2,serial=MINOS0001" ;;
+    nvme) device="nvme0n1"; target_device="nvme,drive=target,serial=MINOS0001" ;;
     *) _die "the disk is sata or nvme" ;;
 esac
 [ -c /dev/kvm ] || _die "no /dev/kvm"
@@ -249,33 +262,27 @@ case " ${phases} " in *" install "*)
     for _try in 1 2 3; do
         _press meta_l-ret
         sleep 5
-        _type "sudo mount -r -L PROBE /mnt; sudo sh /mnt/prepare /dev/${device} ${layout}"
+        _type "sudo mount -r -L PROBE /mnt; sudo sh /mnt/prepare /dev/${device} ${user} ${password}"
         _press ret
-        ! _wait_serial "probe: prepared" 60 || break
+        ! _wait_serial "probe: ready" 60 || break
         _screen "probe-${_try}"
         [ "${_try}" != 3 ] || _die "the probe said nothing"
     done
-    _step "the disk partitioned; the installer (Win+i)"
+    _step "the installer's window (Win+i)"
     _press meta_l-i
-    _wait_serial "probe: installer: open" 60 || { _screen timeout; _die "Win+i opened no installer"; }
-    sleep 5
-    _press ret; sleep 3                                     #no cfdisk
-    _type "${partition}"; _press ret; sleep 3               #the partition for minos, formatted
-    if [ -n "${esp_number}" ]; then _press ret; sleep 3; fi #the EFI system partition it finds
-    _type "${user}"; _press ret; sleep 2
-    _type "${password}"; _press ret; sleep 2
-    _type "${password}"; _press ret; sleep 2
+    _wait_serial "probe: installer: open" 100 || { _screen timeout; _die "Win+i opened no installer"; }
+    sleep 6
     _screen installer
-    _type "${partition}"; _press ret                        #the confirmation
-    _wait_serial "probe: install: started" 120 || { _screen timeout; _die "the installer did not start setup"; }
-    _step "setup runs"
-    _wait_serial "probe: install: done" "$((minutes * 120))" || { _screen timeout; _die "the installer did not end"; }
+    _wait_serial "probe: prepared" 60 || { _screen timeout; _die "the engine made no plan for /dev/${device}: $(grep '^probe: plan: ' "${serial}" | tail -n 1)"; }
+    _wait_serial "probe: install: started" 120 || { _screen timeout; _die "the engine did not start setup"; }
+    _step "the plan applied so far; setup runs"
+    _wait_serial "probe: install: done" "$((minutes * 120))" || { _screen timeout; _die "the install did not end"; }
     _screen installed
     _monitor quit >/dev/null || :
     qemu=""
-    sed -n 's/^probe: \(install: \|partitioned\)/\1/p' "${serial}"
-    grep -q "^probe: install: setup exited 0 " "${serial}" ||
-        { grep '^probe: log: ' "${serial}" | tail -n 30 >&2; _die "the installer failed, see ${serial}"; }
+    sed -n 's/^probe: \(install: \|disk: \|engine: \|plan: \)/\1/p' "${serial}"
+    grep -q "^probe: install: the engine exited 0 " "${serial}" ||
+        { grep '^probe: log: ' "${serial}" | tail -n 30 >&2; _die "the install failed, see ${serial}"; }
     ;;
 esac
 

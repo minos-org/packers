@@ -170,7 +170,7 @@ for _try in 1 2 3; do
     [ "${_try}" != 3 ] || _die "the probe said nothing"
 done
 _screen terminal
-#the installer's key, Win+i: its terminal, full screen
+#the installer's key, Win+i: its window, floating in the middle of the screen
 _press meta_l-i
 sleep 5
 _screen installer
