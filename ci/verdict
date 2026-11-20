@@ -53,10 +53,11 @@ awk -v flavour="${flavour}" -v release="${release}" '
             #casper booted the medium: its squashfs, read-only, under the session
             must("^medium$", " on /cdrom \\(iso9660\\), .* on /rofs \\(squashfs\\)")
             must("^network$", "^[a-z][a-z0-9]* [0-9.]+/[0-9]+ ")
-            #the session carries the drivers of the cards of virtual machines, and the VGA card QEMU gives it
-            #(iso/live-check) is driven by its own, bochs, which offers more than one mode: no card is left
-            #to the framebuffer of the firmware (simple-framebuffer), which has the one mode it was left in
-            must("^display$", "^drivers vmwgfx vboxvideo virtio-gpu bochs; card[0-9] bochs-drm, ([2-9]|[1-9][0-9]+) modes; fb: ")
+            #the session carries the drivers of the cards of virtual machines (Cirrus by its name on 6.8 or on
+            #7.0), and the VGA card QEMU gives it (iso/live-check) is driven by its own, bochs, which offers more
+            #than one mode: no card is left to the framebuffer of the firmware (simple-framebuffer), which has
+            #the one mode it was left in
+            must("^display$", "^drivers vmwgfx vboxvideo virtio-gpu bochs hyperv_drm qxl cirrus(-qemu)?; card[0-9] bochs-drm, ([2-9]|[1-9][0-9]+) modes; fb: ")
             #the vim, tmux and shell plugins came with the image: each manager has plugins besides itself, and
             #the login hook of minos-core-settings found none to install, with the cable in and with it out
             must("^plugins$", plugins)

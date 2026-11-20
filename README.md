@@ -147,17 +147,17 @@ and installs GRUB from `minos/bootloader`.
 
 The ISO carries the kernel modules and the firmware of the wired and wireless network and of what booting
 needs (disks, USB, input, a basic display through `simpledrm`), and the drivers of the cards virtual
-machines give it (`vmwgfx`, `vboxvideo`, `virtio-gpu`, `bochs`: no firmware, about 0.6 MB of the ISO), so
-that a live session in one changes modes, which the firmware's framebuffer cannot; nothing else: before
-the kernel is installed, `/etc/dpkg/dpkg.cfg.d/minos-live` tells dpkg to leave the rest out. The modules
-kept are named by directory or by file in `_modules_wanted`, with whatever they need; the firmware kept is
-what those modules ask for (`modinfo -F firmware`). The packages whose files it left out are listed in
-`/var/lib/minos/live-trimmed`. A system copied from the live one goes without the filter and gets the rest
-back with the network: `minos-untrim.service` (disabled in the live session, enabled by the copy) runs
-`/usr/local/sbin/minos-untrim` once a network is up, which reinstalls those packages (`apt-get install
---reinstall`, or the archive's newer version), and the archive's current kernel when the one installed
-can no longer be downloaded; while that fails it tries again every 10 minutes and at each boot, and once
-it works it disables itself.
+machines give it (`vmwgfx`, `vboxvideo`, `virtio-gpu`, `bochs`, `hyperv_drm`, `qxl`, `cirrus`: no
+firmware, about 0.7 MB of the ISO), so that a live session in one changes modes, which the firmware's
+framebuffer cannot; nothing else: before the kernel is installed, `/etc/dpkg/dpkg.cfg.d/minos-live` tells
+dpkg to leave the rest out. The modules kept are named by directory or by file in `_modules_wanted`, with
+whatever they need; the firmware kept is what those modules ask for (`modinfo -F firmware`). The packages
+whose files it left out are listed in `/var/lib/minos/live-trimmed`. A system copied from the live one
+goes without the filter and gets the rest back with the network: `minos-untrim.service` (disabled in the
+live session, enabled by the copy) runs `/usr/local/sbin/minos-untrim` once a network is up, which
+reinstalls those packages (`apt-get install --reinstall`, or the archive's newer version), and the
+archive's current kernel when the one installed can no longer be downloaded; while that fails it tries
+again every 10 minutes and at each boot, and once it works it disables itself.
 
 Like Ubuntu's minimized images, the ISO carries no documentation, manual pages or translations of
 messages (`/etc/dpkg/dpkg.cfg.d/minos-docs`; the copyright files stay, and so do the locales' definitions,

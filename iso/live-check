@@ -57,10 +57,15 @@ _say "firmware" "$([ -d /sys/firmware/efi ] && printf uefi || printf bios), Secu
 _say "kernel command line" "$(wc -l < /proc/modules) modules loaded; $(cat /proc/cmdline)"
 #the display: the drivers of virtual machines' cards the ISO carries (iso/build's _modules_wanted), where
 #modprobe finds them; then each card's driver and the modes its outputs offer: the firmware's framebuffer
-#(simple-framebuffer) has the one it was left in, a card's own driver has more
+#(simple-framebuffer) has the one it was left in, a card's own driver has more. A driver renamed between
+#kernels is a list of its names, the first one modprobe finds is said (cirrus became cirrus-qemu in 7.0)
 drivers=""; missing=""
-for module in vmwgfx vboxvideo virtio-gpu bochs; do
-    if [ -f "$(modinfo -n "${module}" 2>/dev/null)" ]; then drivers="${drivers} ${module}"; else missing="${missing} ${module}"; fi
+for names in vmwgfx vboxvideo virtio-gpu bochs hyperv_drm qxl cirrus,cirrus-qemu; do
+    found=""
+    for module in $(printf "%s" "${names}" | tr ',' ' '); do
+        [ -n "${found}" ] || [ ! -f "$(modinfo -n "${module}" 2>/dev/null)" ] || found="${module}"
+    done
+    if [ -n "${found}" ]; then drivers="${drivers} ${found}"; else missing="${missing} ${names}"; fi
 done
 _say "display" "drivers${drivers}${missing:+, missing${missing}}; $(for card in /sys/class/drm/card[0-9]; do printf "%s %s, %s modes; " "${card##*/}" "$(basename "$(readlink "${card}/device/driver")")" "$(cat "${card}/${card##*/}"-*/modes 2>/dev/null | sort -u | wc -l)"; done)fb: $(tr '\n' ' ' < /proc/fb); X: $(grep -o -m 3 -E '(modeset|fbdev|vesa)\([0-9]\): [^,]*' /var/log/Xorg.0.log | tr '\n' ' ')"
 _say "medium" "$(awk '$3 == "iso9660" || $3 == "squashfs" || $2 == "/" || $2 == "/cdrom" {printf "%s on %s (%s), ", $1, $2, $3}' /proc/mounts)"

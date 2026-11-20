@@ -5,8 +5,8 @@
 #on UEFI, Secure Boot included through the archive's signed shim and GRUB, from a CD or from the same
 #image written to a USB stick. The live system carries the kernel modules and the firmware of the wired
 #and wireless network and of what booting needs (disks, USB, input, a basic display through simpledrm),
-#and the drivers of the cards virtual machines give it (vmwgfx, vboxvideo, virtio-gpu, bochs), nothing
-#else: dpkg keeps the rest out (/etc/dpkg/dpkg.cfg.d/minos-live), and a system copied from the live one
+#and the drivers of the cards virtual machines give it (vmwgfx, vboxvideo, virtio-gpu, bochs, hyperv_drm,
+#qxl, cirrus), nothing else: dpkg keeps the rest out (/etc/dpkg/dpkg.cfg.d/minos-live), and a system copied from the live one
 #gets it back with the network (minos-untrim.service reinstalls the packages /var/lib/minos/live-trimmed
 #lists). Like Ubuntu's minimized images it carries no documentation, manual pages or translations of messages
 #(/etc/dpkg/dpkg.cfg.d/minos-docs), and a system copied from it keeps that. The boot loaders such a
@@ -255,9 +255,14 @@ _modules_wanted() { #=> the kernel modules the live system preloads, below /lib/
     printf "%s\\n" "+ kernel/drivers/gpu/drm/tiny/simpledrm.ko"
     #the cards of virtual machines, each by its own driver: the firmware's framebuffer keeps the one mode it
     #was left in, and a card's driver changes modes. VMware's and VirtualBox's VMSVGA (vmwgfx), VirtualBox's
-    #VBoxVGA and VBoxSVGA (vboxvideo), QEMU's VGA (bochs) and virtio-gpu; none asks for firmware
+    #VBoxVGA and VBoxSVGA (vboxvideo), QEMU's VGA (bochs) and virtio-gpu, Hyper-V's synthetic video
+    #(hyperv_drm), the QXL card of SPICE guests (qxl) and QEMU's Cirrus card (cirrus on 22.04's 6.8,
+    #cirrus-qemu from 7.0 on); none asks for firmware. hyperv_drm needs the VMBus (hv_vmbus), which the
+    #disk, network and input drivers of a Hyper-V guest have taken already
     printf "%s\\n" "+ kernel/drivers/gpu/drm/vmwgfx/vmwgfx.ko" "+ kernel/drivers/gpu/drm/vboxvideo/vboxvideo.ko" \
-        "+ kernel/drivers/gpu/drm/virtio/virtio-gpu.ko" "+ kernel/drivers/gpu/drm/tiny/bochs.ko"
+        "+ kernel/drivers/gpu/drm/virtio/virtio-gpu.ko" "+ kernel/drivers/gpu/drm/tiny/bochs.ko" \
+        "+ kernel/drivers/gpu/drm/hyperv/hyperv_drm.ko" "+ kernel/drivers/gpu/drm/qxl/qxl.ko" \
+        "+ kernel/drivers/gpu/drm/tiny/cirrus.ko" "+ kernel/drivers/gpu/drm/tiny/cirrus-qemu.ko"
     #what all of them ask for by name rather than by symbol: cryptography and the kernel's own libraries
     printf "%s\\n" "+ kernel/crypto/" "+ kernel/arch/x86/crypto/" "+ kernel/lib/"
 }
