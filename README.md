@@ -130,7 +130,8 @@ uses and run in the system), so a copy of it is the system live mode would boots
 The live session: casper's user `minos`, whom slim logs into i3; the network is minos-desktop's own,
 connman for the wired and the wireless cards, its name server reached through systemd-resolved (the
 `connman` module of minos-desktop-settings). In i3, `Win+i` opens the installer in a window of its own
-that floats in the middle of the screen, and minos' help (`F1`) lists that key.
+that floats in the middle of the screen, minos' help (`F1`) lists that key, and the menu of the background
+has "Install minos" as its first entry. The session's clock is in the time zone an install starts on.
 
 The installer is two files, `iso/installer/minos-installer` and `iso/installer/minos-installer-engine`,
 copied to `/usr/local/bin` as they are. The engine knows the machine and writes the disk; it asks nothing
@@ -172,19 +173,21 @@ it, kept when it is there, made when there is room. A disk that holds something 
 it until that is chosen. The password goes to `setup` on its standard input (`live ... USER - --now`), and
 `--now` has `setup` skip its own countdown.
 
-The step of the user answers one worry, whether what was typed is what was meant. A name is taken as typed
-and judged by the engine (`user NAME`), which refuses it in a sentence that says what a name is: lower
-case letters, digits, `-` and `_`, a letter first, 32 at most, and no user or group the copied system
-has. The password is asked twice while it is typed blind and once while it is seen (`F5`). The keyboard
-shown is the one that is active, as the X session has it (`setxkbmap -query`, so also after minos' own
-key, Alt and the right Shift), and is changed there: `F2` moves to the next layout of minos' list
-(`minos-config keyboard-layouts`), `F3` lists every layout xkb knows; what was typed as a password goes
-with the old keyboard. On the console the keyboard is the one the system was set to and is not changed
-from the installer. The same step shows the time zone, the session's until another is chosen, with the
-time it is there: `F4` lists every zone the session's tzdata has (its `tzdata.zi`), narrowed by what is
-typed, in a window and on the console alike. `Ctrl-K`, `Ctrl-O`, `Ctrl-T` and `Ctrl-P` do what `F2` to
-`F5` do, where a terminal keeps the function keys. The installed system takes that keyboard and that zone
-(`setup ... --keyboard LAYOUT[:VARIANT] --timezone ZONE`), so it asks for the password with the keys it
+The step of the user answers one worry, whether what was typed is what was meant. A name is taken as typed and
+judged by the engine (`user NAME`), which refuses it in a sentence that says what a name is: lower case
+letters, digits, `-` and `_`, a letter first, 32 at most, and no user or group the copied system has. The
+password is asked twice while it is typed blind and once while it is seen (`F5`). The keyboard shown is the
+one that is active, as the X session has it (`setxkbmap -query`, so also after minos' own key, Alt and the
+right Shift), and is changed there: `F2` moves to the next layout of minos' list (`minos-config
+keyboard-layouts`), `F3` lists every layout xkb knows; what was typed as a password goes with the old
+keyboard. On the console the keyboard is the one the system was set to and is not changed from the installer.
+The same step shows the time zone, with the time it is there: minos' own, America/Mexico_City, until another
+is chosen. `F4` lists every zone the session's tzdata has (its `tzdata.zi`), minos' three first (Mexico City,
+Caracas, New York: the engine names them, in one place, and the first is the one an install starts on),
+narrowed by what is typed, in a window and on the console alike. The ISO's live session has its clock in that
+first zone, so the bar and the installer tell the same hour. `Ctrl-K`, `Ctrl-O`, `Ctrl-T` and `Ctrl-P` do what
+`F2` to `F5` do, where a terminal keeps the function keys. The installed system takes that keyboard and that
+zone (`setup ... --keyboard LAYOUT[:VARIANT] --timezone ZONE`), so it asks for the password with the keys it
 was typed with.
 
 The installer runs as the session's user and asks sudo for the engine alone; another interface can take
@@ -289,8 +292,9 @@ writes on the serial port what the session says about itself (the boot; the disp
 virtual machines' cards it carries, the driver of the card and the modes it offers; what slim
 waited for, where the medium is mounted, the plugins the image brought and whether the login hook had
 any left to install, and `ci/probe-common`, which the CD carries: the network and
-whether names resolve among it), then opens the installer's key (Win+i). With `CABLE=no` the network card's cable is out from power on: the session must
-come up all the same, and the probe find no address.
+whether names resolve among it), then opens the installer's key (Win+i); and, the desktop bare again, a
+click on the wallpaper must open the menu of the background with "Install minos" as its first row. With `CABLE=no` the network card's cable is out from power on: the session
+must come up all the same, and the probe find no address.
 It keeps the screen at GRUB's menu, on the desktop, with the probe and with the installer's terminal:
 
     $ iso/live-check output/minos-24.04-amd64.iso secureboot usb output/live

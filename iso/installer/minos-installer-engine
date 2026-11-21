@@ -11,8 +11,8 @@
 #                           partition the engine makes), system-mib (what is copied), medium (the disk
 #                           the session runs from, or -), try (yes, no), log (where apply keeps what was
 #                           said), progress (where it keeps how far it is), applying (the process of an
-#                           apply that is running, or -), timezone (this session's, which the installed
-#                           system takes unless another is chosen)
+#                           apply that is running, or -), timezone (the one the installed system
+#                           takes unless another is chosen: the timezone verb's)
 #  disks                    the machine's disks, a line each, tab-separated: device, size, model, why
 #                           minos cannot go to it (- when it can), what it holds (empty, or its partitions)
 #  partitions [DISK]        the partitions of DISK, or of every disk minos can go to, a line each,
@@ -52,8 +52,11 @@
 #  keyboards                the layouts to choose from, a line each, tab-separated: layout, its name,
 #                           own or other: minos' own list first (minos-config keyboard-layouts), then
 #                           every layout xkb knows. Needs no root
-#  timezones                the time zones to choose from, a line each: every zone this system's tzdata
-#                           knows and has a file for, as its own index says them. Needs no root
+#  timezone                 the time zone an install starts on: the first of minos' own that this
+#                           system has, and this session's when it has none of them. Needs no root
+#  timezones                the time zones to choose from, a line each, tab-separated: zone, own or
+#                           other: minos' own first, in their order, then every other zone this system's
+#                           tzdata knows and has a file for, as its own index says them. Needs no root
 #  --try        on a machine that is not the live session: apply writes the disk for real, then says
 #               the setup command it would run, and does not run it
 #  --firmware   with --try, the firmware plans are for, whatever this machine started by
@@ -108,6 +111,9 @@ progress="/tmp/minos-installer.progress"; pidfile="/tmp/minos-installer.pid"
 esp_mib=512
 #the least a partition of its own for /home is worth
 home_mib=256
+#minos' own time zones, in their order: an install starts on the first, and the three head the list of
+#zones. Nothing else names them: the ISO's build asks for the first one here (the timezone verb)
+timezones_own="America/Mexico_City America/Caracas America/New_York"
 #the types the firmware looks for, as blkid says them: the EFI system partition's on a GPT and on an MBR,
 #and the partition GRUB keeps itself in when BIOS starts a GPT disk
 esp_types="c12a7328-f81f-11d2-ba4b-00a0c93ec93b 0xef"
@@ -120,7 +126,7 @@ _die() { #message => on stderr, exit 1
 }
 
 _usage() { #=> the usage, on stderr, exit 2
-    sed -n '8,99s/^#//p' "${0}" >&2
+    sed -n '8,102s/^#//p' "${0}" >&2
     exit 2
 }
 
@@ -446,13 +452,27 @@ _timezone_now() { #=> the time zone of this system: the one its clock really fol
     printf "%s" "${_timezone_now__zone:-Etc/UTC}"
 }
 
-_timezone_list() { #=> the timezones verb: every zone this system's tzdata knows, a line each, as its own
-    #index says them (tzdata.zi: a Z line a zone, an L line another name of one). From 24.04 on the index
-    #still lists the old names (US/Pacific, Mexico/General), which live in another package: a name with
-    #no file is left out. Factory, the zone of a clock nobody set, is no choice
+_timezone_default() { #=> the timezone verb: the zone an install starts on, the first of minos' own that
+    #this system has; this session's when it has none of them
+    for _timezone_default__zone in ${timezones_own}; do
+        [ ! -f "/usr/share/zoneinfo/${_timezone_default__zone}" ] || { printf "%s" "${_timezone_default__zone}"; return 0; }
+    done
+    _timezone_now
+}
+
+_timezone_list() { #=> the timezones verb, "zone<TAB>own|other" a line: minos' own first, in their order,
+    #then every other zone this system's tzdata knows, as its own index says them (tzdata.zi: a Z line
+    #a zone, an L line another name of one). From 24.04 on the index still lists the old names
+    #(US/Pacific, Mexico/General), which live in another package: a name with no file is left out.
+    #Factory, the zone of a clock nobody set, is no choice
+    for _timezone_list__zone in ${timezones_own}; do
+        [ ! -f "/usr/share/zoneinfo/${_timezone_list__zone}" ] || printf "%s\town\n" "${_timezone_list__zone}"
+    done
     awk '$1 == "Z" && $2 != "Factory" {print $2} $1 == "L" {print $3}' /usr/share/zoneinfo/tzdata.zi 2>/dev/null | sort -u |
         while IFS= read -r _timezone_list__zone; do
-            [ ! -f "/usr/share/zoneinfo/${_timezone_list__zone}" ] || printf "%s\n" "${_timezone_list__zone}"
+            [ -f "/usr/share/zoneinfo/${_timezone_list__zone}" ] || continue
+            case " ${timezones_own} " in *" ${_timezone_list__zone} "*) continue ;; esac
+            printf "%s\tother\n" "${_timezone_list__zone}"
         done
 }
 
@@ -1532,6 +1552,7 @@ case "${verb}" in
         esac
         exit 0 ;;
     keyboards) _keyboard_list; exit 0 ;;
+    timezone) _timezone_default; printf "\n"; exit 0 ;;
     timezones) _timezone_list; exit 0 ;;
 esac
 [ "$(id -u)" = 0 ] || _die "runs as root"
@@ -1580,7 +1601,7 @@ case "${verb}" in
         applying="$(_applying)"
         printf "%s\n" "firmware ${firmware}" "root-mib ${root_mib}" "esp-mib ${esp_mib}" "system-mib ${system_mib}" \
             "medium ${medium:--}" "try ${try:-no}" "log ${log}" "progress ${progress}" "applying ${applying:--}" \
-            "timezone $(_timezone_now)" ;;
+            "timezone $(_timezone_default)" ;;
     disks) _scan; _list_disks ;;
     partitions)
         [ "${#}" -le 1 ] || _usage

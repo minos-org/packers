@@ -126,7 +126,8 @@ _live "live uefi cd, no cable" uefi cd no
 #minos installed from the live session, with no network, then the disk alone
 _install "install uefi sata" uefi sata "install boot untrim"
 #the keyboard changed in the installer before the password is typed, and the same keys at the disk's login;
-#a time zone chosen there, and the disk in it. The other two installs take the session's keyboard and zone
+#a time zone chosen there, and the disk in it. The other two installs take the session's keyboard and the
+#zone an install starts on, minos' own, which the session's clock is in
 _install "install bios sata, keyboard, zone" bios sata "install boot" empty latam Asia/Tokyo
 #beside what a disk holds, the plan changed in the installer, on a disk the kernel names as NVMe ones
 _install "install uefi nvme, beside" uefi nvme "install boot" beside

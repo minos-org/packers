@@ -8,7 +8,8 @@
 #one confirmation, the install as it happens, and "Restart now", after which the live session must
 #restart on its own. The password is typed by its keys with the keyboard the installer shows (changed
 #there when KEYBOARD says so), and by the same keys at the disk's login: the disk has that keyboard, and
-#the time zone the installer showed (the live session's, or the one chosen there when ZONE says so). Then
+#the time zone the installer showed: minos' own, America/Mexico_City, which the live session's clock is
+#in and the installer starts on, or the one chosen there when ZONE says so. Then
 #the disk boots alone, still with no network, to slim, where the user logs in, and to i3, where it is
 #asked its time zone (timedatectl and date, in a terminal), and stays up until minos-untrim has had its
 #try, which must fail and leave the unit enabled.
@@ -34,7 +35,7 @@
 #              that keyboard, and without KEYBOARD the live session's own (us). NAME gets -KEYBOARD
 #  ZONE        a time zone (Asia/Tokyo): chosen on the step of the user, its city typed into the
 #              installer's list. The disk must be in that zone, by its files and by what it says once
-#              booted; without ZONE, in the live session's. NAME gets the city, in lower case
+#              booted; without ZONE, in America/Mexico_City. NAME gets the city, in lower case
 #  INSTALLER   a directory with minos-installer and minos-installer-engine: they take the place of the
 #              ISO's own in its live session, so a change to them is tried without building an ISO
 #  => in OUTPUT, for NAME=FIRMWARE-DISK: NAME.img (the disk), NAME.serial.log (the probe in the live
@@ -50,7 +51,7 @@
 set -eu
 iso="${1:-}"; firmware="${2:-}"; disk="${3:-}"; out="${4:-}"; minutes="${5:-15}"
 phases="${PHASES:-install boot}"; layout="${LAYOUT:-empty}"
-if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '17,46s/^#//p' "${0}" >&2; exit 2; fi
+if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '18,47s/^#//p' "${0}" >&2; exit 2; fi
 name="${firmware}-${disk}"; [ "${layout}" = "empty" ] || name="${name}-${layout}"
 [ -z "${KEYBOARD:-}" ] || name="${name}-${KEYBOARD}"
 zone="${ZONE:-}"; city="$(printf "%s" "${zone##*/}" | tr '[:upper:]_' '[:lower:] ')"
@@ -61,6 +62,9 @@ zone="${ZONE:-}"; city="$(printf "%s" "${zone##*/}" | tr '[:upper:]_' '[:lower:]
 #login alike; and the password they make, which depends on the keyboard that is active when they are
 #pressed: on latam the key that us has - on types an apostrophe
 user="ana"; password_keys="-minos2026"; keyboard="${KEYBOARD:-}"
+#the time zone an install starts on, minos' own: the live session's clock is in it, the installer shows
+#it before anything is chosen, and a disk installed with nothing chosen is in it
+default_zone="America/Mexico_City"
 case "${keyboard}" in
     ""|us) password="-minos2026" ;;
     latam) password="'minos2026" ;;
@@ -439,6 +443,10 @@ case " ${phases} " in *" install "*)
         _screen "probe-${_try}"
         [ "${_try}" != 3 ] || _die "the probe said nothing"
     done
+    #the session's clock is in the zone an install starts on: the bar and the installer tell the same hour
+    _live__zone="$(sed -n 's/^probe: timezone: //p' "${serial}" | tr -d '\r' | head -n 1)"
+    [ "${_live__zone}" = "${default_zone}" ] ||
+        _die "the live session is in ${_live__zone:-no time zone it says}, not in ${default_zone}: $(grep '^probe: clock: ' "${serial}" | tr -d '\r' | head -n 1)"
     _step "the installer's window (Win+i)"
     _press meta_l-i
     _wait_serial "probe: installer: open" 100 || { _screen timeout; _die "Win+i opened no installer"; }
@@ -476,6 +484,9 @@ case " ${phases} " in *" install "*)
         _press ret
     fi
     _wait_screen "user" 60
+    #before anything is chosen, the step shows the zone an install starts on
+    grep '^probe: screen: minos installer - user' "${serial}" | head -n 1 | tr -d '\r' | grep -q " ${default_zone}\$" ||
+        { _screen timeout; _die "the installer does not start on ${default_zone}: $(grep '^probe: screen: minos installer - user' "${serial}" | head -n 1)"; }
     if [ -n "${keyboard}" ]; then
         #the installer's key moves to the next keyboard of minos' list: pressed until its window says the
         #one wanted is the active one
@@ -593,11 +604,11 @@ awk '/^apt sources: / {n++; sub(/^apt sources: /, ""); k = split($0, source, "; 
 awk '/^password: / {n++; if ($0 != "password: the one typed") bad++} END {exit !(n && !bad)}' "${facts}" ||
     _die "the disk's password for ${user} is not the one its keys make with the keyboard ${keyboard:-of the live session}"
 #the disk has the keyboard that was active when the password was typed (the one the installer was changed
-#to, or the live session's own) and the time zone the installer showed (the one chosen there, or the live
-#session's own): what the probe said of that session
+#to, or the live session's own, as the probe said it) and the time zone the installer showed (the one
+#chosen there, or the one an install starts on)
 if [ -f "${out}/${name}.serial.log" ]; then
     _expected__keyboard="${keyboard:-$(sed -n 's/^probe: keyboard active: //p' "${out}/${name}.serial.log" | tr -d '\r' | head -n 1)}"
-    _expected__zone="${zone:-$(sed -n 's/^probe: timezone: //p' "${out}/${name}.serial.log" | tr -d '\r' | head -n 1)}"
+    _expected__zone="${zone:-${default_zone}}"
     awk -v want="hostname: minos; keyboard: XKBLAYOUT=\"${_expected__keyboard}\"" '/^hostname: / {n++; if ($0 != want) bad++} END {exit !(n && !bad)}' "${facts}" ||
         _die "the disk's keyboard is not ${_expected__keyboard}, the one the password was typed with: $(grep '^hostname: ' "${facts}" | tail -n 1)"
     #/etc/localtime names it, and /etc/timezone, on a release whose tzdata still writes one, the same

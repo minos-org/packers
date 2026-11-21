@@ -50,6 +50,9 @@ awk -v flavour="${flavour}" -v release="${release}" '
             must("^live bios cd$", "^ok ")
             must("^live secureboot usb$", "^ok ")
             must("^live uefi cd, no cable$", "^ok ")
+            #a click on the wallpaper opens the menu of the background, whose first row on the ISO is the
+            #installer (iso/live-check)
+            must("^menu of the background$", "^[0-9]+ entries, the first: Install minos +\\| +Win\\+i +\\| +minos-installer --window; drawn by rofi$")
             #casper booted the medium: its squashfs, read-only, under the session
             must("^medium$", " on /cdrom \\(iso9660\\), .* on /rofs \\(squashfs\\)")
             must("^network$", "^[a-z][a-z0-9]* [0-9.]+/[0-9]+ ")

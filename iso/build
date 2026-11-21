@@ -451,7 +451,7 @@ _replace_file() { #root path awk-program => PATH of ROOT rewritten by the awk pr
 }
 
 _make_live() { #root => ROOT made the live session of the ISO: casper, its user minos logged into i3 by
-    #slim, and the installer one key away.
+    #slim, the installer one key away, and the clock in the time zone an install starts on.
     #Each file changed or added here is the live session's alone (_live_only); casper, a package, the
     #minos installer removes by name
     _make_live__user="minos"
@@ -471,17 +471,20 @@ _make_live() { #root => ROOT made the live session of the ISO: casper, its user 
         \$1 == \"auto_login\" {\$0 = \"auto_login          yes\"; auto = 1}
         {print} END {exit !(user && auto)}"
     #i3: minos' own configuration, and the installer one key away, \$Win+i, in a terminal of its own that
-    #floats in the middle of the screen, the size of the installer's screens (minos-installer --window)
+    #floats in the middle of the screen, the size of the installer's screens (minos-installer --window);
+    #and in the menu of the background, as its first entry, right after the line that opens the list. A
+    #configuration with no such list, or no \$Win, is not the one this build knows, and stops it
     # shellcheck disable=SC2016 # i3's variables, not the shell's
     _replace_file "${1}" /etc/i3/config '
         /^set \$Win / {win = 1} {print}
+        /^set \$menu \\$/ {menu = 1; print "    \"Install minos | Win+i   | minos-installer --window\" \\"}
         END {
             print ""
             print "#the live session of the minos ISO: the installer, one key away"
             print "for_window [class=\"^URxvt$\" instance=\"^minos-installer$\"] floating enable, move position center"
             print "#        $Win+i"
             print "bindcode $Win+31 exec minos-installer --window"
-            exit !win
+            exit !(win && menu)
         }'
     #the key in minos' help (F1), which the welcome of the first login points to
     _replace_file "${1}" /etc/minos/help '{print} /<f1>/ && !done {print "      <win><i>       ⇨  install minos (the live session)"; done = 1}
@@ -493,6 +496,21 @@ _make_live() { #root => ROOT made the live session of the ISO: casper, its user 
         cp "${here}/installer/${_make_live__file}" "${1}/usr/local/bin/${_make_live__file}"
         chmod 755 "${1}/usr/local/bin/${_make_live__file}"
     done
+    #the session's clock is in the time zone an install starts on, so the bar and the installer tell the
+    #same hour. The engine names that zone, here as in the session (its timezone verb): asked of it in
+    #ROOT, whose zones are the ones it has to be one of
+    _make_live__zone="$(chroot "${1}" env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin sh /usr/local/bin/minos-installer-engine timezone 2>> "${log}")" ||
+        _die "the installer's engine does not say its time zone in ${1}, see ${log}"
+    [ -f "${1}/usr/share/zoneinfo/${_make_live__zone}" ] ||
+        _die "\"${_make_live__zone}\", the time zone the installer's engine starts on, is none of ${1}"
+    _live_only "${1}" /etc/localtime
+    _live_only "${1}" /etc/timezone
+    ln -sf "/usr/share/zoneinfo/${_make_live__zone}" "${1}/etc/localtime"
+    #tzdata takes the zone from the link, and writes /etc/timezone on the releases that still have one
+    _chroot "${1}" dpkg-reconfigure -f noninteractive tzdata
+    [ "$(readlink "${1}/etc/localtime")" = "/usr/share/zoneinfo/${_make_live__zone}" ] ||
+        _die "${1}/etc/localtime: tzdata did not keep ${_make_live__zone}: $(readlink "${1}/etc/localtime")"
+    _step "the live session's time zone: ${_make_live__zone}"
 }
 
 _write_untrim() { #root => in ROOT, disabled, minos-untrim.service and the script it runs: on a system the

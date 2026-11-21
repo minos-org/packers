@@ -7,21 +7,26 @@
 #card's driver, its modes), where the medium and its squashfs are mounted, what slim waited for, the plugins
 #the image brought; then what every minos system must show, ci/probe-common, which the CD carries beside it
 #(the network and whether names resolve, sudo, tmux, i3's configuration, slim, the units that failed).
+#Then the installer's key opens its window; and, the desktop bare again, a click on the wallpaper opens the
+#menu of the background, which on the ISO has "Install minos" as its first row. A watcher the probe leaves
+#behind says what shows (the installer's window; the menu, with the entries its script was given), and
+#the line "menu of the background", for ci/verdict.
 #usage: [CABLE=no] live-check ISO FIRMWARE MEDIUM OUTPUT [MINUTES]
 #  FIRMWARE    bios (SeaBIOS), uefi (OVMF) or secureboot (OVMF with Secure Boot on, Microsoft's keys)
 #  MEDIUM      cd or usb
 #  CABLE=no    the network card's cable out from power on: NAME gets -nocable, and nothing must wait for it
 #  => in OUTPUT, for NAME=FIRMWARE-MEDIUM: NAME.serial.log (the probe) and the screen at GRUB's menu, on the
-#     desktop, with the probe's terminal and with the installer's (Win+i):
-#     NAME-{menu,desktop,terminal,installer}.png; exit 0 when the desktop came up within MINUTES (10), the
-#     probe found an address and resolved a name (with no cable: found no address), and with secureboot
-#     the session booted with Secure Boot on
+#     desktop, with the probe's terminal, with the installer's (Win+i) and with the menu of the background:
+#     NAME-{menu,desktop,terminal,installer,background-menu}.png; exit 0 when the desktop came up within
+#     MINUTES (10), the probe found an address and resolved a name (with no cable: found no address), with
+#     secureboot the session booted with Secure Boot on, Win+i opened the installer, and a click on the
+#     wallpaper opened the menu with "Install minos" as its first row
 #needs qemu-system-x86_64, KVM, socat, xorriso and netpbm (pngtopnm, pamcut, pamchannel, pamsumm); OVMF
 #for uefi and secureboot
 
 set -eu
 iso="${1:-}"; firmware="${2:-}"; medium="${3:-}"; out="${4:-}"; minutes="${5:-10}"
-if [ ! -f "${iso}" ] || [ -z "${medium}" ] || [ -z "${out}" ]; then sed -n '8,15s/^#//p' "${0}" >&2; exit 2; fi
+if [ ! -f "${iso}" ] || [ -z "${medium}" ] || [ -z "${out}" ]; then sed -n '14,23s/^#//p' "${0}" >&2; exit 2; fi
 cable="${CABLE:-yes}"
 name="${firmware}-${medium}"; [ "${cable}" = yes ] || name="${name}-nocable"
 
@@ -94,7 +99,34 @@ if ! grep -q '^dns  *archive\.ubuntu\.com [0-9a-f:.][0-9a-f:.]* after' /tmp/prob
         while read -r line; do _say "networkd" "${line}"; done
 fi
 journalctl -b -p err --no-pager -q | tail -n 10 | while read -r line; do _say "journal error" "${line}"; done
+#what the check opens next is said as it shows, by a watcher that stays once this terminal is gone
+setsid sh "$(dirname "${0}")/watch" < /dev/null > /dev/null 2>&1 &
 _say "done" ""
+E=O=F
+    cat > "${1}/probe/watch" << 'E=O=F'
+#!/bin/sh
+#live-check's watcher: what shows on the desktop, said on the serial port when it changes, as "watch: "
+#lines: the installer's window, or the menu of the background. The menu's script is there while the menu
+#is open, with the entries it was given, in their order (minos-menu, which m-menu, the name i3 calls,
+#becomes), and rofi draws them: once both are there, the line ci/verdict reads, "menu of the background"
+last=""; told=""
+while :; do
+    now="nothing"
+    pid="$(pgrep -o -f '/(m|minos)-menu ')"
+    if [ -n "${pid}" ]; then
+        now="menu"
+        entries="$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | grep ' | ')"
+        if [ -z "${told}" ] && pgrep -x rofi > /dev/null; then
+            printf "probe: %-34s %s\n" "menu of the background" \
+                "$(printf "%s\n" "${entries}" | grep -c .) entries, the first: $(printf "%s\n" "${entries}" | head -n 1); drawn by rofi" > /dev/ttyS0
+            told="yes"
+        fi
+    elif pgrep -f 'urxvt -name minos-installer' > /dev/null; then
+        now="installer"
+    fi
+    [ "${now}" = "${last}" ] || { printf "watch: %s\n" "${now}" > /dev/ttyS0; last="${now}"; }
+    sleep 1
+done
 E=O=F
     xorriso -report_about WARNING -as mkisofs -V PROBE -J -r -o "${1}/probe.iso" "${1}/probe" 2>/dev/null ||
         _die "cannot write the probe's CD"
@@ -172,8 +204,36 @@ done
 _screen terminal
 #the installer's key, Win+i: its window, floating in the middle of the screen
 _press meta_l-i
+_wait_serial "watch: installer" 30 || { _screen installer; _die "Win+i opened no installer"; }
 sleep 5
 _screen installer
+#the menu of the background. The installer is left (q: this machine has no disk, and the screen that says
+#so closes on it; where it has one, q asks and y answers) and the terminal too, so the wallpaper is bare;
+#a click on it, where the pointer has been all along, opens the menu, which on the ISO has "Install
+#minos" as its first row: the watcher says what its script was given. The row itself is not taken from
+#here: with the menu up, neither Enter nor the monitor's pointer moves did anything in this machine
+_press q
+sleep 3
+[ "$(grep '^watch: ' "${serial}" | tail -n 1 | tr -d '\r' | cut -c1-16)" != "watch: installer" ] || _press y
+_menu__waited=0
+until [ "$(grep '^watch: ' "${serial}" | tail -n 1 | tr -d '\r' | cut -c1-14)" = "watch: nothing" ]; do
+    _menu__waited="$((_menu__waited + 1))"
+    [ "${_menu__waited}" -le 15 ] || { _screen background-menu; _die "the installer did not close on q"; }
+    sleep 1
+done
+_type "exit"; _press ret
+_menu__waited=0
+until _on_desktop; do
+    _menu__waited="$((_menu__waited + 3))"
+    [ "${_menu__waited}" -le 30 ] || { _screen background-menu; _die "the installer and the terminal, left, did not leave the wallpaper bare"; }
+    sleep 2
+done
+_monitor "mouse_button 1" >/dev/null; _monitor "mouse_button 0" >/dev/null
+_wait_serial "probe: menu of the background" 30 || { _screen background-menu; _die "a click on the wallpaper opened no menu"; }
+#rofi waits for the pointer before it shows: a while, for the screen to have it
+sleep 6
+_screen background-menu
+_step "the menu of the background: $(sed -n 's/^probe: menu of the background  *//p' "${serial}" | tr -d '\r' | head -n 1)"
 _monitor quit >/dev/null
 qemu=""
 sed -n 's/^probe: //p' "${serial}"
@@ -186,6 +246,8 @@ else
 fi
 [ "${firmware}" != secureboot ] || grep -q "^probe: firmware  *uefi, Secure Boot on" "${serial}" ||
     _die "booted by secureboot with Secure Boot off"
+grep -q "^probe: menu of the background  *[0-9]* entries, the first: Install minos " "${serial}" ||
+    _die "the menu of the background does not have \"Install minos\" first: $(sed -n 's/^probe: menu of the background  *//p' "${serial}" | tr -d '\r' | head -n 1)"
 _step "checked: ${serial}"
 
 # vim: set ts=8 sw=4 tw=0 ft=sh :

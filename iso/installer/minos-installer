@@ -1163,7 +1163,8 @@ _zone_time() { #zone => zone_time, the time it is in ZONE now, hours and minutes
     zone_time="$(TZ="${1}" date +%H:%M 2>/dev/null)"
 }
 
-_step_zones() { #=> timezone, chosen among the zones this system's tzdata has, which the engine lists: what
+_step_zones() { #=> timezone, chosen among the zones this system's tzdata has, which the engine lists,
+    #minos' own first and marked, as the list of keyboards has its own: an arrow or two reaches them. What
     #is typed narrows the list to the zones with it in their name, whatever the case, a space standing
     #for the _ of a name (mexico city). The zone under the cursor says what time it is there now, which
     #is how a person sees it is theirs. Enter takes it, Esc leaves the zone as it was. It is an answer
@@ -1180,9 +1181,9 @@ _step_zones() { #=> timezone, chosen among the zones this system's tzdata has, w
             #the zones that have what was typed: how many, where the cursor is (on the zone there is
             #while it is among them and the cursor was not moved, else on the first) and the zone
             #there, then the rows of the list around it
-            _step_zones__found="$(printf "%s\n" "${zones}" | awk -v typed="${_step_zones__typed}" -v at="${_step_zones__at}" -v now="${timezone}" -v rows=15 '
+            _step_zones__found="$(printf "%s\n" "${zones}" | awk -F '\t' -v typed="${_step_zones__typed}" -v at="${_step_zones__at}" -v now="${timezone}" -v rows=15 '
                 BEGIN {typed = tolower(typed); gsub(/ /, "_", typed)}
-                typed == "" || index(tolower($0), typed) {found[++n] = $0; if ($0 == now) here = n}
+                typed == "" || index(tolower($1), typed) {found[++n] = $1; kind[n] = $2; if ($1 == now) here = n}
                 END {
                     if (at < 1) at = here ? here : 1
                     if (at > n) at = n
@@ -1190,7 +1191,7 @@ _step_zones() { #=> timezone, chosen among the zones this system's tzdata has, w
                     if (first + rows - 1 > n) first = n - rows + 1
                     if (first < 1) first = 1
                     print n + 0, at + 0, (n ? found[at] : "-")
-                    for (i = first; i < first + rows && i <= n; i++) print (i == at ? ">" : "-"), found[i]
+                    for (i = first; i < first + rows && i <= n; i++) print (i == at ? ">" : "-"), found[i], kind[i]
                 }')"
             # shellcheck disable=SC2086 # how many, where, which: three words
             set -- ${_step_zones__found%%"${c_nl}"*}
@@ -1215,12 +1216,14 @@ _step_zones() { #=> timezone, chosen among the zones this system's tzdata has, w
             row=6
             if [ "${_step_zones__count}" -gt 0 ]; then
                 _zone_time "${_step_zones__zone}"
-                while IFS=" " read -r _step_zones__mark _step_zones__name; do
+                while IFS=" " read -r _step_zones__mark _step_zones__name _step_zones__kind; do
                     if [ "${_step_zones__mark}" = ">" ]; then
                         _row "${row}" "${s_here}" "  > ${_step_zones__name}"
+                        [ "${_step_zones__kind}" != "own" ] || _put "${row}" 41 "${s_here}" "minos"
                         _put "${row}" 52 "${s_here}" "${zone_time} there now"
                     else
                         _row "${row}" "" "    ${_step_zones__name}"
+                        [ "${_step_zones__kind}" != "own" ] || _put "${row}" 41 "" "minos"
                     fi
                     row="$((row + 1))"
                 done << E=O=F
@@ -1232,7 +1235,7 @@ E=O=F
             fi
             _rest "${row}"
             #the cursor, where the next character goes
-            screen="${screen}${c_esc}[$((origin_row + 5));$((origin_column + 22 + ${#_step_zones__typed}))H${c_esc}[?25h"
+            screen="${screen}${c_esc}[$((origin_row + 5));$((origin_column + 23 + ${#_step_zones__typed}))H${c_esc}[?25h"
         fi
         _step_zones__draw="yes"
         _key 10
@@ -1266,7 +1269,7 @@ E=O=F
 
 _draw_field() { #row label text here secret => a field on row ROW of the body: TEXT typed so far, lit when
     #HERE; SECRET is the name of a secret, shown as a star a character, or as it was typed while
-    #pass_seen says so
+    #pass_seen says so. The field starts a column after the longest label there is, The same again
     _row "${1}" "" ""
     _put "${1}" 5 "" "${2}"
     if [ -n "${5}" ] && [ -n "${pass_seen}" ]; then
@@ -1280,9 +1283,9 @@ _draw_field() { #row label text here secret => a field on row ROW of the body: T
         _draw_field__shown="$(printf "%-32.32s" "${_draw_field__shown}")"
     fi
     if [ -n "${4}" ]; then
-        _put "${1}" 19 "${s_field_here}" " ${_draw_field__shown} "
+        _put "${1}" 20 "${s_field_here}" " ${_draw_field__shown} "
     else
-        _put "${1}" 19 "${s_field}" " ${_draw_field__shown} "
+        _put "${1}" 20 "${s_field}" " ${_draw_field__shown} "
     fi
 }
 
@@ -1292,10 +1295,11 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
     #password, whose fields take every key that prints); keyboard, the one it is typed with, is shown
     #as the session has it and changed from here (F2: the next of minos' own list; F3: any), and the
     #installed system takes it, so it asks for the password with the keys it was typed with. And
-    #timezone, the time zone of the installed system: this session's until another is chosen (F4),
-    #shown with the time it is there. Function keys say themselves the same whatever the keyboard,
-    #where a letter or a Ctrl with one does not once the keyboard is not a Latin one; Ctrl-K, Ctrl-O,
-    #Ctrl-T and Ctrl-P do what F2 to F5 do, for a terminal that keeps the function keys to itself.
+    #timezone, the time zone of the installed system: the one the engine says an install starts on
+    #(minos' own), until another is chosen (F4), shown with the time it is there. Function keys say
+    #themselves the same whatever the keyboard, where a letter or a Ctrl with one does not once the
+    #keyboard is not a Latin one; Ctrl-K, Ctrl-O, Ctrl-T and Ctrl-P do what F2 to F5 do, for a terminal
+    #that keeps the function keys to itself.
     #A name is taken as typed and judged by the engine, which says in words what a name is
     _step_user__field="${user_field:-1}"; _step_user__problem=""; _step_user__draw="yes"; _step_user__told=""
     _keyboard_read; _zone_time "${timezone}"
@@ -1326,11 +1330,11 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
             else
                 _draw_field 7 "The same again" "" "$([ "${_step_user__field}" != 3 ] || printf yes)" pass_again
             fi
-            _row 8 "" ""; _put 8 5 "" "Keyboard"; _put 8 20 "${s_bold}" "${keyboard}"
-            _put 8 "$((21 + ${#keyboard}))" "" "$(printf "%.44s" "${keyboard_name}")"
+            _row 8 "" ""; _put 8 5 "" "Keyboard"; _put 8 21 "${s_bold}" "${keyboard}"
+            _put 8 "$((22 + ${#keyboard}))" "" "$(printf "%.44s" "${keyboard_name}")"
             _row 9 "" ""
-            _row 10 "" ""; _put 10 5 "" "Time zone"; _put 10 20 "${s_bold}" "${timezone}"
-            _put 10 "$((21 + ${#timezone}))" "" "${g_dot} ${zone_time}"
+            _row 10 "" ""; _put 10 5 "" "Time zone"; _put 10 21 "${s_bold}" "${timezone}"
+            _put 10 "$((22 + ${#timezone}))" "" "${g_dot} ${zone_time}"
             _row 11 "" ""
             if [ -n "${_step_user__problem}" ]; then
                 _rows 12 "${s_warn}" 4 3 "${_step_user__problem}"
@@ -1347,7 +1351,7 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
                 *) _secret_count pass_again; _step_user__column="${count}"; _step_user__row=7 ;;
             esac
             [ "${_step_user__column}" -le 32 ] || _step_user__column=32
-            screen="${screen}${c_esc}[$((origin_row + _step_user__row + 1));$((origin_column + 22 + _step_user__column))H${c_esc}[?25h"
+            screen="${screen}${c_esc}[$((origin_row + _step_user__row + 1));$((origin_column + 23 + _step_user__column))H${c_esc}[?25h"
         fi
         _step_user__draw="yes"
         _key 10
@@ -1781,19 +1785,24 @@ if [ -n "${MINOS_INSTALLER_WINDOW:-}" ]; then
 fi
 _term_take
 if [ -z "$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-"')" ]; then
-    #no disk minos can go to: said, with why each one is left out
-    _frame none "Enter" "close"
-    _row 1 "" ""; _row 2 "${s_bold}" "  There is no disk minos can go to"; _row 3 "" ""; row=4
-    while IFS="${c_tab}" read -r _main__device _main__size _ _main__refusal _; do
-        [ -n "${_main__device}" ] || continue
-        _row "${row}" "" "    ${_main__device#/dev/} (${_main__size}): ${_main__refusal}"; row="$((row + 1))"
-    done << E=O=F
+    #no disk minos can go to: said, with why each one is left out. Drawn again after every key and every
+    #change of the terminal's size, as each screen is: i3 gives the installer's own window its place and
+    #size a moment after it opens, and a screen drawn once, before that, stayed black
+    while :; do
+        _frame none "Enter" "close"
+        _row 1 "" ""; _row 2 "${s_bold}" "  There is no disk minos can go to"; _row 3 "" ""; row=4
+        while IFS="${c_tab}" read -r _main__device _main__size _ _main__refusal _; do
+            [ -n "${_main__device}" ] || continue
+            _row "${row}" "" "    ${_main__device#/dev/} (${_main__size}): ${_main__refusal}"; row="$((row + 1))"
+        done << E=O=F
 ${disks}
 E=O=F
-    _row "${row}" "" ""; row="$((row + 1))"
-    _row "${row}" "" "    Attach a disk, or free one of these, and open the installer again."; row="$((row + 1))"
-    _rest "${row}"
-    while :; do _key; case "${key}" in enter|q|esc) exit 1 ;; esac; done
+        _row "${row}" "" ""; row="$((row + 1))"
+        _row "${row}" "" "    Attach a disk, or free one of these, and open the installer again."; row="$((row + 1))"
+        _rest "${row}"
+        _key
+        case "${key}" in enter|q|esc) exit 1 ;; esac
+    done
 fi
 
 #an install that is running already (this window was closed and opened again) is the one to show
