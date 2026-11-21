@@ -72,10 +72,11 @@ _fetch_setup() { #source file => the minos installer in FILE: a copy of a local 
         *) [ -f "${1}" ] || _die "no ${1}"; cp "${1}" "${2}" ;;
     esac
     grep -q '^_minos_archive_key()' "${2}" || _die "${1}: not the minos installer, it carries no archive key"
-    #the live session's installer (iso/installer) gives it the password on its standard input and has it
-    #start with no countdown of its own: an installer that takes neither would stop with the disk written
-    grep -q -e '--now)' "${2}" ||
-        _die "${1}: older than the installer of iso/installer, it takes no --now and no password on its standard input"
+    #the live session's installer (iso/installer) gives it the password on its standard input, has it
+    #start with no countdown of its own and tells it the keyboard and the time zone: an installer that
+    #takes none of that would stop with the disk written
+    { grep -q -e '--now)' "${2}" && grep -q -e '--keyboard)' "${2}" && grep -q -e '--timezone)' "${2}"; } ||
+        _die "${1}: older than the installer of iso/installer, it takes no --now, no --keyboard, no --timezone or no password on its standard input"
     chmod 755 "${2}"
 }
 

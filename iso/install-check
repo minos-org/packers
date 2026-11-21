@@ -6,11 +6,15 @@
 #it, each screen waited for by the name its window's title gives it: the intro, the plan the engine
 #proposes (changed line by line when LAYOUT says so), the user and a password that starts with "-", the
 #one confirmation, the install as it happens, and "Restart now", after which the live session must
-#restart on its own. Then the disk boots alone, still with no network, to slim, where the user logs in,
-#and to i3, and stays up until minos-untrim has had its try, which must fail and leave the unit enabled.
+#restart on its own. The password is typed by its keys with the keyboard the installer shows (changed
+#there when KEYBOARD says so), and by the same keys at the disk's login: the disk has that keyboard, and
+#the time zone the installer showed (the live session's, or the one chosen there when ZONE says so). Then
+#the disk boots alone, still with no network, to slim, where the user logs in, and to i3, where it is
+#asked its time zone (timedatectl and date, in a terminal), and stays up until minos-untrim has had its
+#try, which must fail and leave the unit enabled.
 #The disk is read here after each boot: the files dpkg --verify finds missing, what the copy left out, the
 #boot loader, the boot's journal, the user's password, and what the plan was to keep.
-#usage: [PHASES="install boot [untrim]"] [LAYOUT=empty|beside|home] [INSTALLER=DIR] install-check ISO FIRMWARE DISK OUTPUT [MINUTES]
+#usage: [PHASES="install boot [untrim]"] [LAYOUT=empty|beside|home] [KEYBOARD=LAYOUT] [ZONE=ZONE] [INSTALLER=DIR] install-check ISO FIRMWARE DISK OUTPUT [MINUTES]
 #  FIRMWARE    bios, uefi or secureboot
 #  DISK        sata or nvme, the disk minos goes to
 #  PHASES      install (the live session, the installer answered), boot (the disk alone, no network),
@@ -24,11 +28,18 @@
 #              there after the install; NAME gets -beside. home: the disk has nothing, and the plan
 #              is changed to give /home a partition of its own, which the disk must then mount with
 #              the user's home in it; NAME gets -home
+#  KEYBOARD    latam: on the step of the user the keyboard is changed to it with the installer's key,
+#              before the password is typed. The password is typed by its keys, the same ones here and
+#              at the disk's login, whatever characters the layout makes of them; the disk must have
+#              that keyboard, and without KEYBOARD the live session's own (us). NAME gets -KEYBOARD
+#  ZONE        a time zone (Asia/Tokyo): chosen on the step of the user, its city typed into the
+#              installer's list. The disk must be in that zone, by its files and by what it says once
+#              booted; without ZONE, in the live session's. NAME gets the city, in lower case
 #  INSTALLER   a directory with minos-installer and minos-installer-engine: they take the place of the
 #              ISO's own in its live session, so a change to them is tried without building an ISO
 #  => in OUTPUT, for NAME=FIRMWARE-DISK: NAME.img (the disk), NAME.serial.log (the probe in the live
 #     session), NAME.facts (the disk read after each boot), the screens of the install
-#     NAME-{desktop,installer,plan,confirm,installing,installed}.png, NAME-{slim,i3}.png of the disk's boot and
+#     NAME-{desktop,installer,plan,zone,confirm,installing,installed}.png, NAME-{slim,i3,clock}.png of the disk's boot and
 #     NAME-net-{slim,i3}.png of its boot with a network; exit 0 when the installer finished, the live
 #     session restarted on its own, the disk came up to i3 by itself (on a copy of the ISO, with
 #     minos-untrim failed and still enabled) and, with untrim, the packages minos-untrim reinstalls miss
@@ -39,14 +50,22 @@
 set -eu
 iso="${1:-}"; firmware="${2:-}"; disk="${3:-}"; out="${4:-}"; minutes="${5:-15}"
 phases="${PHASES:-install boot}"; layout="${LAYOUT:-empty}"
-if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '13,35s/^#//p' "${0}" >&2; exit 2; fi
+if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '17,46s/^#//p' "${0}" >&2; exit 2; fi
 name="${firmware}-${disk}"; [ "${layout}" = "empty" ] || name="${name}-${layout}"
+[ -z "${KEYBOARD:-}" ] || name="${name}-${KEYBOARD}"
+zone="${ZONE:-}"; city="$(printf "%s" "${zone##*/}" | tr '[:upper:]_' '[:lower:] ')"
+[ -z "${zone}" ] || name="${name}-$(printf "%s" "${city}" | tr ' ' '-')"
 #a password that starts with -: the installer hands it to setup on its standard input, where no command
 #line reads it as an option
-user="ana"; password="-minos2026"
-#the same password as the disk's keyboard types it: the live session's is us, the installed system's
-#latam (setup's choice), where - is on the key a us keyboard has / on
-password_latam="/minos2026"
+#the keys the password is typed with, as a us keyboard names them, in the installer and at the disk's
+#login alike; and the password they make, which depends on the keyboard that is active when they are
+#pressed: on latam the key that us has - on types an apostrophe
+user="ana"; password_keys="-minos2026"; keyboard="${KEYBOARD:-}"
+case "${keyboard}" in
+    ""|us) password="-minos2026" ;;
+    latam) password="'minos2026" ;;
+    *) printf "%s\\n" "install-check: KEYBOARD is latam or nothing: the keyboards whose keys this check knows" >&2; exit 2 ;;
+esac
 
 _die() { #message => on stderr, exit 1
     printf "%s\\n" "install-check: ${name}: ${*}" >&2
@@ -83,6 +102,10 @@ if [ -f /mnt/minos-installer ]; then
 fi
 _say "network: $(ip -4 -o address show scope global | awk '{print $2 " " $4}' | head -n 1) (none expected)"
 _say "keyboard: $(grep '^XKBLAYOUT' /etc/default/keyboard)"
+_say "keyboard active: $(sudo -u minos env DISPLAY=:0 setxkbmap -query 2>/dev/null | awk '$1 == "layout:" {print $2}')"
+zone="$(readlink /etc/localtime 2>/dev/null | sed -n 's|^.*/zoneinfo/||p')"; [ -n "${zone}" ] || zone="$(cat /etc/timezone 2>/dev/null)"
+_say "timezone: ${zone:-Etc/UTC}"
+_say "clock: /etc/localtime -> $(readlink /etc/localtime 2>&1); /etc/timezone: $(cat /etc/timezone 2>&1); $(date)"
 _say "ready"
 waited=0
 until pgrep -f "urxvt -name minos-installer" > /dev/null; do
@@ -192,11 +215,39 @@ _log_in() { #prefix => slim's login answered until i3 is up, within MINUTES: bef
         kill -0 "${qemu}" 2>/dev/null || _die "the machine stopped"
         [ "$(($(date +%s) - phase_start))" -lt "$((minutes * 60))" ] || { _screen "${1}timeout"; _die "no i3 after ${minutes} min"; }
         _screen "${1}slim"
-        _type "${password_latam}"; _press ret; sleep 25
+        _type "${password_keys}"; _press ret; sleep 25
     done
     _step "i3 is up"
     sleep 10
     _screen "${1}i3"
+}
+
+_type_there() { #text => typed at the disk's own system, whose keyboard is the one the installer was left
+    #with: letters, digits and spaces are on the same keys of both keyboards this check knows; the
+    #hyphen is where latam has it, on the key us has / on
+    case "${keyboard}" in
+        latam) _type "$(printf "%s" "${1}" | tr '-' '/')" ;;
+        *) _type "${1}" ;;
+    esac
+}
+
+_ask_clock() { #=> the disk's own system, booted and logged in, asked what time zone it is in: a terminal
+    #opened with i3's key, timedatectl and date run in it for the screen OUTPUT/NAME-clock.png, and
+    #again with their answers sent to the journal (systemd-cat), where _read_disk finds them once the
+    #machine is off: it has no network and no serial port of its own to say them through. The terminal
+    #is there once it hides the wallpaper: i3 gives the first window the whole screen
+    _ask_clock__tries=0
+    while _on_desktop; do
+        _ask_clock__tries="$((_ask_clock__tries + 1))"
+        [ "${_ask_clock__tries}" -le 3 ] || { _screen clock; _die "no terminal opened on the disk's own desktop, to ask it its time zone"; }
+        _press meta_l-ret; sleep 8
+    done
+    _type "timedatectl"; _press ret; sleep 3
+    _type "date"; _press ret; sleep 1
+    _type_there "systemd-cat -t timedatectl timedatectl"; _press ret; sleep 3
+    _type_there "systemd-cat -t date date"; _press ret; sleep 2
+    _screen clock
+    _step "the disk's own system asked its time zone"
 }
 
 _written() { #=> the bytes the machine has written to the target disk
@@ -310,6 +361,10 @@ _read_disk() { #title => NAME.facts gets TITLE and what the disk holds: the file
             awk '$1 != uri {printf "%s%s", (n++ ? "; " : ""), $1; uri = $1} {printf " %s", $2} END {print ""}')"
         printf "hostname: %s; keyboard: %s\n" "$(cat "${_read_disk__root}/etc/hostname")" \
             "$(grep '^XKBLAYOUT' "${_read_disk__root}/etc/default/keyboard")"
+        _read_disk__zone="$(readlink "${_read_disk__root}/etc/localtime" | sed 's|.*/zoneinfo/||')"
+        printf "timezone: %s; localtime: %s\n" "$(cat "${_read_disk__root}/etc/timezone" 2>/dev/null)" "${_read_disk__zone}"
+        #what that zone is called and how far from UTC it is now, by the disk's own zone files
+        printf "clock: zone file: %s (%s)\n" "${_read_disk__zone}" "$(chroot "${_read_disk__root}" env TZ="${_read_disk__zone}" date '+%Z, %z' 2>&1)"
         sed 's/^/fstab: /' "${_read_disk__root}/etc/fstab"
         printf "boot: %s\n" "$(cd "${_read_disk__root}/boot" && find . -maxdepth 2 \( -name 'vmlinuz-*' -o -name 'initrd.img-*' -o -path ./grub/grub.cfg \) | sort | tr '\n' ' ')"
         [ -z "${esp_number}" ] || printf "esp: %s\n" "$(cd "${_read_disk__root}/boot/efi" && find . -type f | sort | tr '\n' ' ')"
@@ -325,6 +380,11 @@ _read_disk() { #title => NAME.facts gets TITLE and what the disk holds: the file
                 head -n 30 | sed 's/^/journal: /'
             ${_read_disk__journal} -u minos-untrim | grep -E 'minos-untrim:|^E:|^W:|Err|Fetched|upgraded,' | tail -n 15 | sed 's/^/untrim: /'
             ${_read_disk__journal} -p err | tail -n 10 | sed 's/^/journal error: /'
+            #what the system said of its time zone when it was asked, booted (_ask_clock)
+            for _read_disk__tool in timedatectl date; do
+                chroot "${_read_disk__root}" journalctl -D /var/log/journal -b "${_read_disk__boot}" --no-pager -q -o cat -t "${_read_disk__tool}" |
+                    sed "s/^ */clock: ${_read_disk__tool}: /"
+            done
         else
             printf "%s\n" "journal: none on the disk"
         fi
@@ -416,9 +476,34 @@ case " ${phases} " in *" install "*)
         _press ret
     fi
     _wait_screen "user" 60
+    if [ -n "${keyboard}" ]; then
+        #the installer's key moves to the next keyboard of minos' list: pressed until its window says the
+        #one wanted is the active one
+        _keyboard__tries=0
+        until grep '^probe: screen: minos installer - user' "${serial}" | tail -n 1 | tr -d '\r' | grep -q "user ${keyboard} "; do
+            _keyboard__tries="$((_keyboard__tries + 1))"
+            [ "${_keyboard__tries}" -le 4 ] || { _screen timeout; _die "the installer's key did not get to the keyboard ${keyboard}: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
+            _press f2; sleep 4
+        done
+        _step "the keyboard changed in the installer: ${keyboard}"
+    fi
+    if [ -n "${zone}" ]; then
+        #the installer's list of time zones, narrowed by the city typed until its window says the cursor
+        #is on the zone wanted; Enter takes it, and the step says it
+        _press f4
+        _wait_screen "zone " 30
+        _type "${city}"; sleep 3
+        grep '^probe: screen: ' "${serial}" | tail -n 1 | tr -d '\r' | grep -q -x "probe: screen: minos installer - zone ${zone}" ||
+            { _screen timeout; _die "\"${city}\" typed into the installer's list of time zones did not find ${zone}: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
+        _screen zone
+        _press ret
+        _wait_serial "probe: screen: minos installer - user [a-z]* ${zone}" 30 ||
+            { _screen timeout; _die "the installer did not take the time zone ${zone}: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
+        _step "the time zone chosen in the installer: ${zone}"
+    fi
     _type "${user}"; _press ret; sleep 2
-    _type "${password}"; _press ret; sleep 2
-    _type "${password}"; _press ret
+    _type "${password_keys}"; _press ret; sleep 2
+    _type "${password_keys}"; _press ret
     _wait_screen "confirm" 60
     _screen confirm
     #the button that goes back holds the cursor: the other one, then Enter
@@ -428,7 +513,7 @@ case " ${phases} " in *" install "*)
     sleep 20
     _screen installing
     _wait_serial "probe: install: done" "$((minutes * 120))" || { _screen timeout; _die "the install did not end"; }
-    sed -n 's/^probe: \(install: \|disk: \|engine: \|keyboard: \)/\1/p; s/^probe: log:   \(table\|partition\|format\|esp\|root\|home\) /plan: \1 /p' "${serial}"
+    sed -n 's/^probe: \(install: \|disk: \|engine: \|keyboard: \|keyboard active: \|timezone: \|clock: \)/\1/p; s/^probe: log:   \(table\|partition\|format\|esp\|root\|home\) /plan: \1 /p' "${serial}"
     grep -q "^probe: install: the engine exited 0 " "${serial}" ||
         { grep '^probe: log: ' "${serial}" | tail -n 30 >&2; _die "the install failed, see ${serial}"; }
     ! grep -F -q -e "${password}" "${serial}" || _die "the password is in what the install said, see ${serial}"
@@ -460,6 +545,7 @@ case " ${phases} " in *" boot "*)
     phase_start="$(date +%s)"
     _boot none
     _log_in ""
+    _ask_clock
     #with no network, network-online.target comes when connman-wait-online gives up, 2 minutes into the
     #boot, and only then does minos-untrim have its try on a copy of the ISO: the machine stays up for it
     while [ "$(($(date +%s) - phase_start))" -lt 180 ]; do sleep 5; done
@@ -505,7 +591,32 @@ awk '/^apt sources: / {n++; sub(/^apt sources: /, ""); k = split($0, source, "; 
 #each reading: the password the disk keeps is the one typed into the installer; i3's configuration names
 #the installer on no line (its key was the live session's alone); what the plan kept is there
 awk '/^password: / {n++; if ($0 != "password: the one typed") bad++} END {exit !(n && !bad)}' "${facts}" ||
-    _die "the disk's password for ${user} is not the one typed into the installer"
+    _die "the disk's password for ${user} is not the one its keys make with the keyboard ${keyboard:-of the live session}"
+#the disk has the keyboard that was active when the password was typed (the one the installer was changed
+#to, or the live session's own) and the time zone the installer showed (the one chosen there, or the live
+#session's own): what the probe said of that session
+if [ -f "${out}/${name}.serial.log" ]; then
+    _expected__keyboard="${keyboard:-$(sed -n 's/^probe: keyboard active: //p' "${out}/${name}.serial.log" | tr -d '\r' | head -n 1)}"
+    _expected__zone="${zone:-$(sed -n 's/^probe: timezone: //p' "${out}/${name}.serial.log" | tr -d '\r' | head -n 1)}"
+    awk -v want="hostname: minos; keyboard: XKBLAYOUT=\"${_expected__keyboard}\"" '/^hostname: / {n++; if ($0 != want) bad++} END {exit !(n && !bad)}' "${facts}" ||
+        _die "the disk's keyboard is not ${_expected__keyboard}, the one the password was typed with: $(grep '^hostname: ' "${facts}" | tail -n 1)"
+    #/etc/localtime names it, and /etc/timezone, on a release whose tzdata still writes one, the same
+    awk -v want="${_expected__zone}" '/^timezone: / {n++; if ($0 != "timezone: " want "; localtime: " want && $0 != "timezone: ; localtime: " want) bad++}
+        END {exit !(n && !bad)}' "${facts}" ||
+        _die "the disk's time zone is not ${_expected__zone}, the one the installer showed: $(grep '^timezone: ' "${facts}" | tail -n 1)"
+    #and its own system, booted, says so: timedatectl names that zone, as far from UTC as the disk's zone
+    #files put it, and date tells the time by that zone's name
+    case " ${phases} " in *" boot "*)
+        _expected__clock="$(sed -n "s|^clock: zone file: \(${_expected__zone} (.*)\)\$|\1|p" "${facts}" | head -n 1)"
+        [ -n "${_expected__clock}" ] || _die "the disk's zone files do not say what ${_expected__zone} is: $(grep '^clock: zone file: ' "${facts}" | head -n 1)"
+        grep -q -x -F "clock: timedatectl: Time zone: ${_expected__clock}" "${facts}" ||
+            _die "the disk's own system, booted, does not say its time zone is ${_expected__clock}: $(grep '^clock: timedatectl: Time zone' "${facts}" | head -n 1)"
+        _expected__letters="${_expected__clock#*\(}"; _expected__letters="${_expected__letters%%,*}"
+        grep -q "^clock: date: .* ${_expected__letters} [0-9]*\$" "${facts}" ||
+            _die "the disk's own system, booted, does not tell the time in ${_expected__letters}: $(grep '^clock: date: ' "${facts}" | head -n 1)"
+        ;;
+    esac
+fi
 awk '/^i3 config: / {n++; if ($0 != "i3 config: 0 lines naming minos-installer") bad++} END {exit !(n && !bad)}' "${facts}" ||
     _die "the disk's i3 configuration is missing, or still names the installer"
 if [ "${layout}" = "beside" ]; then

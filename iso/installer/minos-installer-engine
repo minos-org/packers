@@ -11,7 +11,8 @@
 #                           partition the engine makes), system-mib (what is copied), medium (the disk
 #                           the session runs from, or -), try (yes, no), log (where apply keeps what was
 #                           said), progress (where it keeps how far it is), applying (the process of an
-#                           apply that is running, or -)
+#                           apply that is running, or -), timezone (this session's, which the installed
+#                           system takes unless another is chosen)
 #  disks                    the machine's disks, a line each, tab-separated: device, size, model, why
 #                           minos cannot go to it (- when it can), what it holds (empty, or its partitions)
 #  partitions [DISK]        the partitions of DISK, or of every disk minos can go to, a line each,
@@ -41,6 +42,18 @@
 #                           how far it is to /tmp/minos-installer.progress, and how it ended (the exit
 #                           status) to /tmp/minos-installer.status
 #  empty DISK               with --try: DISK left with no partition table and no file system
+#  keyboard                 the keyboard that is active, "layout variant where": where is x when it is
+#                           the X session's, as setxkbmap says it (also after a key of the desktop
+#                           changed it), or system when there is no X: the one the system was set to
+#                           (/etc/default/keyboard), which is the console's. Needs no root
+#  keyboard set LAYOUT [VARIANT]
+#                           LAYOUT made the keyboard of the X session, by the user it is run as. The
+#                           console's is not changed from here: it is said so, and exit 1
+#  keyboards                the layouts to choose from, a line each, tab-separated: layout, its name,
+#                           own or other: minos' own list first (minos-config keyboard-layouts), then
+#                           every layout xkb knows. Needs no root
+#  timezones                the time zones to choose from, a line each: every zone this system's tzdata
+#                           knows and has a file for, as its own index says them. Needs no root
 #  --try        on a machine that is not the live session: apply writes the disk for real, then says
 #               the setup command it would run, and does not run it
 #  --firmware   with --try, the firmware plans are for, whatever this machine started by
@@ -54,6 +67,10 @@
 #  esp PART                      the EFI system partition the boot loader goes to (UEFI)
 #  root PART                     the partition minos is copied to
 #  home PART                     the partition that is /home (none: /home is in the one of minos)
+#  keyboard LAYOUT [VARIANT]     the keyboard of the installed system: the one the password was typed
+#                                with (none: setup takes the one of the system it runs from)
+#  timezone ZONE                 the time zone of the installed system (none: setup takes the one of
+#                                the system it runs from)
 #a choice is a word, KEY=VALUE:
 #  use=whole|parts               the whole disk, erased, or the partitions and free room it has
 #  root=new[:MIB]                (whole) minos takes the room there is, or MIB
@@ -64,6 +81,8 @@
 #  home=none|new:MIB|PART|free:START[:MIB]    homefs=format|keep     the same for /home
 #  esp=auto|PART  espfs=auto|format           the EFI system partition: the one found, formatted only
 #                                when it is not FAT; or PART, or formatted whatever it holds
+#  keyboard=LAYOUT[:VARIANT]     the keyboard of the installed system
+#  timezone=ZONE                 the time zone of the installed system
 #rows are tab-separated, the first field says what the row is, and no field is empty (- stands for none):
 #  choices WORDS                             the choices as taken, to give back changed
 #  disk DEVICE SIZE MODEL HOLDS              the disk the plan is for
@@ -101,7 +120,7 @@ _die() { #message => on stderr, exit 1
 }
 
 _usage() { #=> the usage, on stderr, exit 2
-    sed -n '8,80s/^#//p' "${0}" >&2
+    sed -n '8,99s/^#//p' "${0}" >&2
     exit 2
 }
 
@@ -375,6 +394,74 @@ _show_needs() { #=> the needs verb
 }
 
 ################################################################################
+# The keyboard: the one that is active, and the ones there are
+################################################################################
+
+_keyboard_layouts() { #=> every layout xkb knows, "layout<TAB>name" a line, as its rules list them
+    awk '/^! layout/ {on = 1; next} /^!/ {on = 0}
+        on && NF {layout = $1; $1 = ""; sub(/^ +/, ""); printf "%s\t%s\n", layout, $0}' /usr/share/X11/xkb/rules/base.lst 2>/dev/null
+}
+
+_keyboard_now() { #=> the keyboard that is active, "layout variant where". In an X session, what the X
+    #server has (setxkbmap -query; the first layout when it holds several): a key of the desktop may
+    #have changed it since any file was written. With no X, what the system was set to, the console's
+    if [ -n "${DISPLAY:-}" ] && command -v setxkbmap >/dev/null 2>&1 && _keyboard_now__query="$(setxkbmap -query 2>/dev/null)"; then
+        printf "%s\n" "${_keyboard_now__query}" | awk '
+            $1 == "layout:" {layout = $2; sub(/,.*/, "", layout)} $1 == "variant:" {variant = $2; sub(/,.*/, "", variant)}
+            END {printf "%s %s x\n", (layout == "" ? "us" : layout), (variant == "" ? "-" : variant)}'
+    else
+        (   XKBLAYOUT=""; XKBVARIANT=""
+            # shellcheck source=/dev/null # the system's own file, shell assignments
+            [ ! -f /etc/default/keyboard ] || . /etc/default/keyboard
+            XKBLAYOUT="${XKBLAYOUT%%,*}"; XKBVARIANT="${XKBVARIANT%%,*}"
+            printf "%s %s system\n" "${XKBLAYOUT:-us}" "${XKBVARIANT:--}" )
+    fi
+}
+
+_keyboard_set() { #layout [variant] => LAYOUT made the keyboard of the X session; false, and why on stderr,
+    #when it is no layout or there is no X session to set it in
+    _keyboard_layouts | cut -f1 | grep -qxF "${1}" || { printf "%s\n" "${1} is no keyboard layout xkb knows." >&2; return 1; }
+    case "${2:-}" in *[!a-zA-Z0-9_-]*) printf "%s\n" "${2} is no variant of a keyboard layout." >&2; return 1 ;; esac
+    if [ -n "${DISPLAY:-}" ] && command -v setxkbmap >/dev/null 2>&1; then
+        setxkbmap "${1}" ${2:+-variant "${2}"}
+    else
+        printf "%s\n" "The console's keyboard is not changed from the installer: the installed system takes the one this system was set to." >&2
+        return 1
+    fi
+}
+
+_keyboard_list() { #=> the keyboards verb: minos' own layouts, in their order, then the others
+    _keyboard_list__own="$(minos-config keyboard-layouts 2>/dev/null | tr ',' ' ')"
+    _keyboard_list__all="$(_keyboard_layouts)"
+    for _keyboard_list__layout in ${_keyboard_list__own}; do
+        printf "%s\n" "${_keyboard_list__all}" | awk -F '\t' -v layout="${_keyboard_list__layout}" '$1 == layout {printf "%s\t%s\town\n", $1, $2}'
+    done
+    printf "%s\n" "${_keyboard_list__all}" | awk -F '\t' -v own=" ${_keyboard_list__own} " 'NF == 2 && index(own, " " $1 " ") == 0 {printf "%s\t%s\tother\n", $1, $2}'
+}
+
+_timezone_now() { #=> the time zone of this system: the one its clock really follows, the zone /etc/localtime
+    #links to, under the name it was set by; /etc/timezone when that is no link; Etc/UTC when neither says
+    _timezone_now__zone="$(readlink /etc/localtime 2>/dev/null | sed -n 's|^.*/zoneinfo/||p')"
+    [ -n "${_timezone_now__zone}" ] || _timezone_now__zone="$(cat /etc/timezone 2>/dev/null)"
+    printf "%s" "${_timezone_now__zone:-Etc/UTC}"
+}
+
+_timezone_list() { #=> the timezones verb: every zone this system's tzdata knows, a line each, as its own
+    #index says them (tzdata.zi: a Z line a zone, an L line another name of one). From 24.04 on the index
+    #still lists the old names (US/Pacific, Mexico/General), which live in another package: a name with
+    #no file is left out. Factory, the zone of a clock nobody set, is no choice
+    awk '$1 == "Z" && $2 != "Factory" {print $2} $1 == "L" {print $3}' /usr/share/zoneinfo/tzdata.zi 2>/dev/null | sort -u |
+        while IFS= read -r _timezone_list__zone; do
+            [ ! -f "/usr/share/zoneinfo/${_timezone_list__zone}" ] || printf "%s\n" "${_timezone_list__zone}"
+        done
+}
+
+_is_timezone() { #zone => true when ZONE is the name of a zone this system has
+    case "${1}" in ""|*[!a-zA-Z0-9_+/-]*|/*) return 1 ;; esac
+    [ -f "/usr/share/zoneinfo/${1}" ]
+}
+
+################################################################################
 # The plan
 ################################################################################
 
@@ -539,7 +626,12 @@ _check() { #=> the check verb: what stops plan, a line each
         $1 == "partition" && (NF == 4 || NF == 5 && $5 ~ /^[0-9]+$/) && $3 ~ /^([1-9][0-9]*|rest)$/ && $4 ~ /^(esp|linux|bios-boot)$/ {next}
         $1 == "format" && NF == 3 && $3 ~ /^(fat32|ext4)$/ {next}
         ($1 == "esp" || $1 == "root" || $1 == "home") && NF == 2 {next}
+        $1 == "keyboard" && (NF == 2 || NF == 3) && $2 ~ /^[a-z0-9_]+$/ && $3 ~ /^[a-zA-Z0-9_-]*$/ {next}
+        $1 == "timezone" && NF == 2 {next}
         {print "line " NR " is no action of a plan: " $0}' "${plan}"
+    for _check__zone in $(_plan timezone); do
+        _is_timezone "${_check__zone}" || printf "%s\n" "${_check__zone} is no time zone this system has."
+    done
 
     #the disks: each one touched must be free, and a new table holds what is made on it
     for _check__disk in $(_plan_disks); do
@@ -1218,8 +1310,22 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
 _edit() { #disk file => the edit verb: choices made a plan in FILE, and its rows
     scratch="$(mktemp)" || _die "no temporary file"
     free="$(_free "${1}")"
-    [ -n "${choices}" ] || choices="$(_choices_default "${1}")"
+    _edit__keyboard="$(_choice keyboard)"; _edit__timezone="$(_choice timezone)"
+    [ -n "$(printf "%s" "${choices}" | sed 's/keyboard=[^ ]*//; s/timezone=[^ ]*//; s/ //g')" ] || choices="$(_choices_default "${1}")"
     _plan_custom "${1}" > "${scratch}"
+    #the keyboard the password was typed with, which is no matter of disks: said as it was chosen
+    case "${_edit__keyboard}" in
+        "") ;;
+        *[!a-zA-Z0-9_:-]*) _die "${_edit__keyboard} is no keyboard" ;;
+        *) printf "%s\n" "keyboard $(printf "%s" "${_edit__keyboard}" | tr ':' ' ')" >> "${scratch}"
+           choices="${choices} keyboard=${_edit__keyboard}" ;;
+    esac
+    #and the time zone chosen, the same
+    if [ -n "${_edit__timezone}" ]; then
+        _is_timezone "${_edit__timezone}" || _die "${_edit__timezone} is no time zone this system has"
+        printf "%s\n" "timezone ${_edit__timezone}" >> "${scratch}"
+        choices="${choices} timezone=${_edit__timezone}"
+    fi
     cat "${scratch}" > "${2}" || _die "cannot write ${2}"
     rm -f "${scratch}"
     plan="${2}"
@@ -1229,11 +1335,28 @@ _edit() { #disk file => the edit verb: choices made a plan in FILE, and its rows
     _review "${1}"
 }
 
-_user_refusal() { #name => why minos takes no user of that name; nothing when it does
+_user_refusal() { #name => why minos takes no user of that name, in a sentence that says what a name is, since
+    #nothing else tells the person; nothing when it takes it. A name is what adduser takes of old and no
+    #more (lower case letters, digits, - and _, a letter first, 32 characters at most), and the name of no
+    #user and of no group the copied system has: adduser makes a group of the user's name, and stops
+    #when there is one
     case "${1}" in
-        ""|[!a-z]*|*[!a-z0-9_-]*|?????????????????????????????????*)
-            printf "%s\n" "\"${1}\" is not a user name minos takes: lower case letters, digits, - and _, a letter first, 32 at most." ;;
-        *) ! grep -q "^${1}:" "${passwd}" || printf "%s\n" "${1} is one of the system's own users: choose another name." ;;
+        "") printf "%s\n" "The user needs a name: lower case letters, digits, \"-\" and \"_\", a letter first." ;;
+        *" "*) printf "%s\n" "\"${1}\" has a space. A user name is one word: lower case letters, digits, \"-\" and \"_\", a letter first." ;;
+        *[A-Z]*) printf "%s\n" "\"${1}\" has capital letters. A user name is in lower case: letters, digits, \"-\" and \"_\", a letter first." ;;
+        [!a-z]*) printf "%s\n" "\"${1}\" starts with \"$(printf "%.1s" "${1}")\". A user name starts with a lower case letter; then letters, digits, \"-\" and \"_\"." ;;
+        *[!a-z0-9_-]*)
+            _user_refusal__odd="$(printf "%s" "${1}" | tr -d 'a-z0-9_-' | cut -c1)"
+            case "${_user_refusal__odd}" in
+                [\ -~]) printf "%s\n" "\"${1}\" has \"${_user_refusal__odd}\" in it. A user name takes only lower case letters, digits, \"-\" and \"_\"." ;;
+                *) printf "%s\n" "\"${1}\" has a character a user name does not take: only lower case letters, digits, \"-\" and \"_\"." ;;
+            esac ;;
+        ?????????????????????????????????*) printf "%s\n" "That name has ${#1} characters. A user name has 32 at most." ;;
+        *)  if grep -q "^${1}:" "${passwd}"; then
+                printf "%s\n" "${1} is one of the system's own users: choose another name."
+            elif grep -q "^${1}:" "${group}"; then
+                printf "%s\n" "${1} is the name of one of the system's groups: choose another name."
+            fi ;;
     esac
 }
 
@@ -1356,6 +1479,11 @@ _apply() { #=> plan applied from the top, then minos installed for user with pas
     set -- live desktop "${_apply__root}" "${user}" -
     [ -z "${_apply__home}" ] || set -- "${@}" "${_apply__home}"
     [ -z "${_apply__esp}" ] || set -- "${@}" --esp "${_apply__esp}"
+    #the keyboard the password was typed with: the installed system asks for it with the same one
+    _apply__keyboard="$(_plan keyboard | head -n 1 | tr ' ' ':')"
+    [ -z "${_apply__keyboard}" ] || set -- "${@}" --keyboard "${_apply__keyboard}"
+    _apply__timezone="$(_plan timezone | head -n 1)"
+    [ -z "${_apply__timezone}" ] || set -- "${@}" --timezone "${_apply__timezone}"
     set -- "${@}" --now
     if [ -n "${try}" ]; then
         _say "try mode: the disk is ready, and minos would now be installed with"
@@ -1393,6 +1521,19 @@ done
 [ "${#}" -ge 1 ] || _usage
 verb="${1}"; shift
 case "${firmware}" in ""|uefi|bios) ;; *) _usage ;; esac
+#the keyboard is the session's, not a disk's: asked and set by whoever the session is; and the list of
+#time zones is anybody's to read
+case "${verb}" in
+    keyboard)
+        case "${1:-}" in
+            "") _keyboard_now ;;
+            set) { [ "${#}" -ge 2 ] && [ "${#}" -le 3 ]; } || _usage; _keyboard_set "${2}" "${3:-}" || exit 1 ;;
+            *) _usage ;;
+        esac
+        exit 0 ;;
+    keyboards) _keyboard_list; exit 0 ;;
+    timezones) _timezone_list; exit 0 ;;
+esac
 [ "$(id -u)" = 0 ] || _die "runs as root"
 
 missing=""
@@ -1406,15 +1547,16 @@ command -v mkfs.vfat >/dev/null 2>&1 || busybox mkdosfs 2>&1 | grep -q -i usage 
 
 booted="bios"; [ ! -d /sys/firmware/efi ] || booted="uefi"
 if [ -n "${try}" ]; then
-    firmware="${firmware:-${booted}}"; passwd="/etc/passwd"
+    firmware="${firmware:-${booted}}"; passwd="/etc/passwd"; group="/etc/group"
     #about what the live system of the 26.04 ISO takes (1566)
     system_mib=1600
 elif [ -f "${setup}" ] && [ -f /rofs/etc/passwd ] && [ -f /cdrom/casper/filesystem.size ]; then
     [ -z "${firmware}" ] || _die "--firmware goes with --try: setup installs for the firmware the session started by"
-    #the setup this engine runs takes the password on its standard input and starts with no countdown
-    grep -q -e '--now)' "${setup}" ||
-        _die "the installer on this medium (${setup}) is older than this engine: it takes no --now. Nothing was written"
-    firmware="${booted}"; passwd="/rofs/etc/passwd"
+    #the setup this engine runs takes the password on its standard input, starts with no countdown and
+    #is told the keyboard and the time zone
+    { grep -q -e '--now)' "${setup}" && grep -q -e '--keyboard)' "${setup}" && grep -q -e '--timezone)' "${setup}"; } ||
+        _die "the installer on this medium (${setup}) is older than this engine: it takes no --now, no --keyboard or no --timezone. Nothing was written"
+    firmware="${booted}"; passwd="/rofs/etc/passwd"; group="/rofs/etc/group"
     system_mib="$(($(cat /cdrom/casper/filesystem.size) / 1048576))"
 else
     _die "this is not the live session of the minos ISO (no ${setup}). With --try the installer can be tried here: the disk chosen is partitioned and formatted for real, and minos is not installed"
@@ -1437,7 +1579,8 @@ case "${verb}" in
     facts)
         applying="$(_applying)"
         printf "%s\n" "firmware ${firmware}" "root-mib ${root_mib}" "esp-mib ${esp_mib}" "system-mib ${system_mib}" \
-            "medium ${medium:--}" "try ${try:-no}" "log ${log}" "progress ${progress}" "applying ${applying:--}" ;;
+            "medium ${medium:--}" "try ${try:-no}" "log ${log}" "progress ${progress}" "applying ${applying:--}" \
+            "timezone $(_timezone_now)" ;;
     disks) _scan; _list_disks ;;
     partitions)
         [ "${#}" -le 1 ] || _usage
@@ -1461,7 +1604,7 @@ case "${verb}" in
         _edit__disk="${1}"; _edit__file="${2}"; shift 2
         for _edit__word; do
             case "${_edit__word}" in
-                use=*|root=*|rootfs=*|home=*|homefs=*|esp=*|espfs=*) choices="${choices}${choices:+ }${_edit__word}" ;;
+                use=*|root=*|rootfs=*|home=*|homefs=*|esp=*|espfs=*|keyboard=*|timezone=*) choices="${choices}${choices:+ }${_edit__word}" ;;
                 *) _die "${_edit__word} is no choice" ;;
             esac
         done

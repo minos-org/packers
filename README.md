@@ -153,8 +153,9 @@ the session runs from, a partition too small, no EFI system partition on UEFI, a
 for GRUB on BIOS), `describe` says it for people, `review` and `edit` say it as rows an interface draws
 (the disk now and after, what is done, what is lost, the name of the deed), and `apply` ends with the
 installer the medium carries, `sh /cdrom/minos/setup live desktop PARTITION USER - [HOME] [--esp ESP]
---now`, the password on its standard input. What was said stays in `/tmp/minos-installer.log`, how far
-the copy is in `/tmp/minos-installer.progress`, and how it ended in `/tmp/minos-installer.status`.
+[--keyboard LAYOUT[:VARIANT]] [--timezone ZONE] --now`, the password on its standard input. What was said
+stays in `/tmp/minos-installer.log`, how far the copy is in `/tmp/minos-installer.progress`, and how it ended
+in `/tmp/minos-installer.status`.
 
 `minos-installer` is the interface over it: a wizard this script draws by itself in a terminal of 80 by 24
 (escape sequences, keys read one at a time; urxvt, the Linux console, ssh), with the steps along the top
@@ -169,8 +170,25 @@ proposed. Nothing is written before the confirmation, and what the firmware star
 partition, GRUB's own on a GPT that BIOS starts) is the engine's to see to: it is in every plan that needs
 it, kept when it is there, made when there is room. A disk that holds something gets no plan that deletes
 it until that is chosen. The password goes to `setup` on its standard input (`live ... USER - --now`), and
-`--now` has `setup` skip its own countdown. It runs as the session's user and asks sudo for the engine
-alone; another interface can take its place without touching the engine.
+`--now` has `setup` skip its own countdown.
+
+The step of the user answers one worry, whether what was typed is what was meant. A name is taken as typed
+and judged by the engine (`user NAME`), which refuses it in a sentence that says what a name is: lower
+case letters, digits, `-` and `_`, a letter first, 32 at most, and no user or group the copied system
+has. The password is asked twice while it is typed blind and once while it is seen (`F5`). The keyboard
+shown is the one that is active, as the X session has it (`setxkbmap -query`, so also after minos' own
+key, Alt and the right Shift), and is changed there: `F2` moves to the next layout of minos' list
+(`minos-config keyboard-layouts`), `F3` lists every layout xkb knows; what was typed as a password goes
+with the old keyboard. On the console the keyboard is the one the system was set to and is not changed
+from the installer. The same step shows the time zone, the session's until another is chosen, with the
+time it is there: `F4` lists every zone the session's tzdata has (its `tzdata.zi`), narrowed by what is
+typed, in a window and on the console alike. `Ctrl-K`, `Ctrl-O`, `Ctrl-T` and `Ctrl-P` do what `F2` to
+`F5` do, where a terminal keeps the function keys. The installed system takes that keyboard and that zone
+(`setup ... --keyboard LAYOUT[:VARIANT] --timezone ZONE`), so it asks for the password with the keys it
+was typed with.
+
+The installer runs as the session's user and asks sudo for the engine alone; another interface can take
+its place without touching the engine.
 
 Both take `--try` on a machine that is not the live session: the disk chosen is partitioned and formatted
 for real, the `setup` command is shown, not run, and `--firmware uefi|bios` says which firmware the

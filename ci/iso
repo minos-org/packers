@@ -5,7 +5,9 @@
 #with Secure Boot from a USB stick (iso/live-check), and its probe says what the session is, ci/probe-common
 #among it; the session boots with the network's cable out too, and must come up all the same, with its
 #plugins. Then minos is installed from the live session, its installer answered by its keys, onto an empty
-#disk with no network, by UEFI and by BIOS, and beside what a disk holds; each disk boots alone, by UEFI
+#disk with no network, by UEFI and by BIOS (with another keyboard and another time zone than the session's,
+#chosen in the installer), and beside what a disk holds; each disk boots alone with the same keys for its
+#password and says its time zone, by UEFI
 #with a network as well, once minos-untrim has given it back what the ISO left out (iso/install-check).
 #One line per check; ci/verdict iso reads them.
 #usage: [SETUP=FILE|URL] [MIRROR=URI] ci/iso RELEASE
@@ -24,7 +26,11 @@ tmp="${ISO_WORK:-${TMPDIR:-/tmp}/minos-iso}"
 setup="${SETUP:-https://minos.io/s}"
 mirror="$(sh "${w}/ci/mirror")"
 
-_line() { printf "%-34s %s\\n" "${1}" "${2}"; }
+_line() { #label value => a line of a check. ci/verdict reads the label from the first 34 columns: a longer
+    #one would be a line it does not find, so it is said here as a failure of its own
+    [ "${#1}" -le 34 ] || set -- "$(printf "%.34s" "${1}")" "FAIL  the label \"${1}\" is over the 34 columns ci/verdict reads"
+    printf "%-34s %s\\n" "${1}" "${2}"
+}
 
 _live() { #label firmware medium cable => LABEL's line, and with the cable in (yes) the probe's lines after it
     _live__name="${2}-${3}"; [ "${4}" = yes ] || _live__name="${_live__name}-nocable"
@@ -50,12 +56,15 @@ _live() { #label firmware medium cable => LABEL's line, and with the cable in (y
     rm -f "${_live__serial}.lines"
 }
 
-_install() { #label firmware disk phases [layout] => LABEL's line; the disk's facts, serial log and screens to
-    #the logs
-    _install__name="${2}-${3}"; [ -z "${5:-}" ] || _install__name="${_install__name}-${5}"
+_install() { #label firmware disk phases [layout [keyboard [zone]]] => LABEL's line; the disk's facts, serial
+    #log and screens to the logs
+    _install__name="${2}-${3}"; [ "${5:-empty}" = "empty" ] || _install__name="${_install__name}-${5}"
+    [ -z "${6:-}" ] || _install__name="${_install__name}-${6}"
+    #as iso/install-check names the run: the city of the zone, in lower case
+    [ -z "${7:-}" ] || _install__name="${_install__name}-$(printf "%s" "${7##*/}" | tr '[:upper:]_' '[:lower:]-')"
     _install__log="${logs}/install-${_install__name}.log"
     _install__start="$(date +%s)"
-    PHASES="${4}" LAYOUT="${5:-empty}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${tmp}/install" 20 > "${_install__log}" 2>&1
+    PHASES="${4}" LAYOUT="${5:-empty}" KEYBOARD="${6:-}" ZONE="${7:-}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${tmp}/install" 20 > "${_install__log}" 2>&1
     _install__status="${?}"; _install__secs="$(($(date +%s) - _install__start))"
     mkdir -p "${logs}/install"
     for _install__file in "${tmp}/install/${_install__name}".facts "${tmp}/install/${_install__name}".serial.log \
@@ -116,7 +125,9 @@ _live "live uefi cd, no cable" uefi cd no
 
 #minos installed from the live session, with no network, then the disk alone
 _install "install uefi sata" uefi sata "install boot untrim"
-_install "install bios sata" bios sata "install boot"
+#the keyboard changed in the installer before the password is typed, and the same keys at the disk's login;
+#a time zone chosen there, and the disk in it. The other two installs take the session's keyboard and zone
+_install "install bios sata, keyboard, zone" bios sata "install boot" empty latam Asia/Tokyo
 #beside what a disk holds, the plan changed in the installer, on a disk the kernel names as NVMe ones
 _install "install uefi nvme, beside" uefi nvme "install boot" beside
 rm -rf "${tmp}/install"

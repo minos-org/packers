@@ -130,8 +130,8 @@ _title() { #step => the window's title says the step, in the installer's own win
 
 _key() { #[tenths] => key, the next key pressed, by its name: a character as itself; enter, esc, tab,
     #backtab, backspace, delete, up, down, left, right, home, end, pageup, pagedown, clear (Ctrl-U),
-    #redraw (Ctrl-L), other; resize, when the terminal changed its size while no key came. With TENTHS of
-    #a second, none when no key comes in that time (0: at once).
+    #redraw (Ctrl-L), f2 to f5, ctrl-k, ctrl-o, ctrl-t, ctrl-p, other; resize, when the terminal changed its size
+    #while no key came. With TENTHS of a second, none when no key comes in that time (0: at once).
     #key_fresh says the key was read just now, not found behind another in what an earlier read gave
     key_fresh=""
     #what was drawn since the last key, written at once: a screen changes whole, never line by line
@@ -165,7 +165,7 @@ _key() { #[tenths] => key, the next key pressed, by its name: a character as its
             fi
             case "${keys_ahead}" in
                 "["*|O*)
-                    keys_ahead="${keys_ahead#?}"; _key__args=""
+                    _key__lead="${keys_ahead%"${keys_ahead#?}"}"; keys_ahead="${keys_ahead#?}"; _key__args=""
                     while :; do
                         _key__rest="${keys_ahead#?}"; _key__byte="${keys_ahead%"${_key__rest}"}"; keys_ahead="${_key__rest}"
                         case "${_key__byte}" in
@@ -173,7 +173,16 @@ _key() { #[tenths] => key, the next key pressed, by its name: a character as its
                             *) break ;;
                         esac
                     done
+                    #the function keys: F2 to F5 as urxvt says them (12~ to 15~), as xterm and tmux do
+                    #(O Q, O R, O S, 15~) and as the Linux console does ([ [ B to [ [ E)
+                    if [ "${_key__byte}" = "[" ]; then
+                        _key__rest="${keys_ahead#?}"; _key__byte="[${keys_ahead%"${_key__rest}"}"; keys_ahead="${_key__rest}"
+                    elif [ "${_key__lead}" = "O" ]; then
+                        case "${_key__byte}" in Q|R|S) _key__byte="O${_key__byte}" ;; esac
+                    fi
                     case "${_key__byte}${_key__args}" in
+                        "~12"|OQ|"[B") key="f2" ;; "~13"|OR|"[C") key="f3" ;; "~14"|OS|"[D") key="f4" ;;
+                        "~15"|"[E") key="f5" ;;
                         A) key="up" ;; B) key="down" ;; C) key="right" ;; D) key="left" ;;
                         H|"~1"|"~7") key="home" ;; F|"~4"|"~8") key="end" ;;
                         Z) key="backtab" ;; "~3") key="delete" ;; "~5") key="pageup" ;; "~6") key="pagedown" ;;
@@ -186,6 +195,10 @@ _key() { #[tenths] => key, the next key pressed, by its name: a character as its
         "${c_del}"|"${c_bs}") key="backspace" ;;
         "${c_ctrl_u}") key="clear" ;;
         "${c_ctrl_l}") key="redraw" ;;
+        "${c_ctrl_k}") key="ctrl-k" ;;
+        "${c_ctrl_o}") key="ctrl-o" ;;
+        "${c_ctrl_t}") key="ctrl-t" ;;
+        "${c_ctrl_p}") key="ctrl-p" ;;
     esac
 }
 
@@ -307,11 +320,13 @@ _frame() { #step key label... => the frame of a screen: the installer's name and
 
 _keys() { #key label... => the row of keys at the bottom of the frame
     screen="${screen}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H${blank_row}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H"
+    _keys__gap=""
     while [ "${#}" -ge 2 ]; do
         case "${1}" in
-            "~"*) screen="${screen}${s_dim}${1#"~"} ${2}${s_off}   " ;;
-            *) screen="${screen}${s_bold}${1}${s_off} ${2}   " ;;
+            "~"*) screen="${screen}${_keys__gap}${s_dim}${1#"~"} ${2}${s_off}" ;;
+            *) screen="${screen}${_keys__gap}${s_bold}${1}${s_off} ${2}" ;;
         esac
+        _keys__gap="   "
         shift 2
     done
 }
@@ -477,16 +492,13 @@ _failed() { #what => a screen for what the engine could not do: what it said, an
 }
 
 ################################################################################
-# The intro: one screen, drawn in a style. Each style is one function, which
-# shows the same lines its own way and can be taken out without the others
+# The intro: one screen, which comes out of noise when the installer opens
 ################################################################################
 
-intro_styles="cipher teletype scan"
-
 _intro_lines() { #=> intro, the lines of the intro screen, "row column style text" a line, tab-separated:
-    #the name in blocks, what this machine is, what is about to happen
+    #the name in blocks, what this machine is, the steps ahead
     intro=""
-    _intro_lines__row=2
+    _intro_lines__row=3
     for _intro_lines__cells in "X...X XXX X...X .XXX. .XXXX" "XX.XX .X. XX..X X...X X...." "X.X.X .X. X.X.X X...X .XXX." \
         "X...X .X. X..XX X...X ....X" "X...X XXX X...X .XXX. XXXX."; do
         _intro_lines__text=""
@@ -504,12 +516,9 @@ _intro_lines() { #=> intro, the lines of the intro screen, "row column style tex
     _intro_lines__disks="$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-" {n++; if (n <= 2) list = list (n > 1 ? ", " : "") substr($1, 6) " " $2 ($3 == "-" ? "" : " " $3)}
         END {if (!n) print "none minos can go to"; else print substr(list (n > 2 ? ", " n - 2 " more" : ""), 1, 56)}')"
     _intro_lines__firmware="UEFI"; [ "${firmware_now}" = "uefi" ] || _intro_lines__firmware="BIOS"
-    [ -z "${try}" ] || _intro_lines__firmware="${_intro_lines__firmware} (try mode: f asks as the other one would)"
-    intro="${intro}8${c_tab}12${c_tab}dim${c_tab}the installer: this live system, copied to a disk${c_nl}"
     intro="${intro}10${c_tab}5${c_tab}plain${c_tab}> firmware     ${_intro_lines__firmware}${c_nl}"
     intro="${intro}11${c_tab}5${c_tab}plain${c_tab}> disks        ${_intro_lines__disks}${c_nl}"
-    intro="${intro}12${c_tab}5${c_tab}plain${c_tab}> system       ${system_size}, copied as it runs here: no network needed${c_nl}"
-    intro="${intro}13${c_tab}5${c_tab}plain${c_tab}> writes       none until you confirm, on the last step${c_nl}"
+    intro="${intro}12${c_tab}5${c_tab}plain${c_tab}> system       ${system_size} required, no network needed${c_nl}"
     _intro_lines__steps=""; _intro_lines__n=0
     for _intro_lines__name in ${steps}; do
         _intro_lines__n="$((_intro_lines__n + 1))"
@@ -518,7 +527,6 @@ _intro_lines() { #=> intro, the lines of the intro screen, "row column style tex
     intro="${intro}15${c_tab}5${c_tab}bold${c_tab}${_intro_lines__steps}${c_nl}"
     intro="${intro}17${c_tab}5${c_tab}plain${c_tab}Every step goes back and forward, and keeps what you answered.${c_nl}"
     intro="${intro}18${c_tab}5${c_tab}plain${c_tab}The plan for the disk is proposed: accept it, or change any line of it.${c_nl}"
-    intro="${intro}20${c_tab}5${c_tab}dim${c_tab}intro: ${intro_style}   (s shows the next one: ${intro_styles})${c_nl}"
 }
 
 _intro_style() { #name => style, the escape sequence of a style of the intro's lines
@@ -541,33 +549,6 @@ _intro_draw() { #=> the intro as it stays: every line, at once
 ${intro}
 E=O=F
     _rest "${_intro_draw__row}"
-}
-
-_intro_teletype() { #=> the intro typed out: the name a row at a time, then each line a few characters at
-    #a time behind a cursor, as a teletype prints
-    _rest 1
-    while IFS="${c_tab}" read -r _intro_teletype__at _intro_teletype__column _intro_teletype__style _intro_teletype__text; do
-        [ -n "${_intro_teletype__at}" ] || continue
-        _intro_style "${_intro_teletype__style}"
-        if [ "${_intro_teletype__style}" = "logo" ]; then
-            _put "${_intro_teletype__at}" "${_intro_teletype__column}" "${style}" "${_intro_teletype__text}"
-            _tick || return 0
-            continue
-        fi
-        _intro_teletype__typed=""; _intro_teletype__left="${_intro_teletype__text}"
-        while [ -n "${_intro_teletype__left}" ]; do
-            #twelve characters to a frame
-            _intro_teletype__next="${_intro_teletype__left#????????????}"
-            [ "${_intro_teletype__next}" != "${_intro_teletype__left}" ] || _intro_teletype__next=""
-            _intro_teletype__typed="${_intro_teletype__typed}${_intro_teletype__left%"${_intro_teletype__next}"}"
-            _intro_teletype__left="${_intro_teletype__next}"
-            _put "${_intro_teletype__at}" "${_intro_teletype__column}" "${style}" "${_intro_teletype__typed}${s_off}${g_block}"
-            _tick || return 0
-        done
-        _put "${_intro_teletype__at}" "${_intro_teletype__column}" "${style}" "${_intro_teletype__typed} "
-    done << E=O=F
-${intro}
-E=O=F
 }
 
 _intro_cipher() { #=> the intro out of noise: every line starts as signs drawn by chance and settles,
@@ -613,49 +594,23 @@ E=O=F
     done
 }
 
-_intro_scan() { #=> the intro under a scan line: a bright line comes down the screen and leaves each row
-    #behind it, first lit, then as it stays
-    _rest 1
-    _intro_scan__row=1; _rep "${g_h}" "${body_columns}"; _intro_scan__beam="${rep}"
-    while [ "${_intro_scan__row}" -le "$((body_rows + 1))" ]; do
-        while IFS="${c_tab}" read -r _intro_scan__at _intro_scan__column _intro_scan__style _intro_scan__text; do
-            [ -n "${_intro_scan__at}" ] || continue
-            if [ "${_intro_scan__at}" = "$((_intro_scan__row - 1))" ]; then
-                _row "${_intro_scan__at}" "" ""; _put "${_intro_scan__at}" "${_intro_scan__column}" "${s_bold}" "${_intro_scan__text}"
-            elif [ "${_intro_scan__at}" = "$((_intro_scan__row - 3))" ]; then
-                _intro_style "${_intro_scan__style}"
-                _put "${_intro_scan__at}" "${_intro_scan__column}" "${style}" "${_intro_scan__text}"
-            fi
-        done << E=O=F
-${intro}
-E=O=F
-        [ "${_intro_scan__row}" -gt "${body_rows}" ] || _put "${_intro_scan__row}" 1 "${s_scan}" "${_intro_scan__beam}"
-        [ "${_intro_scan__row}" -le 1 ] || [ "${_intro_scan__row}" -gt "$((body_rows + 1))" ] ||
-            { _intro_scan__lit="$(printf "%s" "${intro}" | grep -c "^$((_intro_scan__row - 1))${c_tab}")"
-              [ "${_intro_scan__lit}" != 0 ] || _row "$((_intro_scan__row - 1))" "" ""; }
-        _tick || return 0
-        _tick || return 0
-        _intro_scan__row="$((_intro_scan__row + 1))"
-    done
-}
-
 _step_intro() { #=> the first screen: what is about to happen. Enter goes on
     _title "intro"
-    #the style plays once, when the installer opens, and again when s asks for another: coming back to
-    #this screen from a step, it is there at once
+    #it comes out of noise once, when the installer opens: coming back to this screen from a step, it is
+    #there at once
     _step_intro__play=""
     [ -n "${intro_played}" ] || _step_intro__play="yes"
     intro_played="yes"
     while :; do
         _intro_lines
         if [ -n "${try}" ]; then
-            _frame none "Enter" "begin" "s" "another intro" "f" "firmware" "q" "quit"
+            _frame none "Enter" "begin" "f" "firmware" "q" "quit"
         else
-            _frame none "Enter" "begin" "s" "another intro" "q" "quit"
+            _frame none "Enter" "begin" "q" "quit"
         fi
         if [ -n "${_step_intro__play}" ] && [ "${effects}" = "on" ]; then
             effect_began="$(date +%s)"; effect_frames=0
-            "_intro_${intro_style}"
+            _intro_cipher
         fi
         _step_intro__play=""
         _intro_draw
@@ -663,11 +618,6 @@ _step_intro() { #=> the first screen: what is about to happen. Enter goes on
         _key
         case "${key}" in
             enter|n|right) return 0 ;;
-            s)  #the next style, played
-                # shellcheck disable=SC2086 # the styles, a word each
-                set -- ${intro_styles} ${intro_styles}
-                while [ "${1}" != "${intro_style}" ]; do shift; done
-                intro_style="${2}"; _step_intro__play="yes" ;;
             f)  [ -z "${try}" ] || {
                     if [ "${firmware_now}" = "uefi" ]; then firmware_now="bios"; else firmware_now="uefi"; fi
                     engine_options="--try --firmware ${firmware_now}"; loaded=""
@@ -1112,6 +1062,22 @@ _secret_type() { #name => key, just typed, at the end of the secret NAME. What t
     eval "${1}=\"\${${1}}\${key}\"; ${1}_units=\"\${_secret_type__units}\""
 }
 
+_secret_clear() { #name => shown, the secret NAME as it was typed, the 32 characters of it a field holds; count,
+    #how many characters it has. A character of several bytes is taken whole, by its unit
+    _secret_clear__units=""; _secret_clear__left=""
+    eval "_secret_clear__units=\"\${${1}_units}\"; _secret_clear__left=\"\${${1}}\""
+    shown=""; count=0
+    for _secret_clear__bytes in ${_secret_clear__units}; do
+        count="$((count + 1))"
+        [ "${count}" -le 32 ] || continue
+        while [ "${_secret_clear__bytes}" -gt 0 ]; do
+            _secret_clear__rest="${_secret_clear__left#?}"
+            shown="${shown}${_secret_clear__left%"${_secret_clear__rest}"}"; _secret_clear__left="${_secret_clear__rest}"
+            _secret_clear__bytes="$((_secret_clear__bytes - 1))"
+        done
+    done
+}
+
 _secret_back() { #name => the secret NAME without the last thing typed: a whole character, never half of one
     eval "_secret_back__units=\"\${${1}_units}\"; _secret_back__value=\"\${${1}}\""
     [ -n "${_secret_back__units}" ] || return 0
@@ -1123,13 +1089,196 @@ _secret_back() { #name => the secret NAME without the last thing typed: a whole 
     eval "${1}=\"\${_secret_back__value}\"; ${1}_units=\"\${_secret_back__units}\""
 }
 
+_keyboard_read() { #=> keyboard, the one that is active now (layout, or layout:variant), as the engine reads it
+    #from the session; keyboard_where, x or system (the console's); keyboard_name, what xkb calls it.
+    #The engine is asked as this user: the keyboard is the session's, and needs no root
+    # shellcheck disable=SC2046 # the layout, the variant and where, three words
+    set -- $(sh "${engine}" keyboard 2>/dev/null)
+    keyboard="${1:-us}"; [ "${2:--}" = "-" ] || keyboard="${keyboard}:${2}"
+    keyboard_where="${3:-system}"
+    [ -n "${keyboards}" ] || keyboards="$(sh "${engine}" keyboards 2>/dev/null)"
+    keyboard_name="$(printf "%s\n" "${keyboards}" | awk -F '\t' -v layout="${keyboard%%:*}" '$1 == layout {print $2; exit}')"
+}
+
+_keyboard_change() { #layout => LAYOUT made the keyboard, when the session lets the installer change it; what
+    #was typed as a password goes with the old one, since its keys now say other characters. said is
+    #left with what to tell the person
+    _keyboard_change__was="${keyboard}"
+    if said="$(sh "${engine}" keyboard set "${1}" 2>&1)"; then
+        _keyboard_read
+        if [ "${keyboard}" != "${_keyboard_change__was}" ]; then
+            said="The keyboard is now ${keyboard%%:*}."
+            if [ -n "${pass}${pass_again}" ]; then
+                pass=""; pass_again=""; pass_units=""; pass_again_units=""
+                said="The keyboard is now ${keyboard%%:*}: type the password again, with it."
+            fi
+        fi
+    fi
+}
+
+_step_keyboards() { #=> any keyboard xkb knows, chosen from a list, minos' own first; Esc leaves the one there is
+    _step_keyboards__count="$(printf "%s\n" "${keyboards}" | grep -c .)"
+    _step_keyboards__at="$(printf "%s\n" "${keyboards}" | awk -F '\t' -v layout="${keyboard%%:*}" '$1 == layout {print NR; exit}')"
+    _step_keyboards__at="${_step_keyboards__at:-1}"
+    while :; do
+        _frame user "j k" "move" "PgUp PgDn" "a page" "Enter" "take it" "Esc" "leave it as it is"
+        _row 1 "" ""; _row 2 "" ""; _put 2 3 "${s_bold}" "The keyboard"
+        _put 2 30 "${s_dim}" "${_step_keyboards__at} of ${_step_keyboards__count}: minos' own first, then all xkb has"
+        _row 3 "" ""
+        _step_keyboards__first="$((_step_keyboards__at - 8))"
+        [ "$((_step_keyboards__first + 16))" -le "${_step_keyboards__count}" ] || _step_keyboards__first="$((_step_keyboards__count - 16))"
+        [ "${_step_keyboards__first}" -ge 1 ] || _step_keyboards__first=1
+        row=4; _step_keyboards__n=0
+        while IFS="${c_tab}" read -r _step_keyboards__layout _step_keyboards__name _step_keyboards__kind; do
+            [ -n "${_step_keyboards__layout}" ] || continue
+            _step_keyboards__n="$((_step_keyboards__n + 1))"
+            { [ "${_step_keyboards__n}" -ge "${_step_keyboards__first}" ] && [ "${row}" -le 20 ]; } || continue
+            _step_keyboards__text="$(printf "%-10.10s %-44.44s %s" "${_step_keyboards__layout}" "${_step_keyboards__name}" "$([ "${_step_keyboards__kind}" != "own" ] || printf "minos")")"
+            if [ "${_step_keyboards__n}" = "${_step_keyboards__at}" ]; then
+                _row "${row}" "${s_here}" "  > ${_step_keyboards__text}"
+                _step_keyboards__chosen="${_step_keyboards__layout}"
+            else
+                _row "${row}" "" "    ${_step_keyboards__text}"
+            fi
+            row="$((row + 1))"
+        done << E=O=F
+${keyboards}
+E=O=F
+        _rest "${row}"
+        _key
+        case "${key}" in
+            j|down) [ "${_step_keyboards__at}" -ge "${_step_keyboards__count}" ] || _step_keyboards__at="$((_step_keyboards__at + 1))" ;;
+            k|up) [ "${_step_keyboards__at}" -le 1 ] || _step_keyboards__at="$((_step_keyboards__at - 1))" ;;
+            pagedown) _step_keyboards__at="$((_step_keyboards__at + 16))"; [ "${_step_keyboards__at}" -le "${_step_keyboards__count}" ] || _step_keyboards__at="${_step_keyboards__count}" ;;
+            pageup) _step_keyboards__at="$((_step_keyboards__at - 16))"; [ "${_step_keyboards__at}" -ge 1 ] || _step_keyboards__at=1 ;;
+            home) _step_keyboards__at=1 ;;
+            end) _step_keyboards__at="${_step_keyboards__count}" ;;
+            enter) _keyboard_change "${_step_keyboards__chosen}"; return 0 ;;
+            esc|q) said=""; return 0 ;;
+        esac
+    done
+}
+
+_zone_time() { #zone => zone_time, the time it is in ZONE now, hours and minutes
+    zone_time="$(TZ="${1}" date +%H:%M 2>/dev/null)"
+}
+
+_step_zones() { #=> timezone, chosen among the zones this system's tzdata has, which the engine lists: what
+    #is typed narrows the list to the zones with it in their name, whatever the case, a space standing
+    #for the _ of a name (mexico city). The zone under the cursor says what time it is there now, which
+    #is how a person sees it is theirs. Enter takes it, Esc leaves the zone as it was. It is an answer
+    #like the others: nothing of this system changes. said is left with what could not be done
+    said=""
+    [ -n "${zones}" ] || zones="$(sh "${engine}" timezones 2>/dev/null)"
+    if [ -z "${zones}" ]; then
+        said="This system's index of time zones (/usr/share/zoneinfo/tzdata.zi) is not here: the time zone stays ${timezone}."
+        return 0
+    fi
+    _step_zones__typed=""; _step_zones__at=0; _step_zones__draw="yes"; _step_zones__drawn=""
+    while :; do
+        if [ -n "${_step_zones__draw}" ]; then
+            #the zones that have what was typed: how many, where the cursor is (on the zone there is
+            #while it is among them and the cursor was not moved, else on the first) and the zone
+            #there, then the rows of the list around it
+            _step_zones__found="$(printf "%s\n" "${zones}" | awk -v typed="${_step_zones__typed}" -v at="${_step_zones__at}" -v now="${timezone}" -v rows=15 '
+                BEGIN {typed = tolower(typed); gsub(/ /, "_", typed)}
+                typed == "" || index(tolower($0), typed) {found[++n] = $0; if ($0 == now) here = n}
+                END {
+                    if (at < 1) at = here ? here : 1
+                    if (at > n) at = n
+                    first = at - int(rows / 2)
+                    if (first + rows - 1 > n) first = n - rows + 1
+                    if (first < 1) first = 1
+                    print n + 0, at + 0, (n ? found[at] : "-")
+                    for (i = first; i < first + rows && i <= n; i++) print (i == at ? ">" : "-"), found[i]
+                }')"
+            # shellcheck disable=SC2086 # how many, where, which: three words
+            set -- ${_step_zones__found%%"${c_nl}"*}
+            _step_zones__count="${1}"; _step_zones__at="${2}"; _step_zones__zone="${3}"
+            _title "zone ${_step_zones__zone}"
+            #a row that held a zone and holds none now keeps a speck of it in urxvt, which paints again
+            #only the cells that changed: the terminal is emptied when the list is another one
+            [ "${_step_zones__found}" = "${_step_zones__drawn}" ] || view=""
+            _step_zones__drawn="${_step_zones__found}"
+            _frame user "a-z" "narrow the list" "Up Down" "move" "Enter" "take it" "Esc" "leave it as it is"
+            _row 1 "" ""; _row 2 "" ""; _put 2 3 "${s_bold}" "The time zone"
+            if [ -z "${_step_zones__typed}" ]; then
+                _put 2 30 "${s_dim}" "all ${_step_zones__count} this system knows: type to find yours"
+            elif [ "${_step_zones__count}" -eq 1 ]; then
+                _put 2 30 "${s_dim}" "the one with that in its name"
+            elif [ "${_step_zones__count}" -gt 1 ]; then
+                _put 2 30 "${s_dim}" "${_step_zones__at} of the ${_step_zones__count} with that in their name"
+            fi
+            _row 3 "" ""
+            _draw_field 4 "Find" "${_step_zones__typed}" yes ""
+            _row 5 "" ""
+            row=6
+            if [ "${_step_zones__count}" -gt 0 ]; then
+                _zone_time "${_step_zones__zone}"
+                while IFS=" " read -r _step_zones__mark _step_zones__name; do
+                    if [ "${_step_zones__mark}" = ">" ]; then
+                        _row "${row}" "${s_here}" "  > ${_step_zones__name}"
+                        _put "${row}" 52 "${s_here}" "${zone_time} there now"
+                    else
+                        _row "${row}" "" "    ${_step_zones__name}"
+                    fi
+                    row="$((row + 1))"
+                done << E=O=F
+${_step_zones__found#*"${c_nl}"}
+E=O=F
+            else
+                _row 6 "${s_warn}" "    No time zone has that in its name. Backspace takes a character back."
+                row=7
+            fi
+            _rest "${row}"
+            #the cursor, where the next character goes
+            screen="${screen}${c_esc}[$((origin_row + 5));$((origin_column + 22 + ${#_step_zones__typed}))H${c_esc}[?25h"
+        fi
+        _step_zones__draw="yes"
+        _key 10
+        if [ "${key}" = "none" ]; then
+            #a second with no key: drawn again when the minute changed there, or the window did
+            _step_zones__was="${zone_time}"
+            [ "${_step_zones__count}" -lt 1 ] || _zone_time "${_step_zones__zone}"
+            if [ "${zone_time}" = "${_step_zones__was}" ] && [ "$(stty size <&3 2>/dev/null)" = "${term_size}" ]; then
+                _step_zones__draw=""
+            fi
+            continue
+        fi
+        screen="${screen}${c_esc}[?25l"
+        case "${key}" in
+            down) _step_zones__at="$((_step_zones__at + 1))" ;;
+            up) [ "${_step_zones__at}" -le 1 ] || _step_zones__at="$((_step_zones__at - 1))" ;;
+            pagedown) _step_zones__at="$((_step_zones__at + 15))" ;;
+            pageup) _step_zones__at="$((_step_zones__at - 15))"; [ "${_step_zones__at}" -ge 1 ] || _step_zones__at=1 ;;
+            home) _step_zones__at=1 ;;
+            end) _step_zones__at="${_step_zones__count}" ;;
+            backspace) _step_zones__typed="${_step_zones__typed%?}"; _step_zones__at=0 ;;
+            clear) _step_zones__typed=""; _step_zones__at=0 ;;
+            enter) [ "${_step_zones__count}" -lt 1 ] || { timezone="${_step_zones__zone}"; return 0; } ;;
+            esc) return 0 ;;
+            [a-zA-Z0-9_+/-]|" ")
+                #a character of a name: the list is narrowed again from its top
+                [ "${#_step_zones__typed}" -ge 30 ] || { _step_zones__typed="${_step_zones__typed}${key}"; _step_zones__at=0; } ;;
+        esac
+    done
+}
+
 _draw_field() { #row label text here secret => a field on row ROW of the body: TEXT typed so far, lit when
-    #HERE; SECRET is the name of a secret, shown as a star a character
+    #HERE; SECRET is the name of a secret, shown as a star a character, or as it was typed while
+    #pass_seen says so
     _row "${1}" "" ""
     _put "${1}" 5 "" "${2}"
-    _draw_field__shown="${3}"
-    if [ -n "${5}" ]; then _secret_count "${5}"; _rep "*" "${count}"; _draw_field__shown="${rep}"; fi
-    _draw_field__shown="$(printf "%-32.32s" "${_draw_field__shown}")"
+    if [ -n "${5}" ] && [ -n "${pass_seen}" ]; then
+        #as typed: the field is filled by characters, which printf would count as bytes
+        _secret_clear "${5}"
+        [ "${count}" -le 32 ] || count=32
+        _rep " " "$((32 - count))"; _draw_field__shown="${shown}${rep}"
+    else
+        _draw_field__shown="${3}"
+        if [ -n "${5}" ]; then _secret_count "${5}"; _rep "*" "${count}"; _draw_field__shown="${rep}"; fi
+        _draw_field__shown="$(printf "%-32.32s" "${_draw_field__shown}")"
+    fi
     if [ -n "${4}" ]; then
         _put "${1}" 19 "${s_field_here}" " ${_draw_field__shown} "
     else
@@ -1137,60 +1286,112 @@ _draw_field() { #row label text here secret => a field on row ROW of the body: T
     fi
 }
 
-_step_user() { #=> user and pass, the account minos is installed for: its name, and its password twice
-    _title "user"
-    _frame user "Enter" "next" "Tab" "next field" "Esc" "back" "Ctrl-U" "empty the field"
-    _step_user__field="${user_field:-1}"; _step_user__problem=""
+_step_user() { #=> user and pass, the account minos is installed for, and what answers one worry, whether
+    #what was typed is what was meant: the password is asked twice while it is typed blind, a star a
+    #character, and once while it is seen as typed (F5: pass_seen; a function key is no character of a
+    #password, whose fields take every key that prints); keyboard, the one it is typed with, is shown
+    #as the session has it and changed from here (F2: the next of minos' own list; F3: any), and the
+    #installed system takes it, so it asks for the password with the keys it was typed with. And
+    #timezone, the time zone of the installed system: this session's until another is chosen (F4),
+    #shown with the time it is there. Function keys say themselves the same whatever the keyboard,
+    #where a letter or a Ctrl with one does not once the keyboard is not a Latin one; Ctrl-K, Ctrl-O,
+    #Ctrl-T and Ctrl-P do what F2 to F5 do, for a terminal that keeps the function keys to itself.
+    #A name is taken as typed and judged by the engine, which says in words what a name is
+    _step_user__field="${user_field:-1}"; _step_user__problem=""; _step_user__draw="yes"; _step_user__told=""
+    _keyboard_read; _zone_time "${timezone}"
+    _title "user ${keyboard%%:*} ${timezone}"
     while :; do
-        _row 1 "" ""; _row 2 "" ""
-        _put 2 3 "${s_bold}" "Who it is for"
-        _put 2 39 "${s_dim}" "Nothing is written until you confirm."
-        _row 3 "" ""
-        _draw_field 4 "User name" "${user}" "$([ "${_step_user__field}" != 1 ] || printf yes)" ""
-        _row 5 "${s_dim}" "                    lower case letters, digits, - and _, a letter first"
-        _row 6 "" ""
-        _draw_field 7 "Password" "" "$([ "${_step_user__field}" != 2 ] || printf yes)" pass
-        _row 8 "" ""
-        _draw_field 9 "The same again" "" "$([ "${_step_user__field}" != 3 ] || printf yes)" pass_again
-        _row 10 "" ""
-        if [ -n "${_step_user__problem}" ]; then
-            _rows 11 "${s_warn}" 4 3 "${_step_user__problem}"
-        else
-            row=11
+        #the last field: the second password is not asked while the first is seen
+        _step_user__last=3; [ -z "${pass_seen}" ] || _step_user__last=2
+        [ "${_step_user__field}" -le "${_step_user__last}" ] || _step_user__field="${_step_user__last}"
+        if [ -n "${_step_user__draw}" ]; then
+            #what was said and is not said now would leave specks behind (see _step_zones): the terminal
+            #is emptied when the words change
+            [ "${_step_user__problem}" = "${_step_user__told}" ] || view=""
+            _step_user__told="${_step_user__problem}"
+            if [ -n "${pass_seen}" ]; then
+                _frame user "Enter" "next" "Tab" "field" "Esc" "back" "F2" "keyboard" "F4" "zone" "F5" "hide password"
+            else
+                _frame user "Enter" "next" "Tab" "field" "Esc" "back" "F2" "keyboard" "F4" "zone" "F5" "see password"
+            fi
+            _row 1 "" ""; _row 2 "" ""
+            _put 2 3 "${s_bold}" "Who it is for"
+            _put 2 39 "${s_dim}" "Nothing is written until you confirm."
+            _row 3 "" ""
+            _draw_field 4 "User name" "${user}" "$([ "${_step_user__field}" != 1 ] || printf yes)" ""
+            _row 5 "" ""
+            _draw_field 6 "Password" "" "$([ "${_step_user__field}" != 2 ] || printf yes)" pass
+            if [ -n "${pass_seen}" ]; then
+                _row 7 "" ""
+            else
+                _draw_field 7 "The same again" "" "$([ "${_step_user__field}" != 3 ] || printf yes)" pass_again
+            fi
+            _row 8 "" ""; _put 8 5 "" "Keyboard"; _put 8 20 "${s_bold}" "${keyboard}"
+            _put 8 "$((21 + ${#keyboard}))" "" "$(printf "%.44s" "${keyboard_name}")"
+            _row 9 "" ""
+            _row 10 "" ""; _put 10 5 "" "Time zone"; _put 10 20 "${s_bold}" "${timezone}"
+            _put 10 "$((21 + ${#timezone}))" "" "${g_dot} ${zone_time}"
+            _row 11 "" ""
+            if [ -n "${_step_user__problem}" ]; then
+                _rows 12 "${s_warn}" 4 3 "${_step_user__problem}"
+            else
+                row=12
+            fi
+            while [ "${row}" -le 18 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
+            _row 19 "${s_dim}" "    This user runs commands as root, with sudo. The installed system keeps"
+            _row 20 "${s_dim}" "    the keyboard above, and asks for the password with it."
+            #the cursor, where the next character goes
+            case "${_step_user__field}" in
+                1) _step_user__column="${#user}"; _step_user__row=4 ;;
+                2) _secret_count pass; _step_user__column="${count}"; _step_user__row=6 ;;
+                *) _secret_count pass_again; _step_user__column="${count}"; _step_user__row=7 ;;
+            esac
+            [ "${_step_user__column}" -le 32 ] || _step_user__column=32
+            screen="${screen}${c_esc}[$((origin_row + _step_user__row + 1));$((origin_column + 22 + _step_user__column))H${c_esc}[?25h"
         fi
-        while [ "${row}" -le 14 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
-        _row 15 "${s_dim}" "    The name you log in with. It can run commands as root, with sudo."
-        _row 16 "${s_dim}" "    The password is typed blind: a star a character. It is asked when the"
-        _row 17 "${s_dim}" "    computer starts, and by sudo."
-        _rest 18
-        #the cursor, where the next character goes
-        case "${_step_user__field}" in
-            1) _step_user__column="${#user}"; _step_user__row=4 ;;
-            2) _secret_count pass; _step_user__column="${count}"; _step_user__row=7 ;;
-            *) _secret_count pass_again; _step_user__column="${count}"; _step_user__row=9 ;;
-        esac
-        [ "${_step_user__column}" -le 32 ] || _step_user__column=32
-        screen="${screen}${c_esc}[$((origin_row + _step_user__row + 1));$((origin_column + 22 + _step_user__column))H${c_esc}[?25h"
-        _key
+        _step_user__draw="yes"
+        _key 10
+        if [ "${key}" = "none" ]; then
+            #a second with no key: the keyboard may have been changed by a key of the desktop (Alt and the
+            #right Shift), the window by the person, and the minute by the clock. Nothing else is drawn again
+            _step_user__was="${keyboard}"; _step_user__time="${zone_time}"
+            _keyboard_read; _zone_time "${timezone}"
+            if [ "${keyboard}" != "${_step_user__was}" ]; then
+                _step_user__problem="The keyboard is now ${keyboard%%:*}."
+                if [ -n "${pass}${pass_again}" ]; then
+                    pass=""; pass_again=""; pass_units=""; pass_again_units=""
+                    _step_user__problem="The keyboard is now ${keyboard%%:*}: type the password again, with it."
+                fi
+                _title "user ${keyboard%%:*} ${timezone}"
+            elif [ "${zone_time}" = "${_step_user__time}" ] && [ "$(stty size <&3 2>/dev/null)" = "${term_size}" ]; then
+                _step_user__draw=""
+            fi
+            continue
+        fi
         screen="${screen}${c_esc}[?25l"
         _step_user__problem=""
         case "${key}" in
             enter|tab|down)
-                case "${_step_user__field}" in
-                    1) if _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=2; fi ;;
-                    2) if _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=3; fi ;;
-                    *) if [ "${key}" = "enter" ]; then
-                           if ! _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=1
-                           elif ! _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=2
-                           elif [ "${pass}" != "${pass_again}" ]; then
-                               _step_user__problem="The two passwords differ. Type the second one again."
-                               pass_again=""; pass_again_units=""
-                           else
-                               user_field=3
-                               return 0
-                           fi
-                       fi ;;
-                esac ;;
+                if [ "${_step_user__field}" -lt "${_step_user__last}" ]; then
+                    case "${_step_user__field}" in
+                        1) if _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=2; fi ;;
+                        *) if _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=3; fi ;;
+                    esac
+                elif [ "${key}" = "enter" ]; then
+                    if ! _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=1
+                    elif ! _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=2
+                    elif [ -z "${pass_seen}" ] && [ "${pass}" != "${pass_again}" ]; then
+                        _step_user__problem="The two passwords differ: type the second one again, or see the first with F5."
+                        pass_again=""; pass_again_units=""
+                    else
+                        #the keyboard as it is at this moment is the one the installed system gets, and
+                        #the time zone the one shown
+                        _keyboard_read
+                        _choose "keyboard=${keyboard}" "timezone=${timezone}"
+                        user_field="${_step_user__field}"
+                        return 0
+                    fi
+                fi ;;
             backtab|up) [ "${_step_user__field}" -le 1 ] || _step_user__field="$((_step_user__field - 1))" ;;
             esc) user_field="${_step_user__field}"; return 1 ;;
             backspace)
@@ -1201,10 +1402,45 @@ _step_user() { #=> user and pass, the account minos is installed for: its name, 
                 case "${_step_user__field}" in
                     1) user="" ;; 2) pass=""; pass_units="" ;; *) pass_again=""; pass_again_units="" ;;
                 esac ;;
-            none|redraw|other|left|right|home|end|delete|pageup|pagedown) ;;
-            *)  #a character: of a name, the ones a name takes; of a password, any
+            f2|ctrl-k)
+                #the next of minos' own layouts after the one there is; the first, from any other
+                _step_user__next="$(printf "%s\n" "${keyboards}" | awk -F '\t' -v now="${keyboard%%:*}" '
+                    $3 == "own" {own[++n] = $1; if ($1 == now) at = n} END {if (n) print own[at % n + 1]}')"
+                if [ -n "${_step_user__next}" ]; then
+                    _keyboard_change "${_step_user__next}"; _step_user__problem="${said}"
+                    #said where it is of use: the key goes round minos' own few
+                    [ "${keyboard_where}" != "x" ] || _step_user__problem="${said}${said:+ }F3 lists every other keyboard."
+                    [ "${_step_user__field}" = 1 ] || [ -n "${pass}" ] || _step_user__field=2
+                    _title "user ${keyboard%%:*} ${timezone}"
+                else
+                    _step_user__problem="minos' list of keyboards (minos-config keyboard-layouts) is not here: F3 has every one."
+                fi ;;
+            f3|ctrl-o)
+                if [ "${keyboard_where}" = "x" ]; then
+                    _step_keyboards; _step_user__problem="${said}"
+                    [ "${_step_user__field}" = 1 ] || [ -n "${pass}" ] || _step_user__field=2
+                    _title "user ${keyboard%%:*} ${timezone}"
+                else
+                    _step_user__problem="The console's keyboard is not changed from the installer: the installed system takes the one this system was set to."
+                fi ;;
+            f4|ctrl-t)
+                _step_zones; _step_user__problem="${said}"; _zone_time "${timezone}"
+                _title "user ${keyboard%%:*} ${timezone}" ;;
+            f5|ctrl-p)
+                if [ -n "${pass_seen}" ]; then pass_seen=""; else pass_seen="yes"; fi ;;
+            none|redraw|resize|other|left|right|home|end|delete|pageup|pagedown|ctrl-*|f[0-9]) ;;
+            *)  #a character: of a name, any that prints, which the engine judges when the name is
+                #given; of a password, any
                 case "${_step_user__field}" in
-                    1) case "${key}" in [a-z0-9_-]) [ "${#user}" -ge 32 ] || user="${user}${key}" ;; esac ;;
+                    1)  case "${key}" in
+                            [\ -~])
+                                if [ "${#user}" -ge 32 ]; then
+                                    _step_user__problem="A user name has 32 characters at most."
+                                else
+                                    user="${user}${key}"
+                                fi ;;
+                            *) _step_user__problem="A user name is lower case letters, digits, \"-\" and \"_\", a letter first: that key types none of them." ;;
+                        esac ;;
                     2) _secret_type pass ;;
                     *) _secret_type pass_again ;;
                 esac ;;
@@ -1241,7 +1477,8 @@ _step_confirm() { #=> the one confirmation: what will be done, and two buttons. 
         _step_confirm__style=""; [ "${r_loss_kind}" != "some" ] || _step_confirm__style="${s_danger}"
         _rows 10 "${_step_confirm__style}" 4 2 "${r_loss}"
         _row "${row}" "" ""; row="$((row + 1))"
-        _row "${row}" "" "    User    ${user}"; row="$((row + 1))"
+        _row "${row}" "" "    User    ${user}, keyboard ${keyboard}"; row="$((row + 1))"
+        _row "${row}" "" "    Zone    ${timezone}"; row="$((row + 1))"
         _row "${row}" "" "    Starts  by $([ "${firmware_now}" = "uefi" ] && printf UEFI || printf BIOS), on its own, once the installation medium is out"; row="$((row + 1))"
         while [ "${row}" -le 16 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
         _row 17 "" "    This is the last step you can go back from."
@@ -1474,6 +1711,7 @@ _fact() { printf "%s\n" "${facts}" | awk -v name="${1}" '$1 == name {print $2}';
 log="$(_fact log)"; progress_file="$(_fact progress)"; status_file="${log%.log}.status"
 firmware_now="$(_fact firmware)"
 system_size="$(_fact system-mib)M"
+timezone="$(_fact timezone)"
 #try mode asks as UEFI would unless told: the box it runs in starts by BIOS, and the questions that need
 #seeing are the other firmware's
 if [ -n "${try}" ] && [ -z "${firmware}" ]; then
@@ -1494,7 +1732,8 @@ esac
 #is plain text
 LC_ALL=C; export LC_ALL
 c_esc="$(printf '\033')"; c_tab="$(printf '\t')"; c_cr="$(printf '\r')"; c_del="$(printf '\177')"; c_bs="$(printf '\010')"
-c_ctrl_u="$(printf '\025')"; c_ctrl_l="$(printf '\014')"
+c_ctrl_u="$(printf '\025')"; c_ctrl_l="$(printf '\014')"; c_ctrl_k="$(printf '\013')"; c_ctrl_o="$(printf '\017')"
+c_ctrl_t="$(printf '\024')"; c_ctrl_p="$(printf '\020')"
 c_nl="$(printf '\nx')"; c_nl="${c_nl%x}"
 #a row of the body, empty, and the pattern that is its width of any characters
 blank_row="                                                                            "
@@ -1506,9 +1745,9 @@ s_field="${c_esc}[4m"; s_field_here="${c_esc}[7m"
 colours_256=""
 case "${TERM}:${COLORTERM:-}" in *256color*|*:truecolor|*:24bit) colours_256="yes" ;; esac
 if [ -n "${colours_256}" ]; then
-    s_dim="${c_esc}[38;5;245m"; s_frame="${c_esc}[38;5;240m"; s_logo="${c_esc}[38;5;255m"; s_scan="${c_esc}[38;5;51m"
+    s_dim="${c_esc}[38;5;245m"; s_frame="${c_esc}[38;5;240m"; s_logo="${c_esc}[38;5;255m"
 else
-    s_dim="${c_esc}[90m"; s_frame="${c_esc}[90m"; s_logo="${c_esc}[97m"; s_scan="${c_esc}[96m"
+    s_dim="${c_esc}[90m"; s_frame="${c_esc}[90m"; s_logo="${c_esc}[97m"
 fi
 effects="on"
 case "${MINOS_INSTALLER_EFFECTS:-}" in off|no|0) effects="off" ;; esac
@@ -1517,8 +1756,9 @@ written="Nothing was written."
 disk=""; choices=""; loaded=""; proposed=""; plan_view="plan"; edit_line=1; edit_open=""; edit_option=1
 # shellcheck disable=SC2034 # the units of a secret are read by its name, through eval
 { pass_units=""; pass_again_units=""; }
-user=""; pass=""; pass_again=""; secret_wide=""; key_fresh=""; user_field=""; keys_ahead=""; install_status=1; watch=""
-intro_style="${intro_styles%% *}"; intro_played=""; effect_began=0; effect_frames=0
+user=""; pass=""; pass_again=""; pass_seen=""; secret_wide=""; key_fresh=""; user_field=""; keys_ahead=""; install_status=1; watch=""
+keyboard="us"; keyboard_where="system"; keyboard_name=""; keyboards=""; said=""; zones=""; zone_time=""
+intro_played=""; effect_began=0; effect_frames=0
 #the plan the engine writes, and what it says when it fails, in a directory of this user's own: in /tmp
 #itself root may not write into another user's file (fs.protected_regular)
 work="$(mktemp -d)" || _end "No temporary directory for the plan."
