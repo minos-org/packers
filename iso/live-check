@@ -231,8 +231,9 @@ _screen terminal
 #the installer's key, Win+i: its window, floating in the middle of the screen. How long a person looks at
 #that window before its first screen is in it is read off the screen itself, kept again and again from
 #the key on: its middle is dark (the probe's terminal, then the installer's window, empty; the pointer is
-#all there is on it) until the installer draws. It is the first time the session opens the installer, with
-#nothing of it read from the medium yet: the slowest a person meets
+#all there is on it) until the installer draws. Whatever was there before, the window, empty, is the
+#darkest the middle gets, and the first screen is what lights it after that. It is the first time the
+#session opens the installer, with nothing of it read from the medium yet: the slowest a person meets
 _middle_lit() { #file => how lit the middle of the screen kept in FILE (PPM) is, the sum of its points: 700
     #by 460 of them, inside the installer's window, which i3 centres above its bar, and clear of the
     #cursor a terminal shows in its first cell
@@ -243,7 +244,9 @@ _now_ms() { #=> the time now, in milliseconds
     printf "%s" "$(($(date +%s%N) / 1000000))"
 }
 _first_screen() { #key => first_screen, the milliseconds from KEY, pressed here, to the first screen kept that
-    #has the installer's in its middle, which was dark; "none in 10000" when it stays dark for ten seconds.
+    #has the installer's in its middle, lit well above the darkest it has been since the key (the probe's
+    #terminal, or two of them and the line between, when the first was slow to open; then the window,
+    #empty); "none in 10000" when nothing lights it for ten seconds.
     #The screens are kept as QEMU has them, PPM: nothing to pack and unpack, so a look takes a few
     #hundredths of a second and the time read is that close
     _monitor "screendump ${run}/first.ppm" >/dev/null
@@ -251,8 +254,7 @@ _first_screen() { #key => first_screen, the milliseconds from KEY, pressed here,
     set -- "${1}" $(pamfile "${run}/first.ppm" 2>/dev/null | sed 's/.* \([0-9]*\) by \([0-9]*\) .*/\1 \2/')
     screen_width="${2:-0}"; screen_height="${3:-0}"
     _first_screen__dark="$(_middle_lit "${run}/first.ppm")"
-    [ "${_first_screen__dark:-1000000}" -lt 200000 ] ||
-        _die "the middle of the screen is not dark before the installer's key: ${_first_screen__dark:-not read}"
+    [ -n "${_first_screen__dark}" ] || _die "the screen before the installer's key could not be read"
     _monitor "sendkey ${1}" >/dev/null
     _first_screen__key="$(_now_ms)"; _first_screen__looks=0; first_screen="none in 10000"
     while :; do
@@ -260,6 +262,7 @@ _first_screen() { #key => first_screen, the milliseconds from KEY, pressed here,
         #the time once the screen is kept: the installer's was there by then
         _first_screen__at="$(($(_now_ms) - _first_screen__key))"; _first_screen__looks="$((_first_screen__looks + 1))"
         _first_screen__lit="$(_middle_lit "${run}/first.ppm")"
+        [ "${_first_screen__lit:-${_first_screen__dark}}" -ge "${_first_screen__dark}" ] || _first_screen__dark="${_first_screen__lit}"
         if [ "${_first_screen__lit:-0}" -gt "$((_first_screen__dark + 500000))" ]; then
             first_screen="${_first_screen__at}"
             pnmtopng "${run}/first.ppm" > "${out}/${name}-installer-first.png" 2>/dev/null
@@ -344,9 +347,9 @@ qemu=""
 #what the two rows did, seen above in the watcher's lines, and how long the installer's first screen took,
 #read off the screen, as lines of the probe for ci/verdict (QEMU, gone, no longer writes the log). The
 #first screen's line names the medium: from the stick the installer's start also reads the stick, its own
-#programs and the partitions its engine looks at, through the USB storage QEMU gives the machine (some
-#12 ms a read where it was measured: 2.6 s to the first screen, against 1.1 s from the CD on the same
-#machine). That time is read apart
+#programs and the partitions its engine looks at, through the USB storage QEMU gives the machine, and how
+#fast that answers goes by the node (1.0 s to the first screen on one; 2.6 s on another, some 12 ms a
+#read, whose session from the CD takes 1.1 s). That time is read apart
 printf "probe: %-34s %s\r\n" "installer's first screen, ${medium}" "${first_screen} ms after its key" \
     "menu, a row by Enter" "Install minos: the window of the installer" \
     "menu, a row by a click" "Terminal: a terminal" >> "${serial}"
