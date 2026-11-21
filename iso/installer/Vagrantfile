@@ -12,11 +12,17 @@
 Vagrant.configure("2") do |config|
   config.vm.box     = "minos/desktop-26.04"
   config.vm.box_url = "https://minos.io/vagrant/desktop-26.04.json"
+  # no older than this one: Vagrant starts the box it keeps and only announces a newer one, and a box
+  # kept from before lacks later fixes of minos' packages. An environment made from an older box stays
+  # on it until it is destroyed and made again
+  config.vm.box_version = ">= 2026.11.20.2313"
 
   target = File.join(__dir__, "target.vdi")
   config.vm.provider "virtualbox" do |vb|
     vb.gui    = true
     vb.memory = 2048
+    # one processor: VirtualBox on Hyper-V has frozen Linux guests with two in their first seconds
+    vb.cpus   = 1
     # the box's disk controller, SATA, has one port, its own disk's: a second one for the empty disk
     vb.customize ["storagectl", :id, "--name", "SATA", "--portcount", 2]
     unless File.exist?(target)
