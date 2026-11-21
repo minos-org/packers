@@ -292,7 +292,9 @@ writes on the serial port what the session says about itself (the boot; the disp
 virtual machines' cards it carries, the driver of the card and the modes it offers; what slim
 waited for, where the medium is mounted, the plugins the image brought and whether the login hook had
 any left to install, and `ci/probe-common`, which the CD carries: the network and
-whether names resolve among it), then opens the installer's key (Win+i); and, the desktop bare again, a
+whether names resolve among it), then opens the installer with its key (Win+i) and reads off the screen
+how long its first screen takes to show (`ci/verdict` wants it under two seconds in the session booted
+from the CD); and, the desktop bare again, a
 click on the wallpaper must open the menu of the background with "Install minos" as its first row. With `CABLE=no` the network card's cable is out from power on: the session
 must come up all the same, and the probe find no address.
 It keeps the screen at GRUB's menu, on the desktop, with the probe and with the installer's terminal:

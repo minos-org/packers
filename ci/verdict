@@ -53,8 +53,9 @@ awk -v flavour="${flavour}" -v release="${release}" '
             #the window of the installer is not left empty: its first screen shows within two seconds of
             #its key, Win+i, the first time the session opens it (iso/live-check reads it off the screen).
             #Judged in the session booted from the CD: from the stick it also counts the USB storage QEMU
-            #gives the machine, which goes by the node (1.0 s on one; 2.6 s on another, whose session
-            #from the CD takes 1.1 s), and its line (installer.s first screen, usb) is there to be read
+            #gives the machine, which goes by the node and by the run (1.0 s on one node; from 1.4 to 2.6 s
+            #on another, whose session from the CD takes 1.1 to 1.3 s), and its line (installer.s first
+            #screen, usb) is there to be read
             must("^installer.s first screen, cd$", "^1?[0-9]{1,3} ms after its key$")
             #a click on the wallpaper opens the menu of the background, whose first row on the ISO is the
             #installer (iso/live-check)

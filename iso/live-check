@@ -352,8 +352,8 @@ qemu=""
 #read off the screen, as lines of the probe for ci/verdict (QEMU, gone, no longer writes the log). The
 #first screen's line names the medium: from the stick the installer's start also reads the stick, its own
 #programs and the partitions its engine looks at, through the USB storage QEMU gives the machine, and how
-#fast that answers goes by the node (1.0 s to the first screen on one; 2.6 s on another, some 12 ms a
-#read, whose session from the CD takes 1.1 s). That time is read apart
+#fast that answers goes by the node and by the run (1.0 s to the first screen on one node; from 1.4 to
+#2.6 s on another, whose session from the CD takes 1.1 to 1.3 s). That time is read apart
 printf "probe: %-34s %s\r\n" "installer's first screen, ${medium}" "${first_screen} ms after its key" \
     "menu, a row by Enter" "Install minos: the window of the installer" \
     "menu, a row by a click" "Terminal: a terminal" >> "${serial}"
