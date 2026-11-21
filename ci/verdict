@@ -53,6 +53,10 @@ awk -v flavour="${flavour}" -v release="${release}" '
             #a click on the wallpaper opens the menu of the background, whose first row on the ISO is the
             #installer (iso/live-check)
             must("^menu of the background$", "^[0-9]+ entries, the first: Install minos +\\| +Win\\+i +\\| +minos-installer --window; drawn by rofi$")
+            #and a row of it is taken as a person takes one: Enter takes the first, marked, and a click the
+            #second, and each runs its command
+            must("^menu, a row by Enter$", "^Install minos: the window of the installer$")
+            must("^menu, a row by a click$", "^Terminal: a terminal$")
             #casper booted the medium: its squashfs, read-only, under the session
             must("^medium$", " on /cdrom \\(iso9660\\), .* on /rofs \\(squashfs\\)")
             must("^network$", "^[a-z][a-z0-9]* [0-9.]+/[0-9]+ ")

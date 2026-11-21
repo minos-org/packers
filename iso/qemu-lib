@@ -7,6 +7,34 @@ _monitor() { #command => sent to the QEMU monitor, what it answers on stdout
     printf "%s\\n" "${1}" | socat - "UNIX-CONNECT:${run}/monitor"
 }
 
+_qmp() { #json command... => each sent on the QEMU machine protocol's socket (run/qmp), after its handshake
+    { printf "%s\n" '{"execute":"qmp_capabilities"}'; for _qmp__command; do printf "%s\n" "${_qmp__command}"; done
+      sleep 0.5; } | socat - "UNIX-CONNECT:${run}/qmp" >/dev/null
+}
+
+_point() { #x y width height => the pointer moved to X Y of a WIDTHxHEIGHT screen. The machine's pointer is
+    #absolute (QEMU's vmmouse, which the guest's psmouse takes over the PS/2 mouse): the monitor's mouse_move
+    #is relative motion, which never reaches it, so the position goes through QMP, on QEMU's 0-32767 scale
+    _qmp "{\"execute\":\"input-send-event\",\"arguments\":{\"events\":[{\"type\":\"abs\",\"data\":{\"axis\":\"x\",\"value\":$((${1} * 32767 / (${3} - 1)))}},{\"type\":\"abs\",\"data\":{\"axis\":\"y\",\"value\":$((${2} * 32767 / (${4} - 1)))}}]}}"
+}
+
+_click() { #=> the left button pressed and let go where the pointer is
+    _monitor "mouse_button 1" >/dev/null; _monitor "mouse_button 0" >/dev/null
+}
+
+_count_serial() { #text => how many lines of the serial log say TEXT
+    grep -c "${1}" "${serial}" 2>/dev/null
+}
+
+_wait_serial_count() { #text count seconds => true when COUNT lines of the serial log say TEXT within SECONDS
+    _wait_serial_count__end="$(($(date +%s) + ${3}))"
+    until [ "$(_count_serial "${1}")" -ge "${2}" ]; do
+        [ "$(date +%s)" -lt "${_wait_serial_count__end}" ] || return 1
+        kill -0 "${qemu}" 2>/dev/null || _die "the machine stopped"
+        sleep 1
+    done
+}
+
 _press() { #key... => each one pressed, as the QEMU monitor names keys
     for _press__key; do
         _monitor "sendkey ${_press__key}" >/dev/null

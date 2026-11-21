@@ -8,19 +8,19 @@
 #the image brought; then what every minos system must show, ci/probe-common, which the CD carries beside it
 #(the network and whether names resolve, sudo, tmux, i3's configuration, slim, the units that failed).
 #Then the installer's key opens its window; and, the desktop bare again, a click on the wallpaper opens the
-#menu of the background, which on the ISO has "Install minos" as its first row. A watcher the probe leaves
-#behind says what shows (the installer's window; the menu, with the entries its script was given), and
-#the line "menu of the background", for ci/verdict.
+#menu of the background, "Install minos" its first row, whose row Enter takes, and another menu, whose
+#second row a click takes. A watcher the probe leaves behind says what shows (the installer's window, a
+#terminal, the menu with its entries and its place), and the lines for ci/verdict.
 #usage: [CABLE=no] live-check ISO FIRMWARE MEDIUM OUTPUT [MINUTES]
 #  FIRMWARE    bios (SeaBIOS), uefi (OVMF) or secureboot (OVMF with Secure Boot on, Microsoft's keys)
 #  MEDIUM      cd or usb
 #  CABLE=no    the network card's cable out from power on: NAME gets -nocable, and nothing must wait for it
 #  => in OUTPUT, for NAME=FIRMWARE-MEDIUM: NAME.serial.log (the probe) and the screen at GRUB's menu, on the
-#     desktop, with the probe's terminal, with the installer's (Win+i) and with the menu of the background:
-#     NAME-{menu,desktop,terminal,installer,background-menu}.png; exit 0 when the desktop came up within
-#     MINUTES (10), the probe found an address and resolved a name (with no cable: found no address), with
-#     secureboot the session booted with Secure Boot on, Win+i opened the installer, and a click on the
-#     wallpaper opened the menu with "Install minos" as its first row
+#     desktop, the probe's terminal, the installer's (Win+i), the menu and what its rows opened: NAME-{menu,
+#     desktop,terminal,installer,background-menu,menu-enter,menu-pointer,menu-click}.png; exit 0 when the
+#     desktop came up within MINUTES (10), the probe found an address and resolved a name (no cable: none),
+#     with secureboot Secure Boot was on, Win+i opened the installer, a click on the wallpaper opened the menu
+#     with "Install minos" first, Enter on it opened the installer and a click on its Terminal a terminal
 #needs qemu-system-x86_64, KVM, socat, xorriso and netpbm (pngtopnm, pamcut, pamchannel, pamsumm); OVMF
 #for uefi and secureboot
 
@@ -106,9 +106,19 @@ E=O=F
     cat > "${1}/probe/watch" << 'E=O=F'
 #!/bin/sh
 #live-check's watcher: what shows on the desktop, said on the serial port when it changes, as "watch: "
-#lines: the installer's window, or the menu of the background. The menu's script is there while the menu
-#is open, with the entries it was given, in their order (minos-menu, which m-menu, the name i3 calls,
-#becomes), and rofi draws them: once both are there, the line ci/verdict reads, "menu of the background"
+#lines: the menu of the background, the installer's window, or a terminal (urxvt's window on the screen,
+#the installer's aside). The menu's script is there while the menu is open, with the entries it was given, in their order
+#(minos-menu, which m-menu, the name i3 calls, becomes), and rofi draws them: once both are there, the line
+#ci/verdict reads, "menu of the background". Each time the menu shows, where rofi drew it on which screen,
+#"watch: menu at WxH+X+Y of WxH", for a click on one of its rows
+export DISPLAY=":0" XAUTHORITY="/home/minos/.Xauthority"
+_terminal_shows() { #=> true when a terminal's window is on the screen: urxvt's, the installer's aside, and
+    #not the one the session keeps hidden in i3's scratchpad, which is not mapped
+    for window in $(xdotool search --onlyvisible --class '^URxvt$' 2>/dev/null); do
+        xprop -id "${window}" WM_CLASS 2>/dev/null | grep -q '"minos-installer"' || return 0
+    done
+    return 1
+}
 last=""; told=""
 while :; do
     now="nothing"
@@ -123,8 +133,21 @@ while :; do
         fi
     elif pgrep -f 'urxvt -name minos-installer' > /dev/null; then
         now="installer"
+    elif _terminal_shows; then
+        now="terminal"
     fi
     [ "${now}" = "${last}" ] || { printf "watch: %s\n" "${now}" > /dev/ttyS0; last="${now}"; }
+    if [ "${now}" = "menu" ] && [ "${pid}" != "${placed:-}" ]; then
+        #rofi's window, a child of the root, once it is mapped (drawn at its size): its size and place are
+        #the last two words but one of its line in the tree
+        window="$(xwininfo -root -tree 2>/dev/null | awk '/\("rofi" "Rofi"\)/ {print $1, $(NF - 1); exit}')"
+        geometry="${window#* }"
+        if [ -n "${window}" ] && xwininfo -id "${window%% *}" 2>/dev/null | grep -q 'Map State: IsViewable'; then
+            printf "watch: menu at %s of %s\n" "${geometry}" \
+                "$(xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; exit}')" > /dev/ttyS0
+            placed="${pid}"
+        fi
+    fi
     sleep 1
 done
 E=O=F
@@ -169,7 +192,7 @@ _step "booting the live session of $(basename "${iso}") (${firmware}, ${medium})
 qemu-system-x86_64 -enable-kvm -machine "${machine}" -cpu host -smp 2 -m 4096 ${firmware_options} ${medium_options} \
     -drive "if=none,id=probe,media=cdrom,readonly=on,format=raw,file=${run}/probe.iso" -device ide-cd,drive=probe,bus=ide.1 \
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0,id=nic0 -vga std -display none -serial "file:${serial}" \
-    -monitor "unix:${run}/monitor,server,nowait" -no-reboot -daemonize -pidfile "${run}/qemu.pid" -S
+    -monitor "unix:${run}/monitor,server,nowait" -qmp "unix:${run}/qmp,server,nowait" -no-reboot -daemonize -pidfile "${run}/qemu.pid" -S
 qemu="$(cat "${run}/qemu.pid")"
 #the machine waits, stopped, for the cable to be pulled out or left in
 [ "${cable}" = yes ] || _monitor "set_link nic0 off" >/dev/null
@@ -207,35 +230,78 @@ _press meta_l-i
 _wait_serial "watch: installer" 30 || { _screen installer; _die "Win+i opened no installer"; }
 sleep 5
 _screen installer
-#the menu of the background. The installer is left (q: this machine has no disk, and the screen that says
-#so closes on it; where it has one, q asks and y answers) and the terminal too, so the wallpaper is bare;
-#a click on it, where the pointer has been all along, opens the menu, which on the ISO has "Install
-#minos" as its first row: the watcher says what its script was given. The row itself is not taken from
-#here: with the menu up, neither Enter nor the monitor's pointer moves did anything in this machine
-_press q
-sleep 3
-[ "$(grep '^watch: ' "${serial}" | tail -n 1 | tr -d '\r' | cut -c1-16)" != "watch: installer" ] || _press y
-_menu__waited=0
-until [ "$(grep '^watch: ' "${serial}" | tail -n 1 | tr -d '\r' | cut -c1-14)" = "watch: nothing" ]; do
-    _menu__waited="$((_menu__waited + 1))"
-    [ "${_menu__waited}" -le 15 ] || { _screen background-menu; _die "the installer did not close on q"; }
-    sleep 1
-done
+#the menu of the background. The installer is left and the terminal too, so the wallpaper is bare; a click
+#on it, where the pointer has been all along, opens the menu, which on the ISO has "Install minos" as its
+#first row: the watcher says what its script was given, and where rofi drew it. Then a row is taken twice,
+#as a person takes one: Enter takes the row rofi marks, the first, and the installer's window opens; left
+#again, a second menu, and a click on its second row, Terminal, opens a terminal. The machine's pointer is
+#absolute (QEMU's vmmouse): the monitor's mouse_move never moves it, _point does (iso/qemu-lib)
+_watch_last() { #=> the serial log's last "watch: " line
+    grep '^watch: ' "${serial}" | tail -n 1 | tr -d '\r'
+}
+_installer_leave() { #=> the installer's window closed: q (this machine has no disk, and the screen that says
+    #so closes on it; where it has one, q asks and y answers)
+    _press q
+    sleep 3
+    [ "$(_watch_last)" != "watch: installer" ] || _press y
+    _installer_leave__waited=0
+    while [ "$(_watch_last)" = "watch: installer" ]; do
+        _installer_leave__waited="$((_installer_leave__waited + 1))"
+        [ "${_installer_leave__waited}" -le 15 ] || { _screen background-menu; _die "the installer did not close on q"; }
+        sleep 1
+    done
+}
+_bare() { #=> true when the wallpaper is bare, within 30 s: nothing on it, the sun in the middle
+    _bare__waited=0
+    until [ "$(_watch_last)" = "watch: nothing" ] && _on_desktop; do
+        _bare__waited="$((_bare__waited + 3))"
+        [ "${_bare__waited}" -le 30 ] || return 1
+        sleep 2
+    done
+}
+_installer_leave
 _type "exit"; _press ret
-_menu__waited=0
-until _on_desktop; do
-    _menu__waited="$((_menu__waited + 3))"
-    [ "${_menu__waited}" -le 30 ] || { _screen background-menu; _die "the installer and the terminal, left, did not leave the wallpaper bare"; }
-    sleep 2
-done
-_monitor "mouse_button 1" >/dev/null; _monitor "mouse_button 0" >/dev/null
+_bare || { _screen background-menu; _die "the installer and the terminal, left, did not leave the wallpaper bare"; }
+_click
 _wait_serial "probe: menu of the background" 30 || { _screen background-menu; _die "a click on the wallpaper opened no menu"; }
-#rofi waits for the pointer before it shows: a while, for the screen to have it
-sleep 6
+_wait_serial_count "^watch: menu at " 1 30 || { _screen background-menu; _die "the menu's script ran, and rofi drew no window"; }
+sleep 2
 _screen background-menu
 _step "the menu of the background: $(sed -n 's/^probe: menu of the background  *//p' "${serial}" | tr -d '\r' | head -n 1)"
+_menu__installers="$(_count_serial '^watch: installer')"
+_press ret
+_wait_serial_count "^watch: installer" "$((_menu__installers + 1))" 30 ||
+    { _screen menu-enter; _die "Enter on the menu, its first row marked, opened no installer"; }
+sleep 3
+_screen menu-enter
+_step "a row by Enter: Install minos, the installer's window"
+_installer_leave
+_bare || { _screen menu-enter; _die "the installer, left, did not leave the wallpaper bare"; }
+_click
+_wait_serial_count "^watch: menu at " 2 30 || { _screen menu-click; _die "a second click on the wallpaper opened no menu"; }
+#WxH+X+Y of the menu, the screen's width and height, and how many rows: the middle of the second
+# shellcheck disable=SC2046 # six numbers
+set -- $(grep '^watch: menu at ' "${serial}" | tail -n 1 | tr -d '\r' | tr 'x+' '  ' | sed 's/^watch: menu at //; s/ of / /')
+[ "${#}" = 6 ] || _die "where rofi drew the menu is not WxH+X+Y of WxH: $(grep '^watch: menu at ' "${serial}" | tail -n 1)"
+_menu__rows="$(sed -n 's/^probe: menu of the background  *\([0-9]*\) entries.*/\1/p' "${serial}" | head -n 1)"
+#a row is a share of the window but its border (1 px) and its padding (2 px), above and below
+_menu__x="$((${3} + ${1} / 2))"; _menu__y="$((${4} + 3 + (${2} - 6) * 3 / (2 * _menu__rows)))"
+_menu__terminals="$(_count_serial '^watch: terminal')"
+_point "${_menu__x}" "${_menu__y}" "${5}" "${6}"
+sleep 1
+_screen menu-pointer
+_click
+_wait_serial_count "^watch: terminal" "$((_menu__terminals + 1))" 30 ||
+    { _screen menu-click; _die "a click on the menu's second row, Terminal, at ${_menu__x},${_menu__y}, opened no terminal"; }
+sleep 3
+_screen menu-click
+_step "a row by a click: Terminal, at ${_menu__x},${_menu__y}, a terminal"
 _monitor quit >/dev/null
 qemu=""
+#what the two rows did, seen above in the watcher's lines, as lines of the probe for ci/verdict (QEMU, gone,
+#no longer writes the log)
+printf "probe: %-34s %s\r\n" "menu, a row by Enter" "Install minos: the window of the installer" \
+    "menu, a row by a click" "Terminal: a terminal" >> "${serial}"
 sed -n 's/^probe: //p' "${serial}"
 if [ "${cable}" = yes ]; then
     { grep -q "^probe: network  *[a-z][a-z0-9]* [0-9.]*/[0-9]" "${serial}" &&
