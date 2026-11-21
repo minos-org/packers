@@ -112,15 +112,18 @@ _say "timezone: ${zone:-Etc/UTC}"
 _say "clock: /etc/localtime -> $(readlink /etc/localtime 2>&1); /etc/timezone: $(cat /etc/timezone 2>&1); $(date)"
 _say "ready"
 waited=0
-until pgrep -f "urxvt -name minos-installer" > /dev/null; do
+#the installer's window is its terminal running, a command line that begins with it. A pattern that its
+#own text matches would make this very pgrep look like an open window to the installer, which then
+#opens none (its guard against a second window looks the same way)
+until pgrep -f "^[u]rxvt -name minos-installer" > /dev/null; do
     sleep 1; waited="$((waited + 1))"
     [ "${waited}" -lt 90 ] || { _say "installer: no window after ${waited} s"; exit 1; }
 done
 _say "installer: open"
 #the screen is taken meanwhile
 sleep 10
-pkill -f "urxvt -name minos-installer"
-while pgrep -f "urxvt -name minos-installer" > /dev/null; do sleep 1; done
+pkill -f "^[u]rxvt -name minos-installer"
+while pgrep -f "^[u]rxvt -name minos-installer" > /dev/null; do sleep 1; done
 _say "disk: $(lsblk -lnpo NAME,SIZE,TYPE,FSTYPE "${1}" | tr -s ' ' | tr '\n' ',')"
 _say "engine: $(minos-installer-engine facts 2>&1 | tr '\n' ',')"
 setsid sh /mnt/watch < /dev/null > /dev/null 2>&1 &

@@ -102,8 +102,10 @@ if ! grep -q '^dns  *archive\.ubuntu\.com [0-9a-f:.][0-9a-f:.]* after' /tmp/prob
         while read -r line; do _say "networkd" "${line}"; done
 fi
 journalctl -b -p err --no-pager -q | tail -n 10 | while read -r line; do _say "journal error" "${line}"; done
-#what the check opens next is said as it shows, by a watcher that stays once this terminal is gone
-setsid sh "$(dirname "${0}")/watch" < /dev/null > /dev/null 2>&1 &
+#what the check opens next is said as it shows, by a watcher that stays once this terminal is gone. Its
+#command line names the installer's window, and it is none: the installer opens beside it each time the
+#check asks, or its guard against a second window is taking a name for a window again
+setsid sh "$(dirname "${0}")/watch" "not a window: urxvt -name minos-installer" < /dev/null > /dev/null 2>&1 &
 _say "done" ""
 E=O=F
     cat > "${1}/probe/watch" << 'E=O=F'
@@ -134,7 +136,9 @@ while :; do
                 "$(printf "%s\n" "${entries}" | grep -c .) entries, the first: $(printf "%s\n" "${entries}" | head -n 1); drawn by rofi" > /dev/ttyS0
             told="yes"
         fi
-    elif pgrep -f 'urxvt -name minos-installer' > /dev/null; then
+    #its terminal running: a command line that begins with it, and a pattern its own text does not match,
+    #or this very pgrep would look like an open window to an installer that starts at the same moment
+    elif pgrep -f '^[u]rxvt -name minos-installer' > /dev/null; then
         now="installer"
     elif _terminal_shows; then
         now="terminal"
