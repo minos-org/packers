@@ -50,6 +50,12 @@ awk -v flavour="${flavour}" -v release="${release}" '
             must("^live bios cd$", "^ok ")
             must("^live secureboot usb$", "^ok ")
             must("^live uefi cd, no cable$", "^ok ")
+            #the window of the installer is not left empty: its first screen shows within two seconds of
+            #its key, Win+i, the first time the session opens it (iso/live-check reads it off the screen).
+            #Judged in the session booted from the CD: from the stick it also counts the USB storage QEMU
+            #gives the machine (2.6 s against 1.1 s from the CD, on the same node), and its line
+            #(installer.s first screen, usb) is there to be read
+            must("^installer.s first screen, cd$", "^1?[0-9]{1,3} ms after its key$")
             #a click on the wallpaper opens the menu of the background, whose first row on the ISO is the
             #installer (iso/live-check)
             must("^menu of the background$", "^[0-9]+ entries, the first: Install minos +\\| +Win\\+i +\\| +minos-installer --window; drawn by rofi$")
