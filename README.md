@@ -138,29 +138,45 @@ and draws nothing:
 
     # minos-installer-engine disks                    # the disks, and why minos cannot go to one
     # minos-installer-engine plan whole /dev/sda > plan     # or: plan partitions ROOT [ESP] [keep]
+    # minos-installer-engine edit /dev/sda plan use=parts root=free:2349   # or: the plan choices make
     # minos-installer-engine check plan && minos-installer-engine describe plan
     # echo PASSWORD | minos-installer-engine apply plan USER
 
-A plan is text, an action a line (`table`, `partition`, `format`, `esp`, `root`), applied from the top and
-only by `apply`: for a whole disk, a GPT with an EFI system partition of 512 MiB and one for minos when
-the session started by UEFI, an MBR with one partition when it started by BIOS (a GPT with GRUB's own
-partition on a disk over 2 TiB); for partitions that exist, the one for minos formatted unless it is ext4
-and kept, and an EFI system partition formatted unless it is FAT already. `check` says what stops a plan
-on this machine (a disk in use or the one the session runs from, a partition too small, no EFI system
-partition on UEFI, a GPT with no partition for GRUB on BIOS), `describe` says it for people, and `apply`
-ends with the installer the medium carries, `sh /cdrom/minos/setup live desktop PARTITION USER PASSWORD
-[--esp ESP]`. What was said stays in `/tmp/minos-installer.log`, and how it ended in
-`/tmp/minos-installer.status`. `minos-installer` is an interface over it, screens drawn by whiptail: the
-disk (asked when there are several), the whole disk or partitions made with `cfdisk` and picked from a
-list, a user and its password, the plan as the engine describes it, and one confirmation. It runs as the
-session's user and asks sudo for the engine alone; another interface can take its place without touching
-the engine.
+A plan is text, an action a line (`table`, `partition`, `format`, `esp`, `root`, `home`), applied from the
+top and only by `apply`: for a whole disk, a GPT with an EFI system partition of 512 MiB and one for minos
+when the session started by UEFI, an MBR with one partition when it started by BIOS (a GPT with GRUB's own
+partition on a disk over 2 TiB), the partition for minos of a size or with all the room, and one for
+`/home` when asked; for a disk that keeps its table, partitions that exist, formatted or kept, and new
+ones in its free room (`sfdisk --append`, each with where it starts), an EFI system partition formatted
+only when it is not FAT already. `check` says what stops a plan on this machine (a disk in use or the one
+the session runs from, a partition too small, no EFI system partition on UEFI, a GPT with no partition
+for GRUB on BIOS), `describe` says it for people, `review` and `edit` say it as rows an interface draws
+(the disk now and after, what is done, what is lost, the name of the deed), and `apply` ends with the
+installer the medium carries, `sh /cdrom/minos/setup live desktop PARTITION USER - [HOME] [--esp ESP]
+--now`, the password on its standard input. What was said stays in `/tmp/minos-installer.log`, how far
+the copy is in `/tmp/minos-installer.progress`, and how it ended in `/tmp/minos-installer.status`.
+
+`minos-installer` is the interface over it: a wizard this script draws by itself in a terminal of 80 by 24
+(escape sequences, keys read one at a time; urxvt, the Linux console, ssh), with the steps along the top
+and every step going back and forward. An intro; the disk, asked when there are several; the plan the
+engine proposes, the disk as a bar now and after and what is done in words, with the partition table one
+key away (`t`); the user and its password; one confirmation, two buttons, the one that goes back holding
+the cursor and the other naming what it erases; the install as it happens; the end. `p` changes the plan
+line by line without leaving the installer: another disk, the whole disk or its partitions and free room,
+a partition to replace or to keep, a size for minos, a partition for `/home`, each change made a new plan
+by the engine (`edit DISK FILE CHOICE...`) and checked by it before it is shown; `r` goes back to the one
+proposed. Nothing is written before the confirmation, and what the firmware starts from (an EFI system
+partition, GRUB's own on a GPT that BIOS starts) is the engine's to see to: it is in every plan that needs
+it, kept when it is there, made when there is room. A disk that holds something gets no plan that deletes
+it until that is chosen. The password goes to `setup` on its standard input (`live ... USER - --now`), and
+`--now` has `setup` skip its own countdown. It runs as the session's user and asks sudo for the engine
+alone; another interface can take its place without touching the engine.
 
 Both take `--try` on a machine that is not the live session: the disk chosen is partitioned and formatted
 for real, the `setup` command is shown, not run, and `--firmware uefi|bios` says which firmware the
-questions are for. `iso/installer/Vagrantfile` is that machine: the minos desktop box with a second, empty
-disk of 16 GB, whiptail added, and `Win+i` bound to the installer of that folder (`/vagrant` in the box),
-so a change to either file shows the next time the key is pressed:
+plans are for. `iso/installer/Vagrantfile` is that machine: the minos desktop box with a second, empty
+disk of 16 GB and `Win+i` bound to the installer of that folder (`/vagrant` in the box), so a change to
+either file shows the next time the key is pressed:
 
     $ cd iso/installer && vagrant up     # log in (vagrant / vagrant), then Win+i
 
@@ -213,8 +229,12 @@ On the medium:
   whose id is `.disk/casper-uuid-minos`: casper boots from this ISO and no other;
 - `boot/grub/` (the menu, GRUB's modules and El Torito image for BIOS, its font) and `EFI/boot/`. The
   kernel draws on the display GRUB leaves it (simpledrm), until the driver of a virtual machine's card
-  takes it: on BIOS a graphics mode GRUB sets, on UEFI the firmware's own, which GRUB leaves as it is;
-- `minos/setup`, the minos installer the build used; `md5sum.txt`, which casper checks the files against;
+  takes it: on BIOS a graphics mode GRUB sets, on UEFI the firmware's own, which GRUB leaves as it is.
+  The menu's entry carries `noprompt`: the session restarts and powers off without casper's wait for the
+  medium to be taken out, a question its boot screen does not show;
+- `minos/setup`, the minos installer the build used, which has to be one that takes `--now` and a
+  password on its standard input (the build refuses an older one); `md5sum.txt`, which casper checks the
+  files against;
 - `minos/bootloader/`, the boot loaders a system copied from the live one needs, as packages the live
   system does not install (grub-pc and grub-efi-amd64 conflict, so it carries neither): the ones the
   minos installer's live mode installs, with what they need that the live system lacks. `bios.list` names

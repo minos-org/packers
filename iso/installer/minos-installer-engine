@@ -2,16 +2,18 @@
 #the engine of the minos ISO's installer: what it knows of this machine (the firmware it started by, its
 #disks and what each holds), a plan to put minos on a disk (what will be done, in order, as text), and
 #that plan applied, once. It asks nothing and draws nothing: an interface (minos-installer, beside it)
-#shows what the engine says, asks the person, makes or changes the plan and has it applied. Nothing is
-#written to a disk before apply. minos itself is installed by the minos installer the medium carries
-#(setup live desktop), which copies the live system and needs no network.
+#shows what the engine says, asks the person, has the engine make or change the plan and has it applied.
+#Nothing is written to a disk before apply. minos itself is installed by the minos installer the medium
+#carries (setup live desktop), which copies the live system and needs no network.
 #usage: minos-installer-engine [--try] [--firmware uefi|bios] VERB [ARGUMENT...]
 #  facts                    what plans are made for here, "name value" a line: firmware (uefi, bios),
 #                           root-mib (the least a partition for minos takes), esp-mib (the EFI system
-#                           partition the engine makes), medium (the disk the session runs from, or -),
-#                           try (yes, no), log (where apply keeps what was said)
-#  disks                    the machine's disks, a line each, tab-separated: device, size, model, and
-#                           why minos cannot go to it (- when it can)
+#                           partition the engine makes), system-mib (what is copied), medium (the disk
+#                           the session runs from, or -), try (yes, no), log (where apply keeps what was
+#                           said), progress (where it keeps how far it is), applying (the process of an
+#                           apply that is running, or -)
+#  disks                    the machine's disks, a line each, tab-separated: device, size, model, why
+#                           minos cannot go to it (- when it can), what it holds (empty, or its partitions)
 #  partitions [DISK]        the partitions of DISK, or of every disk minos can go to, a line each,
 #                           tab-separated: device, size, what it can be for minos (root, esp, small: too
 #                           small for it, or -), what it holds, its type
@@ -22,35 +24,76 @@
 #                           a plan that takes partitions that exist: ROOT for minos, formatted unless
 #                           it is ext4 and keep is said; on UEFI the EFI system partition ESP, formatted
 #                           unless it is FAT already
+#  edit DISK FILE [CHOICE...]
+#                           the plan the CHOICEs make for DISK, written to FILE; with none, the plan the
+#                           engine suggests. On stdout, rows for an interface (below): the choices as
+#                           the engine took them, the lines of the plan that can be changed and what
+#                           each can be changed to, and the rows of review
+#  review PLAN [DISK]       PLAN as rows for an interface (below): what stops it, DISK (the disk minos
+#                           goes to) now and once it is applied, what is done in words, what is lost,
+#                           and the name of the deed
 #  check PLAN               what stops PLAN (a file) from being applied here, a line each; exit 1 then
-#  describe PLAN            PLAN for people: what is erased, made and kept, and how the disk starts
+#  describe PLAN            PLAN for people: what is done, in order, and what is lost
 #  user NAME                why minos takes no user of that name; nothing, and exit 0, when it does
 #  password                 the same for a password, read from stdin, a line
 #  apply PLAN USER          PLAN applied, in order, and minos installed for USER, whose password is
 #                           read from stdin, a line. What is said also goes to /tmp/minos-installer.log,
-#                           and how it ended (the exit status) to /tmp/minos-installer.status
+#                           how far it is to /tmp/minos-installer.progress, and how it ended (the exit
+#                           status) to /tmp/minos-installer.status
 #  empty DISK               with --try: DISK left with no partition table and no file system
 #  --try        on a machine that is not the live session: apply writes the disk for real, then says
 #               the setup command it would run, and does not run it
 #  --firmware   with --try, the firmware plans are for, whatever this machine started by
 #a plan is text, an action a line, applied from the top (# starts a comment):
 #  table DISK gpt|dos            a new, empty partition table on DISK: all it holds goes
-#  partition PART SIZE TYPE      PART made on a disk that got a table, after the ones before it: SIZE
-#                                in MiB, or rest (the last one); TYPE esp, linux or bios-boot
+#  partition PART SIZE TYPE [START]
+#                                PART made: SIZE in MiB, or rest (the last one of a new table); TYPE esp,
+#                                linux or bios-boot. On a disk that got a table, after the ones before
+#                                it; on a disk that keeps its table, in free room, START MiB into the disk
 #  format PART fat32|ext4        a new file system on PART: what it holds goes
 #  esp PART                      the EFI system partition the boot loader goes to (UEFI)
 #  root PART                     the partition minos is copied to
+#  home PART                     the partition that is /home (none: /home is in the one of minos)
+#a choice is a word, KEY=VALUE:
+#  use=whole|parts               the whole disk, erased, or the partitions and free room it has
+#  root=new[:MIB]                (whole) minos takes the room there is, or MIB
+#  root=none|PART|free:START[:MIB]
+#                                (parts) minos goes to a partition that exists, or to a new one in the
+#                                free room that starts START MiB into the disk, all of it or MIB
+#  rootfs=format|keep            a partition that exists is formatted, or keeps its ext4 and its files
+#  home=none|new:MIB|PART|free:START[:MIB]    homefs=format|keep     the same for /home
+#  esp=auto|PART  espfs=auto|format           the EFI system partition: the one found, formatted only
+#                                when it is not FAT; or PART, or formatted whatever it holds
+#rows are tab-separated, the first field says what the row is, and no field is empty (- stands for none):
+#  choices WORDS                             the choices as taken, to give back changed
+#  disk DEVICE SIZE MODEL HOLDS              the disk the plan is for
+#  line ID LABEL VALUE NOTE TONE             a line of the plan: TONE plain, new, erase or off
+#  option ID WORDS TEXT current|-            what line ID can be instead: WORDS are the choices to add
+#  size ID KEY MIB LEAST MOST STEP           line ID has a size: KEY followed by a number of MiB, a choice
+#  problem TEXT                              what stops the plan
+#  now|after DEVICE MIB SIZE KIND HOLDS NAME FATE MOUNT
+#                                            a partition or a free room (DEVICE free) of the disk, in
+#                                            order: KIND esp, bios-boot, frame, data or free; FATE kept,
+#                                            erased or gone (now), new, formatted or kept (after)
+#  action erase|make|keep|copy TEXT          what is done, in order
+#  loss none|some TEXT                       what is lost
+#  button plain|danger TEXT                  the name of the deed, for the one confirmation
 #runs as root; needs lsblk, findmnt, blkid, wipefs, blockdev and swapoff (util-linux), sfdisk (fdisk),
 #mkfs.ext4 (e2fsprogs), udevadm, and mkfs.vfat (dosfstools) or busybox's mkdosfs
 
 set -u
+LC_ALL=C; export LC_ALL
 setup="/cdrom/minos/setup"; log="/tmp/minos-installer.log"; status="/tmp/minos-installer.status"
+progress="/tmp/minos-installer.progress"; pidfile="/tmp/minos-installer.pid"
 #the EFI system partition made on a whole disk: the boot loader takes 10M of it, firmware updates more
 esp_mib=512
-#the types the firmware looks for, as lsblk says them: the EFI system partition's on a GPT and on an MBR,
+#the least a partition of its own for /home is worth
+home_mib=256
+#the types the firmware looks for, as blkid says them: the EFI system partition's on a GPT and on an MBR,
 #and the partition GRUB keeps itself in when BIOS starts a GPT disk
 esp_types="c12a7328-f81f-11d2-ba4b-00a0c93ec93b 0xef"
 bios_boot_type="21686148-6449-6e6f-744e-656564454649"
+tab="$(printf '\t')"
 
 _die() { #message => on stderr, exit 1
     printf "%s\n" "minos-installer-engine: ${*}" >&2
@@ -58,12 +101,17 @@ _die() { #message => on stderr, exit 1
 }
 
 _usage() { #=> the usage, on stderr, exit 2
-    sed -n '8,42s/^#//p' "${0}" >&2
+    sed -n '8,80s/^#//p' "${0}" >&2
     exit 2
 }
 
 _say() { #message => a line of the engine's own among what the tools say
     printf "\n[minos installer] %s\n" "${*}"
+}
+
+_applying() { #=> the process of an apply that is running; nothing when none is
+    _applying__pid="$(cat "${pidfile}" 2>/dev/null)"
+    [ -z "${_applying__pid}" ] || [ ! -d "/proc/${_applying__pid}" ] || printf "%s" "${_applying__pid}"
 }
 
 _or_dash() { #text => TEXT, or - when there is none: no field of a line is ever empty
@@ -77,12 +125,19 @@ _human() { #MiB => the size as lsblk says sizes: 512M, 15.5G, 1.8T
         else printf "%.1fT", mib / 1048576 }'
 }
 
+_row() { #field... => a row: the fields, tab-separated
+    _row__line="${1}"; shift
+    for _row__field; do _row__line="${_row__line}${tab}${_row__field:--}"; done
+    printf "%s\n" "${_row__line}"
+}
+
 ################################################################################
 # The machine: its disks and what they hold
 ################################################################################
 
-_mib() { #device => its size in MiB
-    printf "%s" "$(($(lsblk -dnbo SIZE "${1}" | tr -d ' ') / 1048576))"
+_mib() { #device => its size in MiB, as the kernel has it
+    { read -r _mib__sectors < "/sys/class/block/${1#/dev/}/size"; } 2>/dev/null || _mib__sectors=0
+    printf "%s" "$((_mib__sectors / 2048))"
 }
 
 _is_disk() { #device => true when it is a whole disk
@@ -93,8 +148,15 @@ _is_partition() { #device => true when it is a partition that exists
     [ -b "${1}" ] && [ -f "/sys/class/block/${1#/dev/}/partition" ]
 }
 
-_describe_disk() { #disk => its name, size and model: sdb (16G, VBOX HARDDISK)
-    printf "%s (%s)" "${1#/dev/}" "$(lsblk -dno SIZE,MODEL "${1}" | sed 's/^ *//; s/ *$//; s/  */, /')"
+_model() { #disk => its model, as people read it on its label; nothing when it says none
+    lsblk -dno MODEL "${1}" 2>/dev/null | tr -cd ' -~' | sed 's/^ *//; s/ *$//; s/  */ /g'
+}
+
+_describe_disk() { #disk [most] => its model, size and name: VBOX HARDDISK 16G (sdb); the model cut at MOST
+    #characters
+    _describe_disk__model="$(_model "${1}" | cut -c1-"${2:-40}" | sed 's/ *$//')"
+    printf "%s%s (%s)" "${_describe_disk__model:+${_describe_disk__model} }" \
+        "$(lsblk -dno SIZE "${1}" | tr -d ' ')" "${1#/dev/}"
 }
 
 _disk_refusal() { #disk => why minos cannot go to it, in a few words; nothing when it can. Swap in use on
@@ -104,7 +166,7 @@ _disk_refusal() { #disk => why minos cannot go to it, in a few words; nothing wh
         printf "%s" "this live session runs from it"
     elif [ "$(lsblk -dno RO "${1}" | tr -d ' ')" != "0" ]; then
         printf "%s" "it cannot be written"
-    elif [ "$(lsblk -dnbo SIZE "${1}" | tr -d ' ')" = "0" ]; then
+    elif [ "$(_mib "${1}")" = "0" ]; then
         printf "%s" "there is no medium in it"
     else
         lsblk -lno NAME,MOUNTPOINT "${1}" | awk '
@@ -127,12 +189,8 @@ _partition_name() { #disk number => the name the kernel gives that partition of 
     esac
 }
 
-_partitions() { #disk => its partitions, a /dev name a line, in the order of their numbers
-    for _partitions__file in "/sys/block/${1#/dev/}"/*/partition; do
-        [ -f "${_partitions__file}" ] || continue
-        _partitions__dir="${_partitions__file%/partition}"
-        printf "%s /dev/%s\n" "$(cat "${_partitions__file}")" "${_partitions__dir##*/}"
-    done | sort -n | cut -d' ' -f2
+_partition_number() { #partition => its number, by its name
+    printf "%s" "${1}" | sed 's/.*[^0-9]\([0-9][0-9]*\)$/\1/'
 }
 
 _disk_of() { #partition => its disk: of one that exists, as the kernel has it; of one a plan is to make,
@@ -147,36 +205,127 @@ _disk_of() { #partition => its disk: of one that exists, as the kernel has it; o
     fi
 }
 
-_file_system() { #device => the file system on it, read from the device; nothing when it has none
-    blkid -p -o value -s TYPE "${1}" 2>/dev/null
+_scan() { #=> map, a file: every partition of the machine's disks, a line each, tab-separated, in the
+    #order of the disk: 1 device, 2 its disk, 3 its number, 4 where it starts and 5 its size (MiB),
+    #6 where it ends (MiB, rounded up), 7 what it is to the firmware (esp, bios-boot, frame: an MBR's
+    #extended partition, or data), 8 its file system and 9 its label, both read from the device (- for
+    #none), 10 its type's name. Read once: every question about a partition is answered from it
+    : > "${map}"
+    for _scan__disk in $(_whole_disks); do
+        _scan__names="$(lsblk -lnpo NAME,PARTTYPENAME "${_scan__disk}" 2>/dev/null)"
+        for _scan__file in "/sys/block/${_scan__disk#/dev/}"/*/partition; do
+            [ -f "${_scan__file}" ] || continue
+            _scan__dir="${_scan__file%/partition}"; _scan__part="/dev/${_scan__dir##*/}"
+            read -r _scan__number < "${_scan__file}"
+            read -r _scan__start < "${_scan__dir}/start"
+            read -r _scan__size < "${_scan__dir}/size"
+            _scan__type=""; _scan__fs=""; _scan__label=""
+            # shellcheck disable=SC2162 # blkid escapes spaces and quotes with a backslash: read takes it out
+            while IFS="=" read _scan__key _scan__value; do
+                case "${_scan__key}" in
+                    TYPE) _scan__fs="${_scan__value}" ;;
+                    LABEL) _scan__label="${_scan__value}" ;;
+                    PART_ENTRY_TYPE) _scan__type="${_scan__value}" ;;
+                esac
+            done << E=O=F
+$(blkid -p -o export "${_scan__part}" 2>/dev/null)
+E=O=F
+            _scan__type="$(printf "%s" "${_scan__type}" | tr 'A-F' 'a-f')"
+            _scan__kind="data"
+            case " ${esp_types} " in *" ${_scan__type} "*) _scan__kind="esp" ;; esac
+            case "${_scan__type}" in
+                "${bios_boot_type}") _scan__kind="bios-boot" ;;
+                0x5|0xf|0x85) _scan__kind="frame" ;;
+            esac
+            _row "${_scan__part}" "${_scan__disk}" "${_scan__number}" "$((_scan__start / 2048))" \
+                "$((_scan__size / 2048))" "$(((_scan__start + _scan__size + 2047) / 2048))" "${_scan__kind}" \
+                "${_scan__fs}" "$(printf "%s" "${_scan__label}" | tr -cd ' -~' | cut -c1-24)" \
+                "$(printf "%s\n" "${_scan__names}" | awk -v part="${_scan__part}" '$1 == part {$1 = ""; sub(/^ /, ""); print; exit}')" >> "${map}"
+        done
+    done
+    sort -t "${tab}" -k 2,2 -k 4,4n -k 3,3n -o "${map}" "${map}"
 }
 
-_holds() { #device => what is on it, for people: ext4 "label", or that it holds no file system
-    _holds__type="$(_file_system "${1}")"
-    _holds__label="$(blkid -p -o value -s LABEL "${1}" 2>/dev/null)"
+_of() { #partition field => that field of its line in map (the numbers of _scan); nothing when it is not there
+    awk -F '\t' -v device="${1}" -v field="${2}" '$1 == device {print $field; exit}' "${map}"
+}
+
+_partitions() { #disk => its partitions, a /dev name a line, in the order of the disk
+    awk -F '\t' -v disk="${1}" '$2 == disk {print $1}' "${map}"
+}
+
+_table_now() { #disk => the partition table it has, gpt or dos; nothing when it has none
+    blkid -p -o value -s PTTYPE "${1}" 2>/dev/null
+}
+
+_disk_fs() { #disk => the file system, or other signature, a disk with no partition table holds on the whole
+    #of itself (a stick formatted whole, an LVM or LUKS volume); nothing when it has none
+    [ -n "$(_table_now "${1}")" ] || blkid -p -o value -s TYPE "${1}" 2>/dev/null
+}
+
+_file_system() { #partition => the file system on it; nothing when it has none
+    _file_system__type="$(_of "${1}" 8)"
+    [ "${_file_system__type:--}" = "-" ] || printf "%s" "${_file_system__type}"
+}
+
+_kind_now() { #partition => what it is to the firmware, by its type: esp, bios-boot, frame or data
+    _of "${1}" 7
+}
+
+_holds() { #partition => what is on it, for people: ext4 "label", or that it holds no file system
+    _holds__type="$(_file_system "${1}")"; _holds__label="$(_of "${1}" 9)"
     if [ -z "${_holds__type}" ]; then
         printf "%s" "no file system"
+    elif [ "${_holds__label:--}" = "-" ]; then
+        printf "%s" "${_holds__type}"
     else
-        printf "%s%s" "${_holds__type}" "${_holds__label:+ \"${_holds__label}\"}"
+        printf "%s \"%s\"" "${_holds__type}" "${_holds__label}"
     fi
 }
 
-_kind_now() { #partition => what it is to the firmware, by its type: esp, bios-boot, frame (an MBR's
-    #extended partition, which holds the logical ones and no file system) or data
-    _kind_now__type="$(lsblk -dno PARTTYPE "${1}" 2>/dev/null | tr -d ' ' | tr 'A-F' 'a-f')"
-    case " ${esp_types} " in *" ${_kind_now__type} "*) printf "%s" esp; return 0 ;; esac
-    case "${_kind_now__type}" in
-        "${bios_boot_type}") printf "%s" bios-boot ;;
-        0x5|0xf|0x85) printf "%s" frame ;;
-        *) printf "%s" data ;;
+_name_now() { #partition => what people call it: its label, or what it is (boot, grub, swap, its file
+    #system), or blank when it holds nothing
+    _name_now__label="$(_of "${1}" 9)"; _name_now__type="$(_file_system "${1}")"
+    case "$(_kind_now "${1}")" in
+        esp) printf "%s" "boot"; return 0 ;;
+        bios-boot) printf "%s" "grub"; return 0 ;;
+        frame) printf "%s" "extended"; return 0 ;;
     esac
+    if [ "${_name_now__label:--}" != "-" ]; then
+        printf "%s" "${_name_now__label}"
+    else
+        printf "%s" "${_name_now__type:-blank}"
+    fi
+}
+
+_holds_summary() { #disk => what it holds, in a few words: empty, or its partitions by their names
+    _holds_summary__fs="$(_disk_fs "${1}")"
+    [ -z "${_holds_summary__fs}" ] || { printf "%s\n" "${_holds_summary__fs} on the whole disk"; return 0; }
+    awk -F '\t' -v disk="${1}" '
+        $2 == disk && $7 != "frame" {n++; if (n <= 3) names = names (n > 1 ? ", " : "") ($7 == "esp" ? "boot" : ($7 == "bios-boot" ? "grub" : ($9 != "-" ? $9 : ($8 != "-" ? $8 : "blank"))))}
+        END {if (!n) print "empty"; else printf "%s%s\n", names, (n > 3 ? ", " n - 3 " more" : "")}' "${map}"
+}
+
+_free() { #disk => its free rooms a partition can be made in, of 2M or more, "start mib" a line: none on
+    #a disk with no table, none on an MBR whose four partitions are taken
+    case "$(_table_now "${1}")" in
+        "") return 0 ;;
+        dos) [ "$(awk -F '\t' -v disk="${1}" '$2 == disk && $3 <= 4' "${map}" | grep -c .)" -lt 4 ] || return 0 ;;
+    esac
+    _layout "${1}" now | awk '$1 == "free" {print $3, $2}'
 }
 
 _list_disks() { #=> the disks verb
     for _list_disks__disk in $(_whole_disks); do
-        printf "%s\t%s\t%s\t%s\n" "${_list_disks__disk}" "$(lsblk -dno SIZE "${_list_disks__disk}" | tr -d ' ')" \
-            "$(_or_dash "$(lsblk -dno MODEL "${_list_disks__disk}" | sed 's/^ *//; s/ *$//')")" \
-            "$(_or_dash "$(_disk_refusal "${_list_disks__disk}")")"
+        _row "${_list_disks__disk}" "$(lsblk -dno SIZE "${_list_disks__disk}" | tr -d ' ')" \
+            "$(_model "${_list_disks__disk}")" "$(_disk_refusal "${_list_disks__disk}")" \
+            "$(_holds_summary "${_list_disks__disk}")"
+    done
+}
+
+_usable_disks() { #=> the disks minos can go to, a line each
+    for _usable_disks__disk in $(_whole_disks); do
+        [ -n "$(_disk_refusal "${_usable_disks__disk}")" ] || printf "%s\n" "${_usable_disks__disk}"
     done
 }
 
@@ -184,8 +333,7 @@ _list_partitions() { #[disk] => the partitions verb
     if [ -n "${1}" ]; then
         _list_partitions__disks="${1}"
     else
-        _list_partitions__disks="$(for _list_partitions__disk in $(_whole_disks); do
-            [ -n "$(_disk_refusal "${_list_partitions__disk}")" ] || printf "%s\n" "${_list_partitions__disk}"; done)"
+        _list_partitions__disks="$(_usable_disks)"
     fi
     for _list_partitions__disk in ${_list_partitions__disks}; do
         for _list_partitions__partition in $(_partitions "${_list_partitions__disk}"); do
@@ -195,10 +343,9 @@ _list_partitions() { #[disk] => the partitions verb
                       [ "$(_mib "${_list_partitions__partition}")" -ge "${root_mib}" ] || _list_partitions__use="small" ;;
                 *) _list_partitions__use="-" ;;
             esac
-            printf "%s\t%s\t%s\t%s\t%s\n" "${_list_partitions__partition}" \
-                "$(lsblk -dno SIZE "${_list_partitions__partition}" | tr -d ' ')" "${_list_partitions__use}" \
-                "$(_holds "${_list_partitions__partition}")" \
-                "$(_or_dash "$(lsblk -dno PARTTYPENAME "${_list_partitions__partition}" 2>/dev/null | sed 's/^ *//; s/ *$//')")"
+            _row "${_list_partitions__partition}" "$(_human "$(_mib "${_list_partitions__partition}")")" \
+                "${_list_partitions__use}" "$(_holds "${_list_partitions__partition}")" \
+                "$(_of "${_list_partitions__partition}" 10)"
         done
     done
 }
@@ -237,23 +384,54 @@ _plan() { #action [device] => the lines of plan (a file) that are ACTION, about 
         $1 == action && (device == "" || $2 == device) {$1 = ""; sub(/^ /, ""); print}' "${plan}"
 }
 
-_plan_whole() { #disk => a plan for the whole of DISK and this firmware. BIOS reads an MBR; one cannot hold
-    #a disk over 2T, which gets a GPT and the partition GRUB then needs for itself
-    _is_disk "${1}" || _die "${1} is not a disk"
-    if [ "${firmware}" = "uefi" ]; then
-        _plan_whole__esp="$(_partition_name "${1}" 1)"; _plan_whole__root="$(_partition_name "${1}" 2)"
-        printf "%s\n" "table ${1} gpt" "partition ${_plan_whole__esp} ${esp_mib} esp" \
-            "partition ${_plan_whole__root} rest linux" "format ${_plan_whole__esp} fat32" \
-            "format ${_plan_whole__root} ext4" "esp ${_plan_whole__esp}" "root ${_plan_whole__root}"
-    elif [ "$(_mib "${1}")" -le 2097152 ]; then
-        _plan_whole__root="$(_partition_name "${1}" 1)"
-        printf "%s\n" "table ${1} dos" "partition ${_plan_whole__root} rest linux" \
-            "format ${_plan_whole__root} ext4" "root ${_plan_whole__root}"
+_plan_one() { #action => the device of the first line of plan that is ACTION; nothing when there is none
+    _plan "${1}" | awk 'NR == 1 {print $1}'
+}
+
+_whole_table() { #disk => the table a whole disk gets for this firmware: UEFI reads a GPT, BIOS an MBR,
+    #which cannot hold a disk over 2T
+    if [ "${firmware}" = "uefi" ] || [ "$(_mib "${1}")" -gt 2097152 ]; then
+        printf "%s" gpt
     else
-        _plan_whole__root="$(_partition_name "${1}" 2)"
-        printf "%s\n" "table ${1} gpt" "partition $(_partition_name "${1}" 1) 1 bios-boot" \
-            "partition ${_plan_whole__root} rest linux" "format ${_plan_whole__root} ext4" "root ${_plan_whole__root}"
+        printf "%s" dos
     fi
+}
+
+_plan_whole() { #disk [root-mib [home-mib]] => a plan for the whole of DISK and this firmware: what the
+    #firmware starts from (an EFI system partition; on a GPT that BIOS starts, the partition GRUB needs
+    #for itself), the partition for minos, of ROOT-MIB or (-) the room there is, and with HOME-MIB one
+    #for /home, which then takes what minos leaves
+    _is_disk "${1}" || _die "${1} is not a disk"
+    _plan_whole__table="$(_whole_table "${1}")"; _plan_whole__n=0; _plan_whole__fixed=0; _plan_whole__esp=""
+    printf "%s\n" "table ${1} ${_plan_whole__table}"
+    if [ "${firmware}" = "uefi" ]; then
+        _plan_whole__n=1; _plan_whole__fixed="${esp_mib}"; _plan_whole__esp="$(_partition_name "${1}" 1)"
+        printf "%s\n" "partition ${_plan_whole__esp} ${esp_mib} esp"
+    elif [ "${_plan_whole__table}" = "gpt" ]; then
+        _plan_whole__n=1; _plan_whole__fixed=1
+        printf "%s\n" "partition $(_partition_name "${1}" 1) 1 bios-boot"
+    fi
+    _plan_whole__root="$(_partition_name "${1}" "$((_plan_whole__n + 1))")"
+    _plan_whole__size="${2:--}"; _plan_whole__home=""
+    if [ "${3:--}" != "-" ]; then
+        _plan_whole__home="$(_partition_name "${1}" "$((_plan_whole__n + 2))")"
+        if [ "${_plan_whole__size}" = "-" ]; then
+            printf "%s\n" "partition ${_plan_whole__root} $(($(_mib "${1}") - 2 - _plan_whole__fixed - ${3})) linux" \
+                "partition ${_plan_whole__home} rest linux"
+        else
+            printf "%s\n" "partition ${_plan_whole__root} ${_plan_whole__size} linux" "partition ${_plan_whole__home} ${3} linux"
+        fi
+    elif [ "${_plan_whole__size}" = "-" ]; then
+        printf "%s\n" "partition ${_plan_whole__root} rest linux"
+    else
+        printf "%s\n" "partition ${_plan_whole__root} ${_plan_whole__size} linux"
+    fi
+    [ -z "${_plan_whole__esp}" ] || printf "%s\n" "format ${_plan_whole__esp} fat32"
+    printf "%s\n" "format ${_plan_whole__root} ext4"
+    [ -z "${_plan_whole__home}" ] || printf "%s\n" "format ${_plan_whole__home} ext4"
+    [ -z "${_plan_whole__esp}" ] || printf "%s\n" "esp ${_plan_whole__esp}"
+    printf "%s\n" "root ${_plan_whole__root}"
+    [ -z "${_plan_whole__home}" ] || printf "%s\n" "home ${_plan_whole__home}"
 }
 
 _plan_partitions() { #root [esp] [keep] => a plan for partitions that exist
@@ -279,9 +457,9 @@ _table_of() { #disk => the partition table plan gives it, gpt or dos; nothing wh
     _plan table "${1}" | cut -d' ' -f2
 }
 
-_made_on() { #disk => the partitions plan makes on it, "name size type" a line, in order
-    _plan partition | while read -r _made_on__name _made_on__size _made_on__type; do
-        [ "$(_disk_of "${_made_on__name}")" != "${1}" ] || printf "%s\n" "${_made_on__name} ${_made_on__size} ${_made_on__type}"
+_made_on() { #disk => the partitions plan makes on it, "name size type [start]" a line, in order
+    _plan partition | while read -r _made_on__name _made_on__rest; do
+        [ "$(_disk_of "${_made_on__name}")" != "${1}" ] || printf "%s\n" "${_made_on__name} ${_made_on__rest}"
     done
 }
 
@@ -328,18 +506,43 @@ _in_plan() { #partition => true when it is there once plan is applied: plan make
         { _is_partition "${1}" && [ -z "$(_table_of "$(_disk_of "${1}")")" ]; }
 }
 
+_role() { #partition => what plan makes of it: root, home, esp, or nothing
+    for _role__action in root home esp; do
+        [ "$(_plan_one "${_role__action}")" != "${1}" ] || { printf "%s" "${_role__action}"; return 0; }
+    done
+}
+
+_name_in_plan() { #partition => what people call it once plan is applied
+    case "$(_role "${1}")" in
+        root) printf "%s" "minos" ;;
+        home) printf "%s" "home" ;;
+        esp) printf "%s" "boot" ;;
+        *) if [ -n "$(_plan partition "${1}")" ]; then
+               case "$(_kind_in_plan "${1}")" in bios-boot) printf "%s" "grub" ;; esp) printf "%s" "boot" ;; *) printf "%s" "blank" ;; esac
+           else
+               _name_now "${1}"
+           fi ;;
+    esac
+}
+
+_plan_disks() { #=> the disks plan touches, a line each
+    {   _plan table | cut -d' ' -f1
+        for _plan_disks__part in $( { _plan partition; _plan format; _plan esp; _plan root; _plan home; } | cut -d' ' -f1); do
+            _disk_of "${_plan_disks__part}"; printf "\n"
+        done
+    } | sort -u
+}
+
 _check() { #=> the check verb: what stops plan, a line each
     awk '/^[ \t]*(#|$)/ {next}
         $1 == "table" && NF == 3 && $3 ~ /^(gpt|dos)$/ {next}
-        $1 == "partition" && NF == 4 && $3 ~ /^([1-9][0-9]*|rest)$/ && $4 ~ /^(esp|linux|bios-boot)$/ {next}
+        $1 == "partition" && (NF == 4 || NF == 5 && $5 ~ /^[0-9]+$/) && $3 ~ /^([1-9][0-9]*|rest)$/ && $4 ~ /^(esp|linux|bios-boot)$/ {next}
         $1 == "format" && NF == 3 && $3 ~ /^(fat32|ext4)$/ {next}
-        ($1 == "esp" || $1 == "root") && NF == 2 {next}
+        ($1 == "esp" || $1 == "root" || $1 == "home") && NF == 2 {next}
         {print "line " NR " is no action of a plan: " $0}' "${plan}"
 
     #the disks: each one touched must be free, and a new table holds what is made on it
-    for _check__disk in $( { _plan table | cut -d' ' -f1
-        for _check__part in $( { _plan format; _plan esp; _plan root; } | cut -d' ' -f1); do _disk_of "${_check__part}"; printf "\n"; done
-        } | sort -u); do
+    for _check__disk in $(_plan_disks); do
         if ! _is_disk "${_check__disk}"; then
             printf "%s\n" "${_check__disk} is not a disk of this computer."
             continue
@@ -355,15 +558,41 @@ _check() { #=> the check verb: what stops plan, a line each
                 if ($1 != name) printf "%s: partition %d of %s is %s.\n", $1, n, disk, name
                 if (rest) printf "%s comes after the partition that takes the rest of %s.\n", $1, disk
                 if ($2 == "rest") rest = 1; else sum += $2
+                if (NF > 3) printf "%s: on a new table a partition comes after the one before it, and this one says where it starts.\n", $1
                 if ($3 == "bios-boot" && table != "gpt") printf "%s: a BIOS boot partition goes on a gpt table.\n", $1
+                if (table == "dos" && n > 4) printf "%s: an MBR table holds four partitions.\n", $1
             }
             END {if (sum + 2 > total) printf "%s is too small for the partitions planned: %dM of %dM.\n", disk, sum + 2, total}'
     done
-    _plan partition | while read -r _check__part _; do
-        [ -n "$(_table_of "$(_disk_of "${_check__part}")")" ] ||
-            printf "%s\n" "${_check__part#/dev/}: a partition is made on a disk that gets a new table; adding one to a table that exists is not done yet."
+    #a partition made on a disk that keeps its table: in free room, under a number that is free
+    for _check__disk in $(_plan partition | cut -d' ' -f1 | while read -r _check__part; do _disk_of "${_check__part}"; printf "\n"; done | sort -u); do
+        [ -z "$(_table_of "${_check__disk}")" ] || continue
+        _is_disk "${_check__disk}" || continue
+        _check__table="$(_table_now "${_check__disk}")"
+        if [ -z "${_check__table}" ]; then
+            printf "%s\n" "${_check__disk#/dev/} has no partition table to add a partition to: it takes the whole disk."
+            continue
+        fi
+        _check__free="$(_free "${_check__disk}")"
+        _made_on "${_check__disk}" | while read -r _check__part _check__size _check__type _check__start; do
+            _check__name="${_check__part#/dev/}"
+            if [ -z "${_check__start}" ] || [ "${_check__size}" = "rest" ]; then
+                printf "%s\n" "${_check__name}: a partition added to a table that stays says its size and where it starts."
+                continue
+            fi
+            ! _is_partition "${_check__part}" || printf "%s\n" "${_check__name} is a partition of ${_check__disk#/dev/} already."
+            [ "${_check__table}" != "dos" ] || [ "$(_partition_number "${_check__part}")" -le 4 ] ||
+                printf "%s\n" "${_check__disk#/dev/} has an MBR table with its four partitions taken: no other can be made on it."
+            [ "${_check__type}" != "bios-boot" ] || [ "${_check__table}" = "gpt" ] ||
+                printf "%s\n" "${_check__name}: a BIOS boot partition goes on a gpt table."
+            printf "%s\n" "${_check__free}" | awk -v start="${_check__start}" -v size="${_check__size}" '
+                NF == 2 && start >= $1 && start + size <= $1 + $2 {found = 1} END {exit !found}' ||
+                printf "%s\n" "${_check__name}: ${_check__disk#/dev/} has no free room of $(_human "${_check__size}") there."
+        done
+        _made_on "${_check__disk}" | awk 'NF == 4 && $2 != "rest" {print $4, $4 + $2, $1}' | sort -n | awk '
+            $1 < end {printf "%s takes room another partition of the plan takes.\n", substr($3, 6)} {end = $2}'
     done
-    for _check__part in $( { _plan format; _plan esp; _plan root; } | cut -d' ' -f1 | sort -u); do
+    for _check__part in $( { _plan format; _plan esp; _plan root; _plan home; } | cut -d' ' -f1 | sort -u); do
         _in_plan "${_check__part}" || printf "%s\n" "${_check__part#/dev/} is not a partition: none is there, and the plan makes none."
     done
 
@@ -383,11 +612,28 @@ _check() { #=> the check verb: what stops plan, a line each
             printf "%s\n" "${_check__root#/dev/} is too small: it has $(_human "$(_mib_in_plan "${_check__root}")"), and minos needs $(_human "${root_mib}")."
     fi
 
+    #the partition for /home
+    _check__home="$(_plan home | cut -d' ' -f1)"
+    case "$(printf "%s\n" "${_check__home}" | grep -c .)" in
+        0|1) ;;
+        *) printf "%s\n" "/home is one partition, and the plan names several."; _check__home="" ;;
+    esac
+    if [ -n "${_check__home}" ] && _in_plan "${_check__home}"; then
+        [ "${_check__home}" != "${_check__root}" ] ||
+            printf "%s\n" "${_check__home#/dev/} is the partition of minos: /home is in it without being named."
+        [ "$(_kind_in_plan "${_check__home}")" = "data" ] ||
+            printf "%s\n" "${_check__home#/dev/} is the firmware's own partition, not one for /home."
+        [ "$(_holds_in_plan "${_check__home}")" = "ext4" ] ||
+            printf "%s\n" "${_check__home#/dev/} has to be formatted: /home goes on ext4."
+        [ "$(_mib_in_plan "${_check__home}")" -ge "${home_mib}" ] ||
+            printf "%s\n" "${_check__home#/dev/} is too small for /home: it has $(_human "$(_mib_in_plan "${_check__home}")")."
+    fi
+
     #what the firmware starts from
     _check__esp="$(_plan esp | cut -d' ' -f1)"
     if [ "${firmware}" = "uefi" ]; then
         case "$(printf "%s\n" "${_check__esp}" | grep -c .)" in
-            0) printf "%s\n" "No EFI system partition is chosen, and UEFI starts from one: $(_human "${esp_mib}"), of type \"EFI System\"."
+            0) printf "%s\n" "This computer starts by UEFI, from an EFI system partition, and the plan has none: $(_human "${esp_mib}") of free room make one."
                _check__esp="" ;;
             1) ;;
             *) printf "%s\n" "The boot loader goes to one EFI system partition, and the plan names several."; _check__esp="" ;;
@@ -404,73 +650,583 @@ _check() { #=> the check verb: what stops plan, a line each
         if [ -n "${_check__root}" ] && _in_plan "${_check__root}"; then
             _check__disk="$(_disk_of "${_check__root}")"
             _check__table="$(_table_of "${_check__disk}")"
-            if [ -n "${_check__table}" ]; then
-                _check__boot="$(_made_on "${_check__disk}" | awk '$3 == "bios-boot"')"
-            else
-                _check__table="$(lsblk -dno PTTYPE "${_check__disk}" | tr -d ' ')"
-                _check__boot="$(for _check__part in $(_partitions "${_check__disk}"); do
-                    [ "$(_kind_now "${_check__part}")" != "bios-boot" ] || printf "%s\n" "${_check__part}"; done)"
+            _check__boot="$(_made_on "${_check__disk}" | awk '$3 == "bios-boot"')"
+            if [ -z "${_check__table}" ]; then
+                _check__table="$(_table_now "${_check__disk}")"
+                _check__boot="${_check__boot}$(awk -F '\t' -v disk="${_check__disk}" '$2 == disk && $7 == "bios-boot" {print $1}' "${map}")"
             fi
             if [ "${_check__table}" = "gpt" ] && [ -z "${_check__boot}" ]; then
-                printf "%s\n" "${_check__disk#/dev/} has a gpt table, and BIOS starts from one only through a partition of GRUB's own: 1M, of type \"BIOS boot\"."
+                printf "%s\n" "${_check__disk#/dev/} has a gpt table, and BIOS starts from one only through a partition of GRUB's own: 1M of free room make it."
             fi
         fi
     fi
 }
 
-_describe() { #=> the describe verb: plan for people, a line each thing erased, made or kept
-    for _describe__disk in $(_plan table | cut -d' ' -f1); do
-        _describe__count="$(_partitions "${_describe__disk}" | grep -c .)"
-        if [ "${_describe__count}" = 0 ]; then
-            printf "%s\n" "Erased:  the whole disk $(_describe_disk "${_describe__disk}"), empty now"
-        else
-            printf "%s\n" "Erased:  the whole disk $(_describe_disk "${_describe__disk}"):" \
-                "         its ${_describe__count} partition(s) and everything on them"
+################################################################################
+# The plan for an interface: rows
+################################################################################
+
+_layout() { #disk now|after => what DISK holds now, or once plan is applied: its partitions and free
+    #rooms in the order of the disk, "device mib start" a line (device free for a room; whole for a disk
+    #that is one file system, with no table)
+    _layout__total="$(_mib "${1}")"
+    if [ "${2}" = "after" ] && [ -n "$(_table_of "${1}")" ]; then
+        #a new table: one partition after the other, from the first MiB
+        _made_on "${1}" | while read -r _layout__part _; do
+            printf "%s %s\n" "${_layout__part}" "$(_mib_in_plan "${_layout__part}")"
+        done | awk -v total="${_layout__total}" '
+            BEGIN {at = 1} {print $1, $2, at; at += $2} END {if (total - 1 - at >= 2) print "free", total - 1 - at, at}'
+        return 0
+    fi
+    if [ -n "$(_disk_fs "${1}")" ]; then
+        printf "%s %s %s\n" "whole" "${_layout__total}" 0
+        return 0
+    fi
+    _layout__dos="$([ "$(_table_now "${1}")" != "dos" ] || printf 1)"
+    {   awk -F '\t' -v disk="${1}" '$2 == disk {print $4, $6, $1, $5, $3}' "${map}"
+        [ "${2}" = "now" ] || _made_on "${1}" | awk 'NF == 4 {print $4, $4 + $2, $1, $2, 0}'
+    } | sort -n | awk -v total="${_layout__total}" -v dos="${_layout__dos}" '
+        #free room is what the primary partitions and the ones made leave: an extended partition is
+        #told by its logical ones, and the room inside it is not offered. The first MiB is the
+        #table\047s, and so is the last (a GPT\047s second copy)
+        BEGIN {at = 1}
+        {   if (!(dos && $5 > 4)) {
+                if ($1 - at >= 2) print "free", $1 - at, at
+                if ($2 > at) at = $2
+            }
+            print $3, $4, $1
+        }
+        END {if (total - 1 - at >= 2) print "free", total - 1 - at, at}'
+}
+
+_rows() { #disk now|after => the now or after rows of DISK
+    _rows__gets="$(_table_of "${1}")"
+    _layout "${1}" "${2}" | while read -r _rows__part _rows__mib _; do
+        if [ "${_rows__part}" = "free" ]; then
+            _rows__name="free"; [ -n "$(_partitions "${1}")" ] || [ "${2}" = "after" ] || _rows__name="empty"
+            _row "${2}" free "${_rows__mib}" "$(_human "${_rows__mib}")" free - "${_rows__name}" kept -
+            continue
         fi
-        _made_on "${_describe__disk}" | while read -r _describe__part _; do
-            printf "%s\n" "Made:    ${_describe__part#/dev/}, $(_human "$(_mib_in_plan "${_describe__part}")"): $(_describe_use "${_describe__part}")"
-        done
-    done
-    for _describe__part in $( { _plan format; _plan esp; _plan root; } | cut -d' ' -f1 | awk '!seen[$0]++'); do
-        [ -z "$(_plan partition "${_describe__part}")" ] || continue
-        _is_partition "${_describe__part}" || continue
-        _describe__is="${_describe__part#/dev/} ($(lsblk -dno SIZE "${_describe__part}" | tr -d ' '), $(_holds "${_describe__part}"))"
-        if [ -n "$(_plan format "${_describe__part}")" ]; then
-            printf "%s\n" "Erased:  ${_describe__is}: formatted as $(_describe_use "${_describe__part}")"
-        elif [ "${_describe__part}" = "$(_plan root | cut -d' ' -f1)" ]; then
-            printf "%s\n" "Kept:    ${_describe__is}: minos is copied over what it holds"
+        if [ "${_rows__part}" = "whole" ]; then
+            #a disk that is one file system: it goes with a new table, the only way minos takes such a disk
+            _row "${2}" "${1}" "${_rows__mib}" "$(_human "${_rows__mib}")" data "$(_disk_fs "${1}")" "$(_disk_fs "${1}")" \
+                "$([ -n "${_rows__gets}" ] && printf gone || printf kept)" -
+            continue
+        fi
+        if [ "${2}" = "now" ]; then
+            if [ -n "${_rows__gets}" ]; then _rows__fate="gone"
+            elif [ -n "$(_plan format "${_rows__part}")" ]; then _rows__fate="erased"
+            else _rows__fate="kept"; fi
+            _row now "${_rows__part}" "${_rows__mib}" "$(_human "${_rows__mib}")" "$(_kind_now "${_rows__part}")" \
+                "$(_file_system "${_rows__part}")" "$(_name_now "${_rows__part}")" "${_rows__fate}" -
         else
-            printf "%s\n" "Kept:    ${_describe__is}: the boot loader is added to it"
+            if [ -n "$(_plan partition "${_rows__part}")" ]; then _rows__fate="new"
+            elif [ -n "$(_plan format "${_rows__part}")" ]; then _rows__fate="formatted"
+            else _rows__fate="kept"; fi
+            case "$(_role "${_rows__part}")" in
+                root) _rows__mount="/" ;; home) _rows__mount="/home" ;; esp) _rows__mount="/boot/efi" ;; *) _rows__mount="-" ;;
+            esac
+            _rows__holds="$(_holds_in_plan "${_rows__part}")"; [ "${_rows__holds}" != "none" ] || _rows__holds="-"
+            _row after "${_rows__part}" "${_rows__mib}" "$(_human "${_rows__mib}")" "$(_kind_in_plan "${_rows__part}")" \
+                "${_rows__holds}" "$(_name_in_plan "${_rows__part}")" "${_rows__fate}" "${_rows__mount}"
         fi
     done
-    _describe__root="$(_plan root | cut -d' ' -f1 | head -n 1)"
-    [ -n "${_describe__root}" ] || return 0
-    _describe__disk="$(_disk_of "${_describe__root}")"
-    [ -n "$(_table_of "${_describe__disk}")" ] ||
-        printf "%s\n" "         the other partitions of ${_describe__disk#/dev/} stay as they are"
-    if [ "${firmware}" = "uefi" ]; then
-        _describe__esp="$(_plan esp | cut -d' ' -f1 | head -n 1)"
-        printf "%s\n" "Starts:  by UEFI, from the EFI system partition ${_describe__esp#/dev/}"
+}
+
+_part_words() { #partition => it for people, as it is now: sdb3 (130.0G, ntfs "Data")
+    printf "%s (%s, %s)" "${1#/dev/}" "$(_human "$(_mib "${1}")")" "$(_holds "${1}")"
+}
+
+_actions() { #=> the action rows of plan, the loss row and the button row: what is done in words, what is
+    #lost, and the name of the deed. They read the plan through what check and the layout read it
+    #through, so the words and the picture say one thing
+    _actions__root="$(_plan_one root)"; _actions__home="$(_plan_one home)"; _actions__esp="$(_plan_one esp)"
+    _actions__lost=""; _actions__whole=""
+    for _actions__disk in $(_plan table | cut -d' ' -f1); do
+        _actions__count="$(_partitions "${_actions__disk}" | grep -c .)"
+        if [ -n "$(_disk_fs "${_actions__disk}")" ]; then
+            _row action erase "Delete everything on $(_describe_disk "${_actions__disk}"): $(_holds_summary "${_actions__disk}")"
+            _actions__lost="${_actions__lost}${_actions__lost:+, }the whole of ${_actions__disk#/dev/} ($(_holds_summary "${_actions__disk}"))"
+        elif [ "${_actions__count}" = 0 ]; then
+            _row action make "Make a new partition table on $(_describe_disk "${_actions__disk}"), which is empty"
+        else
+            _row action erase "Delete everything on $(_describe_disk "${_actions__disk}"): its ${_actions__count} partition(s), $(_holds_summary "${_actions__disk}")"
+            _actions__lost="${_actions__lost}${_actions__lost:+, }the whole of ${_actions__disk#/dev/} ($(_holds_summary "${_actions__disk}"))"
+        fi
+        _actions__whole="${_actions__disk}"
+    done
+    _actions__made=""
+    for _actions__part in $(_plan partition | cut -d' ' -f1); do
+        _actions__size="$(_human "$(_mib_in_plan "${_actions__part}")")"
+        case "$(_kind_in_plan "${_actions__part}")" in
+            esp) _actions__what="a boot partition (${_actions__part#/dev/}, ${_actions__size}, EFI)" ;;
+            bios-boot) _actions__what="a partition for GRUB (${_actions__part#/dev/}, ${_actions__size})" ;;
+            *) case "${_actions__part}" in
+                   "${_actions__root}") _actions__what="a partition for minos (${_actions__part#/dev/}, ${_actions__size})" ;;
+                   "${_actions__home}") _actions__what="a partition for /home (${_actions__part#/dev/}, ${_actions__size})" ;;
+                   *) _actions__what="a partition (${_actions__part#/dev/}, ${_actions__size})" ;;
+               esac ;;
+        esac
+        _actions__made="${_actions__made}${_actions__made:+|}${_actions__what}"
+    done
+    #two to a line: a row is no longer than a screen is wide
+    [ -z "${_actions__made}" ] || printf "%s\n" "${_actions__made}" | tr '|' '\n' | awk -v where="$(
+        [ -n "${_actions__whole}" ] || printf "%s" " in the free room")" '
+        NR % 2 == 1 {held = $0; next} {printf "action\tmake\tCreate %s and %s%s\n", held, $0, where; held = ""}
+        END {if (held != "") printf "action\tmake\tCreate %s%s\n", held, where}'
+    for _actions__part in $( { _plan format; _plan esp; _plan root; _plan home; } | cut -d' ' -f1 | awk '!seen[$0]++'); do
+        [ -z "$(_plan partition "${_actions__part}")" ] || continue
+        _is_partition "${_actions__part}" || continue
+        case "$(_role "${_actions__part}")" in
+            root) _actions__for="minos" ;; home) _actions__for="/home" ;; esp) _actions__for="the boot loader" ;; *) _actions__for="nothing" ;;
+        esac
+        if [ -n "$(_plan format "${_actions__part}")" ]; then
+            _row action erase "Delete everything on $(_part_words "${_actions__part}"): formatted as $(_holds_in_plan "${_actions__part}") for ${_actions__for}"
+            _actions__lost="${_actions__lost}${_actions__lost:+, }$(_part_words "${_actions__part}")"
+        else
+            case "$(_role "${_actions__part}")" in
+                root) _row action keep "Keep the files of $(_part_words "${_actions__part}"): minos is copied over them" ;;
+                home) _row action keep "Keep $(_part_words "${_actions__part}") as /home: its files stay" ;;
+                esp) _row action keep "Add minos to the boot partition ${_actions__part#/dev/}, kept as it is: not formatted" ;;
+            esac
+        fi
+    done
+    if [ -n "${_actions__root}" ]; then
+        if [ "${firmware}" = "uefi" ]; then
+            _row action copy "Copy minos to ${_actions__root#/dev/} and set it to start by UEFI${_actions__esp:+, from ${_actions__esp#/dev/}}"
+        else
+            _row action copy "Copy minos to ${_actions__root#/dev/} and set $(_disk_of "${_actions__root}" | sed 's|/dev/||') to start by BIOS"
+        fi
+    fi
+    if [ -z "${_actions__lost}" ]; then
+        if [ -n "${_actions__whole}" ]; then
+            _row loss none "Nothing is deleted: the disk is empty."
+            _row button plain "Install on $(_describe_disk "${_actions__whole}" 20)"
+        else
+            _row loss none "Nothing is deleted: what the disk holds stays as it is."
+            if _is_partition "${_actions__root:-none}"; then
+                _row button plain "Install on $(_part_words "${_actions__root}" | cut -c1-44)"
+            else
+                _row button plain "Install on the new partition ${_actions__root#/dev/}"
+            fi
+        fi
+    elif [ -n "${_actions__whole}" ]; then
+        _row loss some "Deleted for good: ${_actions__lost}."
+        _row button danger "Erase $(_describe_disk "${_actions__whole}" 18) and install"
     else
-        printf "%s\n" "Starts:  by BIOS, GRUB at the start of ${_describe__disk#/dev/}"
+        _row loss some "Deleted for good: ${_actions__lost}. The rest of the disk is not touched."
+        _row button danger "Erase $(for _actions__part in $(_plan format | cut -d' ' -f1); do
+            _is_partition "${_actions__part}" && printf "%s, " "${_actions__part#/dev/}"; done | sed 's/, $//' | cut -c1-34) and install"
     fi
 }
 
-_describe_use() { #partition => what plan makes of it, for people
-    case "$(_holds_in_plan "${1}")" in
-        fat32) _describe_use__as="FAT32" ;;
-        ext4) _describe_use__as="ext4" ;;
-        *) _describe_use__as="no file system" ;;
-    esac
-    if [ "${1}" = "$(_plan root | cut -d' ' -f1 | head -n 1)" ]; then
-        printf "%s" "${_describe_use__as}, for minos"
-    elif [ "${1}" = "$(_plan esp | cut -d' ' -f1 | head -n 1)" ]; then
-        printf "%s" "${_describe_use__as}, the EFI system partition (the boot loader)"
-    elif [ "$(_kind_in_plan "${1}")" = "bios-boot" ]; then
-        printf "%s" "GRUB's own, which BIOS needs on a gpt table"
-    else
-        printf "%s" "${_describe_use__as}"
+_review() { #disk => the review verb's rows for DISK
+    _check | while IFS= read -r _review__line; do _row problem "${_review__line}"; done
+    _is_disk "${1}" || return 0
+    _rows "${1}" now
+    _rows "${1}" after
+    _actions
+}
+
+_describe() { #=> the describe verb: plan for people, what is done in order, and what is lost
+    _actions | awk -F '\t' '$1 == "action" {printf "%d. %s\n", ++n, $3} $1 == "loss" {loss = $3} END {if (loss != "") print loss}'
+}
+
+################################################################################
+# The plan the choices make, and what else can be chosen
+################################################################################
+
+_choice() { #key => the value of that choice among choices; nothing when it is not said
+    for _choice__word in ${choices}; do
+        case "${_choice__word}" in "${1}="*) printf "%s" "${_choice__word#*=}"; return 0 ;; esac
+    done
+}
+
+_room() { #free:START[:MIB] => "start mib" of the free room that starts there, MiB as chosen or all of
+    #it; nothing when the disk has no such room
+    _room__start="$(printf "%s" "${1}" | cut -d: -f2)"; _room__mib="$(printf "%s" "${1}" | cut -s -d: -f3)"
+    printf "%s\n" "${free}" | awk -v start="${_room__start}" -v mib="${_room__mib}" '
+        NF == 2 && $1 == start {print $1, (mib != "" && mib + 0 <= $2 ? mib : $2); exit}'
+}
+
+_next_number() { #disk taken... => the lowest partition number of DISK that is free, the ones TAKEN aside
+    _next_number__disk="${1}"; shift
+    _next_number__n=1
+    while awk -F '\t' -v disk="${_next_number__disk}" -v n="${_next_number__n}" '$2 == disk && $3 == n {found = 1} END {exit !found}' "${map}" ||
+        case " ${*} " in *" ${_next_number__n} "*) true ;; *) false ;; esac; do
+        _next_number__n="$((_next_number__n + 1))"
+    done
+    printf "%s" "${_next_number__n}"
+}
+
+_choices_default() { #disk => the choices the engine suggests for DISK: the whole of an empty disk; of one
+    #that holds something, free room when it has enough, and else nothing: what is deleted is chosen
+    if [ -z "$(_partitions "${1}")" ]; then
+        printf "%s" "use=whole"
+        return 0
     fi
+    _choices_default__need="${root_mib}"
+    if [ "${firmware}" = "uefi" ]; then
+        awk -F '\t' -v disk="${1}" '$2 == disk && $7 == "esp" {found = 1} END {exit !found}' "${map}" ||
+            _choices_default__need="$((root_mib + esp_mib))"
+    fi
+    _choices_default__room="$(printf "%s\n" "${free}" | awk -v need="${_choices_default__need}" '
+        NF == 2 && $2 >= need && $2 > best {best = $2; start = $1} END {if (best) print start}')"
+    if [ -n "${_choices_default__room}" ]; then
+        printf "%s" "use=parts root=free:${_choices_default__room}"
+    else
+        printf "%s" "use=parts root=none"
+    fi
+}
+
+_plan_custom() { #disk => on stdout the plan choices make for DISK; choices is left as the engine took it
+    _plan_custom__disk="${1}"
+    _plan_custom__use="$(_choice use)"
+    #a disk with no partition table can only be taken whole
+    [ -n "$(_table_now "${1}")" ] || _plan_custom__use="whole"
+    if [ "${_plan_custom__use}" != "parts" ]; then
+        _plan_custom__root="$(_choice root)"; _plan_custom__home="$(_choice home)"
+        _plan_custom__size="-"; _plan_custom__hsize="-"
+        case "${_plan_custom__root}" in new:[1-9]*) _plan_custom__size="${_plan_custom__root#new:}" ;; *) _plan_custom__root="new" ;; esac
+        case "${_plan_custom__home}" in new:[1-9]*) _plan_custom__hsize="${_plan_custom__home#new:}" ;; *) _plan_custom__home="none" ;; esac
+        choices="use=whole root=${_plan_custom__root} home=${_plan_custom__home}"
+        _plan_whole "${1}" "${_plan_custom__size}" "${_plan_custom__hsize}"
+        return 0
+    fi
+
+    _plan_custom__root="$(_choice root)"; _plan_custom__rootfs="$(_choice rootfs)"
+    _plan_custom__home="$(_choice home)"; _plan_custom__homefs="$(_choice homefs)"
+    _plan_custom__esp="$(_choice esp)"; _plan_custom__espfs="$(_choice espfs)"
+    _plan_custom__table="$(_table_now "${1}")"
+    _plan_custom__taken=""; _plan_custom__made=""; _plan_custom__formats=""; _plan_custom__names=""
+    #what was chosen and is no longer there is not chosen
+    case "${_plan_custom__root}" in
+        free:*) [ -n "$(_room "${_plan_custom__root}")" ] || _plan_custom__root="none" ;;
+        /dev/*) [ "$(_of "${_plan_custom__root}" 2)" = "${1}" ] && [ "$(_kind_now "${_plan_custom__root}")" = "data" ] || _plan_custom__root="none" ;;
+        *) _plan_custom__root="none" ;;
+    esac
+    case "${_plan_custom__home}" in
+        free:*) [ -n "$(_room "${_plan_custom__home}")" ] || _plan_custom__home="none"
+                #one new partition to a free room
+                [ "$(printf "%s" "${_plan_custom__home}" | cut -d: -f2)" != "$(printf "%s" "${_plan_custom__root}" | cut -s -d: -f2)" ] || _plan_custom__home="none" ;;
+        /dev/*) [ "$(_of "${_plan_custom__home}" 2)" = "${1}" ] && [ "$(_kind_now "${_plan_custom__home}")" = "data" ] &&
+                    [ "${_plan_custom__home}" != "${_plan_custom__root}" ] || _plan_custom__home="none" ;;
+        *) _plan_custom__home="none" ;;
+    esac
+    [ "${_plan_custom__rootfs}" = "keep" ] && [ "$(_file_system "${_plan_custom__root}")" = "ext4" ] || _plan_custom__rootfs="format"
+    [ "${_plan_custom__homefs}" = "keep" ] && [ "$(_file_system "${_plan_custom__home}")" = "ext4" ] || _plan_custom__homefs="format"
+
+    #what the firmware starts from, which is the installer's to see to. UEFI: the EFI system partition
+    #chosen; or this disk's; or a new one, where this disk has the room; or another disk's. BIOS on a
+    #GPT: the partition GRUB needs, the one there or a new one. A new one goes first in the room minos
+    #takes, or in the largest free room that holds it
+    _plan_custom__boot=""; _plan_custom__newesp=""; _plan_custom__newboot=""; _plan_custom__firm=0
+    if [ "${firmware}" = "uefi" ]; then
+        case "${_plan_custom__esp}" in
+            /dev/*) [ "$(_kind_now "${_plan_custom__esp}")" = "esp" ] || _plan_custom__esp="auto" ;;
+            *) _plan_custom__esp="auto" ;;
+        esac
+        [ "${_plan_custom__espfs}" = "format" ] || _plan_custom__espfs="auto"
+        if [ "${_plan_custom__esp}" != "auto" ]; then
+            _plan_custom__boot="${_plan_custom__esp}"
+        else
+            _plan_custom__boot="$(awk -F '\t' -v disk="${1}" '$2 == disk && $7 == "esp" {print $1; exit}' "${map}")"
+            [ -n "${_plan_custom__boot}" ] || { _plan_custom__newesp="yes"; _plan_custom__firm="${esp_mib}"; }
+        fi
+    else
+        _plan_custom__esp="auto"; _plan_custom__espfs="auto"
+        [ "${_plan_custom__table}" != "gpt" ] ||
+            awk -F '\t' -v disk="${1}" '$2 == disk && $7 == "bios-boot" {found = 1} END {exit !found}' "${map}" ||
+            { _plan_custom__newboot="yes"; _plan_custom__firm=1; }
+    fi
+    #nothing is made for the firmware before minos has a place: a plan that only adds a boot partition
+    #is no plan
+    if [ "${_plan_custom__root}" = "none" ]; then
+        _plan_custom__newesp=""; _plan_custom__newboot=""; _plan_custom__firm=0
+    fi
+    _plan_custom__at=""
+    case "${_plan_custom__root}" in
+        free:*) # shellcheck disable=SC2046 # the start and the size, two words
+                set -- $(_room "${_plan_custom__root}")
+                _plan_custom__at="${1}"; _plan_custom__end="$((${1} + ${2}))" ;;
+        *) if [ "${_plan_custom__firm}" -gt 0 ]; then
+               # shellcheck disable=SC2046 # the start and the size, two words
+               set -- $(printf "%s\n" "${free}" | awk -v need="${_plan_custom__firm}" -v home="$(printf "%s" "${_plan_custom__home}" | cut -s -d: -f2)" '
+                   NF == 2 && $2 >= need && $1 != home && $2 > best {best = $2; start = $1} END {if (best) print start, best}')
+               if [ "${#}" = 2 ]; then _plan_custom__at="${1}"; _plan_custom__end="$((${1} + ${2}))"; fi
+           fi ;;
+    esac
+    if [ -n "${_plan_custom__newesp}" ] && [ -z "${_plan_custom__at}" ] && [ "${_plan_custom__root}" != "none" ]; then
+        #no room on this disk for an EFI system partition: another disk's, when there is one
+        _plan_custom__newesp=""
+        _plan_custom__boot="$(for _plan_custom__other in $(_usable_disks); do
+            awk -F '\t' -v disk="${_plan_custom__other}" '$2 == disk && $7 == "esp" {print $1; exit}' "${map}"; done | head -n 1)"
+    fi
+    _plan_custom__rootpart="${_plan_custom__root}"; _plan_custom__homepart="${_plan_custom__home}"
+    if [ -n "${_plan_custom__at}" ]; then
+        if [ -n "${_plan_custom__newboot}" ]; then
+            # shellcheck disable=SC2086 # the numbers taken, a word each
+            _plan_custom__n="$(_next_number "${_plan_custom__disk}" ${_plan_custom__taken})"; _plan_custom__taken="${_plan_custom__taken} ${_plan_custom__n}"
+            printf "%s\n" "partition $(_partition_name "${_plan_custom__disk}" "${_plan_custom__n}") 1 bios-boot ${_plan_custom__at}"
+            _plan_custom__at="$((_plan_custom__at + 1))"
+        fi
+        if [ -n "${_plan_custom__newesp}" ]; then
+            # shellcheck disable=SC2086 # the numbers taken, a word each
+            _plan_custom__n="$(_next_number "${_plan_custom__disk}" ${_plan_custom__taken})"; _plan_custom__taken="${_plan_custom__taken} ${_plan_custom__n}"
+            _plan_custom__boot="$(_partition_name "${_plan_custom__disk}" "${_plan_custom__n}")"
+            printf "%s\n" "partition ${_plan_custom__boot} ${esp_mib} esp ${_plan_custom__at}"
+            _plan_custom__formats="format ${_plan_custom__boot} fat32"
+            _plan_custom__at="$((_plan_custom__at + esp_mib))"
+        fi
+        case "${_plan_custom__root}" in free:*)
+            # shellcheck disable=SC2086 # the numbers taken, a word each
+            _plan_custom__n="$(_next_number "${_plan_custom__disk}" ${_plan_custom__taken})"; _plan_custom__taken="${_plan_custom__taken} ${_plan_custom__n}"
+            _plan_custom__rootpart="$(_partition_name "${_plan_custom__disk}" "${_plan_custom__n}")"
+            _plan_custom__size="$(printf "%s" "${_plan_custom__root}" | cut -s -d: -f3)"
+            { [ -n "${_plan_custom__size}" ] && [ "$((_plan_custom__at + _plan_custom__size))" -le "${_plan_custom__end}" ]; } ||
+                _plan_custom__size="$((_plan_custom__end - _plan_custom__at))"
+            printf "%s\n" "partition ${_plan_custom__rootpart} ${_plan_custom__size} linux ${_plan_custom__at}" ;;
+        esac
+    fi
+    case "${_plan_custom__home}" in free:*)
+        # shellcheck disable=SC2046 # the start and the size, two words
+        set -- $(_room "${_plan_custom__home}")
+        # shellcheck disable=SC2086 # the numbers taken, a word each
+        _plan_custom__n="$(_next_number "${_plan_custom__disk}" ${_plan_custom__taken})"
+        _plan_custom__homepart="$(_partition_name "${_plan_custom__disk}" "${_plan_custom__n}")"
+        printf "%s\n" "partition ${_plan_custom__homepart} ${2} linux ${1}" ;;
+    esac
+    [ -z "${_plan_custom__formats}" ] || printf "%s\n" "${_plan_custom__formats}"
+    if [ -n "${_plan_custom__boot}" ] && [ -z "${_plan_custom__formats}" ]; then
+        { [ "${_plan_custom__espfs}" != "format" ] && [ "$(_file_system "${_plan_custom__boot}")" = "vfat" ]; } ||
+            printf "%s\n" "format ${_plan_custom__boot} fat32"
+    fi
+    case "${_plan_custom__root}" in
+        none) ;;
+        free:*) printf "%s\n" "format ${_plan_custom__rootpart} ext4" ;;
+        *) [ "${_plan_custom__rootfs}" = "keep" ] || printf "%s\n" "format ${_plan_custom__rootpart} ext4" ;;
+    esac
+    case "${_plan_custom__home}" in
+        none) ;;
+        free:*) printf "%s\n" "format ${_plan_custom__homepart} ext4" ;;
+        *) [ "${_plan_custom__homefs}" = "keep" ] || printf "%s\n" "format ${_plan_custom__homepart} ext4" ;;
+    esac
+    [ -z "${_plan_custom__boot}" ] || printf "%s\n" "esp ${_plan_custom__boot}"
+    [ "${_plan_custom__root}" = "none" ] || printf "%s\n" "root ${_plan_custom__rootpart}"
+    [ "${_plan_custom__home}" = "none" ] || printf "%s\n" "home ${_plan_custom__homepart}"
+    choices="use=parts root=${_plan_custom__root} rootfs=${_plan_custom__rootfs} home=${_plan_custom__home} homefs=${_plan_custom__homefs} esp=${_plan_custom__esp} espfs=${_plan_custom__espfs}"
+}
+
+_step_mib() { #mib => what + and - change a size of MIB by: a quarter, a half or a whole GiB
+    if [ "${1}" -lt 8192 ]; then printf "%s" 256; elif [ "${1}" -lt 65536 ]; then printf "%s" 512; else printf "%s" 1024; fi
+}
+
+_lines() { #disk => the line, option and size rows: the plan as lines a person changes, from choices
+    #and plan
+    _lines__disk="${1}"; _lines__total="$(_mib "${1}")"
+    _lines__root="$(_plan_one root)"; _lines__home="$(_plan_one home)"; _lines__esp="$(_plan_one esp)"
+    _lines__use="$(_choice use)"
+    _lines__count="$(_partitions "${1}" | grep -c .)"
+
+    #the disk, when there is another to choose
+    if [ "$(_usable_disks | grep -c .)" -gt 1 ]; then
+        _row line disk "Disk" "$(_describe_disk "${1}")" "$(_holds_summary "${1}")" plain
+        for _lines__other in $(_usable_disks); do
+            _row option disk "disk=${_lines__other}" "$(_describe_disk "${_lines__other}"): $(_holds_summary "${_lines__other}")" \
+                "$([ "${_lines__other}" != "${1}" ] || printf current)"
+        done
+    fi
+
+    if [ "${_lines__use}" = "whole" ]; then
+        if [ "${_lines__count}" = 0 ]; then
+            _row line use "Use" "the whole disk" "it is empty: nothing is deleted" plain
+        else
+            _row line use "Use" "the whole disk" "everything on it is deleted" erase
+        fi
+    else
+        _row line use "Use" "its partitions and free room" "what you do not choose stays as it is" plain
+    fi
+    _row option use "use=whole" "the whole disk: $([ "${_lines__count}" = 0 ] && printf "it is empty" || printf "everything on it is deleted")" \
+        "$([ "${_lines__use}" != "whole" ] || printf current)"
+    [ -z "$(_table_now "${1}")" ] ||
+        _row option use "use=parts" "its partitions and free room: what you do not choose stays as it is" \
+            "$([ "${_lines__use}" != "parts" ] || printf current)"
+
+    if [ "${_lines__use}" = "whole" ]; then
+        if [ "${firmware}" = "uefi" ]; then
+            _row line boot "Boot" "a new partition, $(_human "${esp_mib}"), FAT32" "the EFI system partition: UEFI starts minos from it" new
+        elif [ "$(_table_of "${1}")" = "gpt" ]; then
+            _row line boot "Boot" "a new partition of 1M for GRUB" "BIOS starts a disk of this size through it" new
+        else
+            _row line boot "Boot" "GRUB at the start of ${1#/dev/}" "this computer starts by BIOS" plain
+        fi
+        _lines__fixed="$(_made_on "${1}" | awk '$3 != "linux" {sum += $2} END {print sum + 0}')"
+        _lines__rootmib="$(_mib_in_plan "${_lines__root}")"
+        _lines__homemib=0; [ -z "${_lines__home}" ] || _lines__homemib="$(_mib_in_plan "${_lines__home}")"
+        _lines__room="$((_lines__total - 2 - _lines__fixed))"
+        _lines__sized="$(_choice root)"
+        _row line root "minos" "a new partition, $(_human "${_lines__rootmib}"), ext4" \
+            "$([ "${_lines__sized}" = "new" ] && printf "all the room there is" || printf "a size of its own: + and - change it")" new
+        _row option root "root=new" "all the room there is" "$([ "${_lines__sized}" != "new" ] || printf current)"
+        _lines__step="$(_step_mib "${_lines__room}")"
+        _lines__own="${_lines__rootmib}"
+        [ "${_lines__sized}" != "new" ] || _lines__own="$(( (_lines__rootmib * 3 / 4) / _lines__step * _lines__step ))"
+        [ "${_lines__own}" -ge "${root_mib}" ] || _lines__own="${root_mib}"
+        _row option root "root=new:${_lines__own}" "a size of its own, and the rest of the disk stays free" \
+            "$([ "${_lines__sized}" = "new" ] || printf current)"
+        [ "${_lines__sized}" = "new" ] ||
+            _row size root "root=new:" "${_lines__rootmib}" "${root_mib}" "$((_lines__room - _lines__homemib))" "${_lines__step}"
+        if [ -z "${_lines__home}" ]; then
+            _row line home "Home" "inside the partition of minos" "your files share its room" plain
+        else
+            _row line home "Home" "a partition of its own, $(_human "${_lines__homemib}"), ext4" "+ and - change its size" new
+            _lines__most="$((_lines__room - root_mib))"
+            [ "${_lines__sized}" = "new" ] || _lines__most="$((_lines__room - _lines__rootmib))"
+            _row size home "home=new:" "${_lines__homemib}" "${home_mib}" "${_lines__most}" "${_lines__step}"
+        fi
+        _row option home "home=none" "inside the partition of minos" "$([ -n "${_lines__home}" ] || printf current)"
+        _lines__own="${_lines__homemib}"
+        [ "${_lines__own}" -gt 0 ] || _lines__own="$(( (_lines__room / 4) / _lines__step * _lines__step ))"
+        if [ "$((_lines__room - _lines__own))" -ge "${root_mib}" ] && [ "${_lines__own}" -ge "${home_mib}" ]; then
+            _row option home "home=new:${_lines__own}" "a partition of its own, for your files alone" "$([ -z "${_lines__home}" ] || printf current)"
+        fi
+        return 0
+    fi
+
+    #its partitions and free rooms, in the order of the disk: a line each
+    _layout "${1}" now | while read -r _lines__part _lines__mib _lines__start; do
+        if [ "${_lines__part}" = "free" ]; then
+            _lines__id="free:${_lines__start}"
+            if [ -z "$(_room "${_lines__id}")" ]; then
+                _row line "${_lines__id}" "free" "$(printf "%7s  %-20s  %s" "$(_human "${_lines__mib}")" "free room" "stays free")" \
+                    "it cannot be used: an MBR table holds four partitions, and this one's are taken" off
+                continue
+            fi
+            _lines__made="$(_made_on "${1}" | awk -v from="${_lines__start}" -v to="$((_lines__start + _lines__mib))" 'NF == 4 && $4 >= from && $4 < to {print $1}')"
+            _lines__is="left free"; _lines__tone="off"
+            for _lines__new in ${_lines__made}; do
+                case "$(_role "${_lines__new}")" in
+                    root) _lines__is="a new one for minos, $(_human "$(_mib_in_plan "${_lines__new}")")"; _lines__tone="new" ;;
+                    home) _lines__is="a new one for /home, $(_human "$(_mib_in_plan "${_lines__new}")")"; _lines__tone="new" ;;
+                esac
+            done
+            _row line "${_lines__id}" "free" "$(printf "%7s  %-20s  %s" "$(_human "${_lines__mib}")" "free room" "${_lines__is}")" - "${_lines__tone}"
+            _lines__rootin="$(printf "%s" "$(_choice root)" | cut -s -d: -f2)"; _lines__homein="$(printf "%s" "$(_choice home)" | cut -s -d: -f2)"
+            _lines__clear=""
+            [ "${_lines__rootin}" != "${_lines__start}" ] || _lines__clear="root=none"
+            [ "${_lines__homein}" != "${_lines__start}" ] || _lines__clear="home=none"
+            _row option "${_lines__id}" "${_lines__clear:-use=parts}" "leave it free" "$([ -n "${_lines__clear}" ] || printf current)"
+            if [ "${_lines__mib}" -ge "${root_mib}" ]; then
+                _lines__sized="$(printf "%s" "$(_choice root)" | cut -s -d: -f3)"
+                _row option "${_lines__id}" "root=free:${_lines__start}$([ "${_lines__homein}" != "${_lines__start}" ] || printf " home=none")" \
+                    "a new partition for minos: all of this room" "$([ "${_lines__rootin}" = "${_lines__start}" ] && [ -z "${_lines__sized}" ] && printf current)"
+                _lines__step="$(_step_mib "${_lines__mib}")"
+                _lines__own="${_lines__sized:-$(( (_lines__mib * 3 / 4) / _lines__step * _lines__step ))}"
+                [ "${_lines__own}" -ge "${root_mib}" ] || _lines__own="${root_mib}"
+                _row option "${_lines__id}" "root=free:${_lines__start}:${_lines__own}$([ "${_lines__homein}" != "${_lines__start}" ] || printf " home=none")" \
+                    "a new partition for minos of a size of its own: the rest stays free" "$([ "${_lines__rootin}" = "${_lines__start}" ] && [ -n "${_lines__sized}" ] && printf current)"
+                if [ "${_lines__rootin}" = "${_lines__start}" ] && [ -n "${_lines__sized}" ]; then
+                    _row size "${_lines__id}" "root=free:${_lines__start}:" "$(_mib_in_plan "${_lines__root}")" "${root_mib}" \
+                        "$((_lines__mib - $(_made_on "${1}" | awk -v from="${_lines__start}" -v to="$((_lines__start + _lines__mib))" 'NF == 4 && $4 >= from && $4 < to && $3 != "linux" {sum += $2} END {print sum + 0}')))" "${_lines__step}"
+                fi
+            fi
+            [ "${_lines__mib}" -lt "${home_mib}" ] ||
+                _row option "${_lines__id}" "home=free:${_lines__start}$([ "${_lines__rootin}" != "${_lines__start}" ] || printf " root=none")" \
+                    "a new partition for /home: all of this room" "$([ "${_lines__homein}" != "${_lines__start}" ] || printf current)"
+            continue
+        fi
+        _lines__kind="$(_kind_now "${_lines__part}")"; _lines__fs="$(_file_system "${_lines__part}")"
+        _lines__what="$(printf "%7s  %-20s" "$(_human "${_lines__mib}")" "$(_holds "${_lines__part}" | cut -c1-20)")"
+        _lines__label="${_lines__part#/dev/}"
+        case "${_lines__kind}" in
+            data)
+                _lines__is="stays as it is"; _lines__tone="plain"; _lines__clear=""
+                if [ "${_lines__part}" = "${_lines__root}" ]; then
+                    _lines__clear="root=none"
+                    if [ -n "$(_plan format "${_lines__part}")" ]; then _lines__is="erased, for minos"; _lines__tone="erase"
+                    else _lines__is="minos, over its files"; _lines__tone="new"; fi
+                elif [ "${_lines__part}" = "${_lines__home}" ]; then
+                    _lines__clear="home=none"
+                    if [ -n "$(_plan format "${_lines__part}")" ]; then _lines__is="erased, for /home"; _lines__tone="erase"
+                    else _lines__is="/home, its files kept"; _lines__tone="new"; fi
+                fi
+                _lines__note="-"
+                [ "${_lines__mib}" -ge "${root_mib}" ] || _lines__note="too small for minos, which needs $(_human "${root_mib}")"
+                _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  ${_lines__is}" "${_lines__note}" "${_lines__tone}"
+                _row option "${_lines__part}" "${_lines__clear:-use=parts}" "leave it as it is" "$([ -n "${_lines__clear}" ] || printf current)"
+                _lines__unhome=""; [ "${_lines__part}" != "${_lines__home}" ] || _lines__unhome=" home=none"
+                _lines__unroot=""; [ "${_lines__part}" != "${_lines__root}" ] || _lines__unroot=" root=none"
+                if [ "${_lines__mib}" -ge "${root_mib}" ]; then
+                    _row option "${_lines__part}" "root=${_lines__part} rootfs=format${_lines__unhome}" "erase it, use it for minos" \
+                        "$([ "${_lines__part}" = "${_lines__root}" ] && [ -n "$(_plan format "${_lines__part}")" ] && printf current)"
+                    [ "${_lines__fs}" != "ext4" ] ||
+                        _row option "${_lines__part}" "root=${_lines__part} rootfs=keep${_lines__unhome}" "copy minos over its files, not formatted" \
+                            "$([ "${_lines__part}" = "${_lines__root}" ] && [ -z "$(_plan format "${_lines__part}")" ] && printf current)"
+                fi
+                if [ "${_lines__mib}" -ge "${home_mib}" ]; then
+                    _row option "${_lines__part}" "home=${_lines__part} homefs=format${_lines__unroot}" "erase it, use it for /home" \
+                        "$([ "${_lines__part}" = "${_lines__home}" ] && [ -n "$(_plan format "${_lines__part}")" ] && printf current)"
+                    [ "${_lines__fs}" != "ext4" ] ||
+                        _row option "${_lines__part}" "home=${_lines__part} homefs=keep${_lines__unroot}" "use it as /home, its files kept" \
+                            "$([ "${_lines__part}" = "${_lines__home}" ] && [ -z "$(_plan format "${_lines__part}")" ] && printf current)"
+                fi ;;
+            esp)
+                if [ "${firmware}" != "uefi" ]; then
+                    _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  stays as it is" "an EFI system partition: not used, this computer starts by BIOS" off
+                elif [ "${_lines__part}" = "${_lines__esp}" ]; then
+                    if [ -n "$(_plan format "${_lines__part}")" ]; then
+                        _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  erased, for the boot loader" "the EFI system partition: UEFI starts minos from it" erase
+                    else
+                        _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  kept, minos is added to it" "the EFI system partition: UEFI starts minos from it" plain
+                    fi
+                    [ "${_lines__fs}" != "vfat" ] ||
+                        _row option "${_lines__part}" "esp=${_lines__part} espfs=auto" "keep what it holds, add minos to it" "$([ -n "$(_plan format "${_lines__part}")" ] || printf current)"
+                    _row option "${_lines__part}" "esp=${_lines__part} espfs=format" "format it: the boot loaders of other systems on it are erased" \
+                        "$([ -z "$(_plan format "${_lines__part}")" ] || printf current)"
+                else
+                    _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  stays as it is" "an EFI system partition, not the one minos starts from" off
+                    _row option "${_lines__part}" "use=parts" "leave it as it is" current
+                    _row option "${_lines__part}" "esp=${_lines__part} espfs=auto" "start minos from this one" -
+                fi ;;
+            bios-boot)
+                _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  stays as it is" \
+                    "$([ "${firmware}" = "bios" ] && printf "GRUB's own partition: BIOS starts the disk through it" || printf "GRUB's own partition, for BIOS: not used")" off ;;
+            *)  _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  stays as it is" "it holds the logical partitions" off ;;
+        esac
+    done
+
+    #how the computer will start, said in a line: the firmware's partitions are the installer's to see to
+    if [ "${firmware}" = "uefi" ]; then
+        if [ -z "${_lines__esp}" ]; then
+            _row line boot "Boot" "nothing to start from yet" "UEFI needs an EFI system partition: $(_human "${esp_mib}") of free room, or the whole disk" erase
+        elif [ -n "$(_plan partition "${_lines__esp}")" ]; then
+            _row line boot "Boot" "a new partition, ${_lines__esp#/dev/}, $(_human "${esp_mib}"), in the free room" "the EFI system partition: UEFI starts minos from it" new
+        else
+            _row line boot "Boot" "by UEFI, from ${_lines__esp#/dev/}$([ "$(_disk_of "${_lines__esp}")" = "${1}" ] || printf ", on another disk")" \
+                "the installer sees to it: nothing to set by hand" plain
+        fi
+    else
+        _lines__grub="$(_made_on "${1}" | awk '$3 == "bios-boot" {print $1}')"
+        if [ -n "${_lines__grub}" ]; then
+            _row line boot "Boot" "by BIOS, through a new partition of 1M for GRUB (${_lines__grub#/dev/})" "a gpt disk needs it: the installer makes it" new
+        else
+            _row line boot "Boot" "by BIOS, GRUB at the start of ${1#/dev/}" "the installer sees to it: nothing to set by hand" plain
+        fi
+    fi
+}
+
+_edit() { #disk file => the edit verb: choices made a plan in FILE, and its rows
+    scratch="$(mktemp)" || _die "no temporary file"
+    free="$(_free "${1}")"
+    [ -n "${choices}" ] || choices="$(_choices_default "${1}")"
+    _plan_custom "${1}" > "${scratch}"
+    cat "${scratch}" > "${2}" || _die "cannot write ${2}"
+    rm -f "${scratch}"
+    plan="${2}"
+    _row choices "${choices}"
+    _row disk "${1}" "$(lsblk -dno SIZE "${1}" | tr -d ' ')" "$(_model "${1}")" "$(_holds_summary "${1}")"
+    _lines "${1}"
+    _review "${1}"
 }
 
 _user_refusal() { #name => why minos takes no user of that name; nothing when it does
@@ -484,8 +1240,6 @@ _user_refusal() { #name => why minos takes no user of that name; nothing when it
 _password_refusal() { #password => why minos does not take it; nothing when it does
     case "${1}" in
         "") printf "%s\n" "The password is empty." ;;
-        #setup reads an argument that starts with - as one of its options
-        -*) printf "%s\n" "The password cannot start with -." ;;
     esac
 }
 
@@ -493,10 +1247,10 @@ _password_refusal() { #password => why minos does not take it; nothing when it d
 # The plan applied
 ################################################################################
 
-_format() { #partition fat32|ext4 => a new file system on it; FAT with dosfstools or, where a system goes
-    #without them, with busybox
+_format() { #partition fat32|ext4 label => a new file system on it; FAT with dosfstools or, where a system
+    #goes without them, with busybox
     case "${2}" in
-        ext4) mkfs.ext4 -q -F -L minos "${1}" ;;
+        ext4) mkfs.ext4 -q -F -L "${3}" "${1}" ;;
         fat32) if command -v mkfs.vfat >/dev/null 2>&1; then
                    mkfs.vfat -F 32 -n EFI "${1}"
                else
@@ -505,11 +1259,29 @@ _format() { #partition fat32|ext4 => a new file system on it; FAT with dosfstool
     esac
 }
 
+_wait_partitions() { #disk names => true once the kernel has the partitions NAMES (a line, in the order of
+    #their numbers) on DISK and no other, within 10 s
+    _wait_partitions__waited=0
+    until [ "$(for _wait_partitions__file in "/sys/block/${1#/dev/}"/*/partition; do
+            [ -f "${_wait_partitions__file}" ] || continue
+            _wait_partitions__dir="${_wait_partitions__file%/partition}"
+            printf "%s /dev/%s\n" "$(cat "${_wait_partitions__file}")" "${_wait_partitions__dir##*/}"
+        done | sort -n | cut -d' ' -f2 | tr '\n' ' ')" = "${2}" ]; do
+        _wait_partitions__waited="$((_wait_partitions__waited + 1))"
+        [ "${_wait_partitions__waited}" -le 10 ] || return 1
+        sleep 1
+    done
+}
+
 _apply() { #=> plan applied from the top, then minos installed for user with password; 0 when it all worked
-    _apply__root="$(_plan root | cut -d' ' -f1)"; _apply__esp="$(_plan esp | cut -d' ' -f1)"
-    #the swap the live session turned on where the plan writes: on a disk that gets a new table, on a
+    _apply__root="$(_plan_one root)"; _apply__esp="$(_plan_one esp)"; _apply__home="$(_plan_one home)"
+    _say "the plan, for ${firmware}:"
+    grep -v '^[ \t]*\(#\|$\)' "${plan}" | sed 's/^/  /'
+    #the swap the live session turned on where the plan writes: on a disk whose table is written, on a
     #partition that gets a file system
-    for _apply__swap in $( { _plan table; _plan format; } | cut -d' ' -f1 | while read -r _apply__device; do
+    for _apply__swap in $( { _plan table | cut -d' ' -f1; _plan format | cut -d' ' -f1
+            for _apply__part in $(_plan partition | cut -d' ' -f1); do _disk_of "${_apply__part}"; printf "\n"; done
+        } | sort -u | while read -r _apply__device; do
             [ ! -b "${_apply__device}" ] || lsblk -lnpo NAME,MOUNTPOINT "${_apply__device}"
         done | awk '$2 == "[SWAP]" {print $1}' | sort -u); do
         _say "turning off the swap on ${_apply__swap}"
@@ -521,7 +1293,7 @@ _apply() { #=> plan applied from the top, then minos installed for user with pas
         #sfdisk's script: a partition a line, "start, size, type, bootable", the start left to sfdisk. An
         #MBR marks the partition BIOS starts from
         {   printf "%s\n" "label: ${_apply__table}"
-            _made_on "${_apply__disk}" | while read -r _apply__part _apply__size _apply__type; do
+            _made_on "${_apply__disk}" | while read -r _apply__part _apply__size _apply__type _; do
                 case "${_apply__size}" in rest) _apply__size="" ;; *) _apply__size="${_apply__size}M" ;; esac
                 case "${_apply__type}" in
                     esp) _apply__type="U" ;;
@@ -539,31 +1311,67 @@ _apply() { #=> plan applied from the top, then minos installed for user with pas
         udevadm settle
         #the partitions made are the ones the plan names: the kernel's names, read back
         _apply__made="$(_made_on "${_apply__disk}" | cut -d' ' -f1 | tr '\n' ' ')"
-        _apply__waited=0
-        until [ "$(_partitions "${_apply__disk}" | tr '\n' ' ')" = "${_apply__made}" ]; do
-            _apply__waited="$((_apply__waited + 1))"
-            [ "${_apply__waited}" -le 10 ] ||
-                { _say "${_apply__disk} has $(_partitions "${_apply__disk}" | tr '\n' ' '), and the plan made ${_apply__made}"; return 1; }
-            sleep 1
-        done
+        _wait_partitions "${_apply__disk}" "${_apply__made}" ||
+            { _say "${_apply__disk} has not the partitions the plan made: ${_apply__made}"; return 1; }
+    done
+    #partitions added to a table that stays: each one named, with where it starts and its size, and the
+    #ones there left as they are (sfdisk --append). Nothing is wiped by sfdisk: the ones added get a file
+    #system below, or GRUB
+    for _apply__disk in $(_plan partition | cut -d' ' -f1 | while read -r _apply__part; do _disk_of "${_apply__part}"; printf "\n"; done | sort -u); do
+        [ -z "$(_table_of "${_apply__disk}")" ] || continue
+        _apply__table="$(_table_now "${_apply__disk}")"
+        _say "partitioning ${_apply__disk}: $(_made_on "${_apply__disk}" | cut -d' ' -f1 | tr '\n' ' ')added to its ${_apply__table} table"
+        _made_on "${_apply__disk}" | while read -r _apply__part _apply__size _apply__type _apply__start; do
+            case "${_apply__type}" in
+                esp) _apply__type="U" ;;
+                bios-boot) _apply__type="${bios_boot_type}" ;;
+                *) _apply__type="L" ;;
+            esac
+            printf "%s\n" "${_apply__part} : start=${_apply__start}MiB, size=${_apply__size}MiB, type=${_apply__type}"
+        done | sfdisk --append --wipe never --wipe-partitions never "${_apply__disk}" ||
+            { _say "${_apply__disk} could not be partitioned: something may be using it"; return 1; }
+        udevadm settle
+        _apply__made="$( { _partitions "${_apply__disk}"; _made_on "${_apply__disk}" | cut -d' ' -f1; } |
+            while read -r _apply__part; do printf "%s %s\n" "$(_partition_number "${_apply__part}")" "${_apply__part}"; done |
+            sort -n | cut -d' ' -f2 | tr '\n' ' ')"
+        _wait_partitions "${_apply__disk}" "${_apply__made}" ||
+            { _say "${_apply__disk} has not the partitions the plan made: ${_apply__made}"; return 1; }
+        #each one where the plan put it, and of its size
+        _made_on "${_apply__disk}" | while read -r _apply__part _apply__size _ _apply__start; do
+            read -r _apply__sectors < "/sys/class/block/${_apply__part#/dev/}/start"
+            [ "${_apply__sectors}" = "$((_apply__start * 2048))" ] && [ "$(_mib "${_apply__part}")" = "${_apply__size}" ] ||
+                { _say "${_apply__part} is not where the plan put it: it starts at sector ${_apply__sectors} and has $(_mib "${_apply__part}")M"; exit 1; }
+            wipefs -a -q "${_apply__part}"
+        done || return 1
     done
     _plan format | while read -r _apply__part _apply__as; do
         _say "formatting ${_apply__part} as ${_apply__as}"
-        _format "${_apply__part}" "${_apply__as}" || exit 1
+        _apply__label="minos"; [ "${_apply__part}" != "${_apply__home}" ] || _apply__label="home"
+        _format "${_apply__part}" "${_apply__as}" "${_apply__label}" || exit 1
     done || { _say "a partition could not be formatted: what mkfs said is above"; return 1; }
     udevadm settle
 
-    set -- live desktop "${_apply__root}" "${user}"
+    #the password goes to setup on its standard input (-), never on its command line; --now: the one
+    #confirmation was the interface's, setup does not count its own seconds down
+    set -- live desktop "${_apply__root}" "${user}" -
+    [ -z "${_apply__home}" ] || set -- "${@}" "${_apply__home}"
+    [ -z "${_apply__esp}" ] || set -- "${@}" --esp "${_apply__esp}"
+    set -- "${@}" --now
     if [ -n "${try}" ]; then
         _say "try mode: the disk is ready, and minos would now be installed with"
-        printf "%s\n" "  sh ${setup} ${*} PASSWORD${_apply__esp:+ --esp ${_apply__esp}}"
+        printf "%s\n" "  sh ${setup} ${*}"
         return 0
     fi
     _say "installing minos on ${_apply__root}: a few minutes"
-    set -- "${@}" "${password}"
-    [ -z "${_apply__esp}" ] || set -- "${@}" --esp "${_apply__esp}"
-    sh "${setup}" "${@}" < /dev/null
+    #how far the copy is, for an interface: what the partition of minos holds, of what the system weighs
+    (   while sleep 2; do
+            _apply__used="$(df -m --output=used "${_apply__root}" 2>/dev/null | awk 'NR == 2 {print $1 + 0}')"
+            printf "%s %s\n" "${_apply__used:-0}" "${system_mib}" > "${progress}.new" && mv "${progress}.new" "${progress}"
+        done ) &
+    _apply__sampler="${!}"
+    printf "%s\n" "${password}" | sh "${setup}" "${@}"
     _apply__status="${?}"
+    kill "${_apply__sampler}" 2>/dev/null; wait "${_apply__sampler}" 2>/dev/null
     [ "${_apply__status}" = 0 ] ||
         _say "minos could not be installed on ${_apply__root}: the disk is not ready to start from"
     return "${_apply__status}"
@@ -603,6 +1411,9 @@ if [ -n "${try}" ]; then
     system_mib=1600
 elif [ -f "${setup}" ] && [ -f /rofs/etc/passwd ] && [ -f /cdrom/casper/filesystem.size ]; then
     [ -z "${firmware}" ] || _die "--firmware goes with --try: setup installs for the firmware the session started by"
+    #the setup this engine runs takes the password on its standard input and starts with no countdown
+    grep -q -e '--now)' "${setup}" ||
+        _die "the installer on this medium (${setup}) is older than this engine: it takes no --now. Nothing was written"
     firmware="${booted}"; passwd="/rofs/etc/passwd"
     system_mib="$(($(cat /cdrom/casper/filesystem.size) / 1048576))"
 else
@@ -617,37 +1428,59 @@ if [ -n "${medium}" ]; then
     _medium__disk="$(lsblk -dno PKNAME "${medium}" 2>/dev/null | tr -d ' ')"
     medium="${_medium__disk:-${medium#/dev/}}"
 fi
-plan=""; user=""; password=""
+plan=""; user=""; password=""; choices=""; free=""
+map="$(mktemp)" || _die "no temporary file"
+trap 'rm -f "${map}"' EXIT
+trap 'exit 130' INT TERM HUP
 
 case "${verb}" in
     facts)
-        printf "%s\n" "firmware ${firmware}" "root-mib ${root_mib}" "esp-mib ${esp_mib}" "medium ${medium:--}" \
-            "try ${try:-no}" "log ${log}" ;;
-    disks) _list_disks ;;
+        applying="$(_applying)"
+        printf "%s\n" "firmware ${firmware}" "root-mib ${root_mib}" "esp-mib ${esp_mib}" "system-mib ${system_mib}" \
+            "medium ${medium:--}" "try ${try:-no}" "log ${log}" "progress ${progress}" "applying ${applying:--}" ;;
+    disks) _scan; _list_disks ;;
     partitions)
         [ "${#}" -le 1 ] || _usage
         [ "${#}" = 0 ] || _is_disk "${1}" || _die "${1} is not a disk"
-        _list_partitions "${1:-}" ;;
+        _scan; _list_partitions "${1:-}" ;;
     show)
         [ "${#}" = 1 ] || _usage
         _is_disk "${1}" || _die "${1} is not a disk"
-        _show_disk "${1}" ;;
+        _scan; _show_disk "${1}" ;;
     needs) _show_needs ;;
     plan)
+        _scan
         case "${1:-}" in
             whole) [ "${#}" = 2 ] || _usage; _plan_whole "${2}" ;;
             partitions) { [ "${#}" -ge 2 ] && [ "${#}" -le 4 ]; } || _usage; shift; _plan_partitions "${@}" ;;
             *) _usage ;;
         esac ;;
-    check|describe)
-        [ "${#}" = 1 ] || _usage
+    edit)
+        [ "${#}" -ge 2 ] || _usage
+        _is_disk "${1}" || _die "${1} is not a disk"
+        _edit__disk="${1}"; _edit__file="${2}"; shift 2
+        for _edit__word; do
+            case "${_edit__word}" in
+                use=*|root=*|rootfs=*|home=*|homefs=*|esp=*|espfs=*) choices="${choices}${choices:+ }${_edit__word}" ;;
+                *) _die "${_edit__word} is no choice" ;;
+            esac
+        done
+        _scan; _edit "${_edit__disk}" "${_edit__file}" ;;
+    review|check|describe)
+        [ "${#}" -ge 1 ] || _usage
         plan="${1}"; [ -f "${plan}" ] || _die "no plan ${plan}"
-        if [ "${verb}" = "describe" ]; then
-            _describe
-        else
-            problems="$(_check)"
-            [ -z "${problems}" ] || { printf "%s\n" "${problems}"; exit 1; }
-        fi ;;
+        _scan
+        case "${verb}" in
+            describe) _describe ;;
+            review)
+                _review__disk="${2:-}"
+                [ -n "${_review__disk}" ] || _review__disk="$(_plan_one root)"
+                [ -z "${_review__disk}" ] || _is_disk "${_review__disk}" || _review__disk="$(_disk_of "${_review__disk}")"
+                _review "${_review__disk:-none}" ;;
+            check)
+                problems="$(_check)"
+                [ -z "${problems}" ] || { printf "%s\n" "${problems}"; exit 1; } ;;
+        esac ;;
     user)
         [ "${#}" = 1 ] || _usage
         problems="$(_user_refusal "${1}")"
@@ -660,9 +1493,13 @@ case "${verb}" in
         [ "${#}" = 2 ] || _usage
         plan="${1}"; user="${2}"; [ -f "${plan}" ] || _die "no plan ${plan}"
         IFS= read -r password || :
+        [ -z "$(_applying)" ] || _die "an install is running already (process $(_applying)): what it says is in ${log}"
+        _scan
         problems="$(_check; _user_refusal "${user}"; _password_refusal "${password}")"
         [ -z "${problems}" ] || { printf "%s\n" "${problems}" >&2; _die "the plan is not applied: nothing was written"; }
-        : > "${log}"; rm -f "${status}"
+        : > "${log}"; rm -f "${status}" "${progress}"
+        printf "%s\n" "${$}" > "${pidfile}"
+        trap 'rm -f "${map}" "${pidfile}"' EXIT
         trap 'printf "%s\n" 130 > "${status}"; exit 130' INT TERM HUP
         #what is said goes to the terminal and to the log; _apply's exit status leaves the pipe to tee
         #through descriptor 3
@@ -675,6 +1512,7 @@ case "${verb}" in
         [ "${#}" = 1 ] || _usage
         [ -n "${try}" ] || _die "empty is for --try"
         _is_disk "${1}" || _die "${1} is not a disk"
+        _scan
         problems="$(_disk_refusal "${1}")"
         [ -z "${problems}" ] || _die "${1}: ${problems}"
         # shellcheck disable=SC2046 # device names, a word each

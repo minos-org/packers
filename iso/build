@@ -72,6 +72,10 @@ _fetch_setup() { #source file => the minos installer in FILE: a copy of a local 
         *) [ -f "${1}" ] || _die "no ${1}"; cp "${1}" "${2}" ;;
     esac
     grep -q '^_minos_archive_key()' "${2}" || _die "${1}: not the minos installer, it carries no archive key"
+    #the live session's installer (iso/installer) gives it the password on its standard input and has it
+    #start with no countdown of its own: an installer that takes neither would stop with the disk written
+    grep -q -e '--now)' "${2}" ||
+        _die "${1}: older than the installer of iso/installer, it takes no --now and no password on its standard input"
     chmod 755 "${2}"
 }
 
@@ -699,12 +703,14 @@ _write_menu() { #file => GRUB's menu, for BIOS and UEFI alike: the live session,
     #kernel keeps the display GRUB leaves (gfxpayload=keep) and simpledrm draws on it. On BIOS that is a
     #graphics mode GRUB sets (VBE), since text mode leaves simpledrm nothing; on UEFI it is the firmware's
     #own (the panel's), which GRUB does not touch: when GRUB changes it (gfxterm), the kernel draws on a
-    #framebuffer the display does not scan as drawn
+    #framebuffer the display does not scan as drawn. noprompt: when the session restarts or powers off,
+    #casper does not ask for the medium to be taken out and wait for Enter (casper-stop), a question minos'
+    #boot screen does not show: by UEFI the machine sat dark until a key was pressed
     printf "%s\\n" "#the menu of the minos ISO" "set timeout=5" "" \
         "if [ \"\${grub_platform}\" = \"pc\" ]; then" "    insmod all_video" "    if loadfont unicode; then" \
         "        insmod gfxterm" "        set gfxmode=auto" "        terminal_output gfxterm" "    fi" "fi" "" \
         "menuentry \"Try minos ${number}\" {" "    set gfxpayload=keep" \
-        "    linux /casper/vmlinuz quiet splash ---" "    initrd /casper/initrd" "}" > "${1}"
+        "    linux /casper/vmlinuz quiet splash noprompt ---" "    initrd /casper/initrd" "}" > "${1}"
 }
 
 _write_efi_image() { #boot image => IMAGE, the EFI system partition of the ISO, a FAT image of just its

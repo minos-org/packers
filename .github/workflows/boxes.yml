@@ -262,8 +262,8 @@ jobs:
 
   # the ISO of minos-desktop of each release, built from scratch and used in QEMU as a person uses it
   # (ci/iso): its live session by BIOS from a CD, by UEFI with Secure Boot from a USB stick and with the
-  # network's cable out; minos installed from it onto an empty disk with no network, by UEFI and by BIOS,
-  # and that disk alone
+  # network's cable out; minos installed from it with no network, its installer answered by its keys, onto
+  # an empty disk by UEFI and by BIOS and beside what a disk holds, and each disk alone
   iso:
     name: iso-${{ matrix.release }}
     needs: decide
@@ -300,7 +300,7 @@ jobs:
               sudo tee /etc/apt/apt.conf.d/99minos-timeouts >/dev/null
           sudo apt-get update -q
           sudo NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-              debootstrap squashfs-tools xorriso dosfstools mtools kmod wget \
+              debootstrap squashfs-tools xorriso dosfstools mtools kmod wget fdisk \
               qemu-system-x86 qemu-utils ovmf socat netpbm
           printf '%s\n' "installed in $(($(date +%s) - start))s; $(qemu-system-x86_64 --version | head -1); debootstrap $(dpkg-query -W -f='${Version}' debootstrap)"
 

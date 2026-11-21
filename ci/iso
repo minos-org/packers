@@ -4,9 +4,10 @@
 #minos.io/s, then used in QEMU the way a person uses it. Its live session boots by BIOS from a CD and by UEFI
 #with Secure Boot from a USB stick (iso/live-check), and its probe says what the session is, ci/probe-common
 #among it; the session boots with the network's cable out too, and must come up all the same, with its
-#plugins. Then minos is installed from the live session onto an empty disk with no network, by UEFI and by
-#BIOS, and that disk boots alone, by UEFI with a network as well, once minos-untrim has given it back what
-#the ISO left out (iso/install-check). One line per check; ci/verdict iso reads them.
+#plugins. Then minos is installed from the live session, its installer answered by its keys, onto an empty
+#disk with no network, by UEFI and by BIOS, and beside what a disk holds; each disk boots alone, by UEFI
+#with a network as well, once minos-untrim has given it back what the ISO left out (iso/install-check).
+#One line per check; ci/verdict iso reads them.
 #usage: [SETUP=FILE|URL] [MIRROR=URI] ci/iso RELEASE
 #  MIRROR, the Ubuntu archive the build fetches from: by default the one this machine's apt reads
 #  (ci/mirror), on a GitHub-hosted runner its cloud's mirror; the ISO's sources say archive.ubuntu.com
@@ -49,10 +50,12 @@ _live() { #label firmware medium cable => LABEL's line, and with the cable in (y
     rm -f "${_live__serial}.lines"
 }
 
-_install() { #label firmware disk phases => LABEL's line; the disk's facts, serial log and screens to the logs
-    _install__name="${2}-${3}"; _install__log="${logs}/install-${_install__name}.log"
+_install() { #label firmware disk phases [layout] => LABEL's line; the disk's facts, serial log and screens to
+    #the logs
+    _install__name="${2}-${3}"; [ -z "${5:-}" ] || _install__name="${_install__name}-${5}"
+    _install__log="${logs}/install-${_install__name}.log"
     _install__start="$(date +%s)"
-    PHASES="${4}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${tmp}/install" 20 > "${_install__log}" 2>&1
+    PHASES="${4}" LAYOUT="${5:-empty}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${tmp}/install" 20 > "${_install__log}" 2>&1
     _install__status="${?}"; _install__secs="$(($(date +%s) - _install__start))"
     mkdir -p "${logs}/install"
     for _install__file in "${tmp}/install/${_install__name}".facts "${tmp}/install/${_install__name}".serial.log \
@@ -114,6 +117,8 @@ _live "live uefi cd, no cable" uefi cd no
 #minos installed from the live session, with no network, then the disk alone
 _install "install uefi sata" uefi sata "install boot untrim"
 _install "install bios sata" bios sata "install boot"
+#beside what a disk holds, the plan changed in the installer, on a disk the kernel names as NVMe ones
+_install "install uefi nvme, beside" uefi nvme "install boot" beside
 rm -rf "${tmp}/install"
 printf "%s\\n" "--- ${name}.iso took $(($(date +%s) - began))s"
 

@@ -66,6 +66,8 @@ awk -v flavour="${flavour}" -v release="${release}" '
             #(iso/install-check); by UEFI also with a network, until minos-untrim gave back what the ISO left out
             must("^install uefi sata$", "^ok ")
             must("^install bios sata$", "^ok ")
+            #and beside what a disk holds, the plan changed in the installer, on an NVMe disk
+            must("^install uefi nvme, beside$", "^ok ")
         } else {
             common(flavour, "vagrant")
             must("^packer build \\(ppa\\)$", "^ok ")

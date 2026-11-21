@@ -1,34 +1,42 @@
 #!/bin/sh
-#the installer of the minos ISO's live session (Win+i), as screens in a terminal (whiptail): it shows what
-#the engine beside it (minos-installer-engine) says of this machine, asks where minos goes and for whom,
-#has the engine make a plan, shows that plan, and after one confirmation has it applied. It knows nothing
-#of disks itself and writes nothing to one: another interface can take its place over the same engine.
-#Every screen goes back, and Esc quits. It runs as the user who opened it and asks sudo for the engine
-#alone: when its window is closed it ends, where a whole installer under sudo would stay behind (sudo-rs
-#passes a signal on to the one command it started, not to that command's children).
+#the installer of the minos ISO's live session (Win+i): a wizard drawn in a terminal by this script alone,
+#with escape sequences and keys read one at a time. It shows what the engine beside it
+#(minos-installer-engine) says of this machine, has the engine make the plan and change it, shows that plan
+#(the disk as a bar now and after, what is done in words, the partition table one key away), asks for
+#whom, and after one confirmation has the plan applied and shows it happen. It knows nothing of disks
+#itself and writes nothing to one: every step goes back and forward, every answer is kept, and the
+#terminal is put back as it was on every way out. It runs as the user who opened it and asks sudo for the
+#engine alone: when its window is closed it ends, where a whole installer under sudo would stay behind
+#(sudo-rs passes a signal on to the one command it started, not to that command's children).
 #usage: minos-installer [--window] [--try [--firmware uefi|bios]]
-#  --window     in a terminal of its own (urxvt) the size of the screens: what Win+i runs
+#  --window     in a terminal of its own (urxvt) the size of the screens, floating: what Win+i runs
 #  --try        on a machine that is not the live session, to try the screens: the disk chosen is
 #               partitioned and formatted for real, then the setup command is shown, not run
-#  --firmware   with --try, the firmware the questions are for, whatever this machine started by
-#needs whiptail, cfdisk (fdisk) for the partitions made by hand, what the engine needs, and for another
-#user than root, sudo without a password
+#  --firmware   with --try, the firmware the plans are for, whatever this machine started by
+#  MINOS_INSTALLER_EFFECTS=off in the environment: nothing moves on its own (the intro is drawn at once)
+#needs a terminal of 80 columns by 24 rows that moves its cursor (urxvt, the Linux console, ssh, tmux),
+#stty and dd, what the engine needs, and for another user than root, sudo without a password
 
 set -u
-#a screen, in characters. The terminal around it is 4 more each way, for the title above and the shadow
-#whiptail draws, and the one --window opens 2 more still: i3 takes the border of a floating window out
-#of the size asked for
-box_columns=76; box_rows=20
+set -f
+#the screens: a canvas of 80 columns by 24 rows in the middle of the terminal, 20 rows by 76 columns of
+#it for what a step shows. The terminal --window opens is 3 more each way: i3 takes the border of a
+#floating window out of the size asked for, a column and a row, and the 2 left are a margin of 1 around
+#the canvas
+canvas_columns=80; canvas_rows=24; body_rows=20; body_columns=76; bar_columns=60
 
 _usage() { #=> the usage, on stderr, exit 2
-    sed -n '9,13s/^#//p' "${0}" >&2
+    sed -n '11,16s/^#//p' "${0}" >&2
     exit 2
 }
 
-_end() { #message... => said on the terminal, which stays open until Enter: for what goes wrong before
-    #there are screens
-    printf "%s\n" "minos installer" "" "${@}" "" "Press Enter to close."
-    IFS= read -r _ || :
+_end() { #message... => said on the terminal, which stays open until Enter when it is the installer's own
+    #window: for what goes wrong before there are screens
+    printf "%s\n" "minos installer" "" "${@}"
+    if [ -n "${MINOS_INSTALLER_WINDOW:-}" ]; then
+        printf "%s\n" "" "Press Enter to close."
+        IFS= read -r _ || :
+    fi
     exit 1
 }
 
@@ -39,271 +47,1380 @@ _open_window() { #argument... => the installer with ARGUMENTS in a terminal of i
         i3-msg '[instance="^minos-installer$"] focus' >/dev/null 2>&1
         exit 0
     fi
-    exec urxvt -name minos-installer -title "minos installer" -geometry "$((box_columns + 6))x$((box_rows + 6))" \
-        -e sh "${0}" "${@}"
+    MINOS_INSTALLER_WINDOW="yes"; export MINOS_INSTALLER_WINDOW
+    exec urxvt -name minos-installer -title "minos installer" \
+        -geometry "$((canvas_columns + 3))x$((canvas_rows + 3))" -e sh "${0}" "${@}"
 }
 
-_as_root() { #command... => COMMAND run as root: through sudo when this is another user
+_as_root() { #command... => COMMAND run as root: through sudo when this is another user. sudo runs in a
+    #session of its own, with no terminal: one that has this terminal reads the keys typed while its
+    #command runs (sudo's use_pty), and they would be lost to the screens. setsid, run from a script,
+    #is no leader of a process group and so becomes the command itself: its end is waited for, and its
+    #exit status is the command's (util-linux's -w is not asked for, which busybox's setsid lacks)
     if [ "$(id -u)" = 0 ]; then
         "${@}"
     else
-        sudo "${@}"
+        setsid sudo "${@}"
     fi
 }
 
 _engine() { #verb argument... => the engine, as root, told what this installer was told (--try, --firmware)
-    if [ -n "${firmware}" ]; then
-        _as_root sh "${engine}" --try --firmware "${firmware}" "${@}"
-    elif [ -n "${try}" ]; then
-        _as_root sh "${engine}" --try "${@}"
+    # shellcheck disable=SC2086 # the engine's options, a word each
+    _as_root sh "${engine}" ${engine_options} "${@}"
+}
+
+################################################################################
+# The terminal: taken, read a key at a time, and put back as it was
+################################################################################
+
+_term_take() { #=> the terminal as the screens need it: keys come one at a time and are not shown, the
+    #cursor is hidden, and where there is one the screens are drawn on the alternate screen, so what the
+    #terminal showed comes back. What it was is kept for _term_back
+    #descriptor 3 is the terminal from here on: the keys are read from it wherever a function is called
+    #from, also inside a loop that reads its lines from somewhere else
+    exec 3<&0
+    term_saved="$(stty -g <&3)" || _end "The installer cannot read this terminal's settings."
+    trap '_term_back' EXIT
+    trap 'exit 130' INT TERM HUP
+    stty -icanon -echo min 0 time 10 susp undef quit undef <&3
+    term_wait="10"
+    printf '\033[?1049h\033[?25l\033[0m\033[2J'
+    term_taken="yes"
+    term_size=""; screen=""; view=""
+    _fit
+}
+
+_fit() { #=> origin_row and origin_column, where the canvas goes in the terminal as it is now: its middle.
+    #A window is not always its final size when the installer starts in it (i3 floats the installer's
+    #own after it opens), and a person may change it. A terminal that became too small says so, until
+    #it is large enough again or the person quits
+    while :; do
+        _fit__size="$(stty size <&3 2>/dev/null)"
+        [ "${_fit__size}" != "${term_size}" ] || return 0
+        term_size="${_fit__size}"
+        # shellcheck disable=SC2086 # the rows and the columns, two words
+        set -- ${term_size:-0 0}
+        if [ "${1:-0}" -ge "${canvas_rows}" ] && [ "${2:-0}" -ge "${canvas_columns}" ]; then
+            origin_row="$(( (${1} - canvas_rows) / 2 ))"; origin_column="$(( (${2} - canvas_columns) / 2 ))"
+            screen="${c_esc}[0m${c_esc}[2J"; view=""
+            return 0
+        fi
+        printf '\033[0m\033[2J\033[H%s\n%s\n' "The installer needs ${canvas_columns} columns by ${canvas_rows} rows: this terminal has ${2:-0} by ${1:-0}." \
+            "Make it larger; q quits."
+        screen=""
+        _key
+        [ "${key}" != "q" ] || exit 1
+    done
+}
+
+_term_back() { #=> the terminal as it was: its settings, its cursor and what it showed. A terminal with no
+    #alternate screen (the Linux console) is cleared, the installer's last screen being all it holds
+    [ -n "${term_taken:-}" ] || return 0
+    term_taken=""; screen=""
+    printf '\033[0m\033[?25h\033[?1049l'
+    case "${TERM:-}" in linux*|vt*|ansi*|cons*) printf '\033[2J\033[H' ;; esac
+    stty "${term_saved}" <&3 2>/dev/null
+    [ -z "${work:-}" ] || rm -rf "${work}"
+}
+
+_title() { #step => the window's title says the step, in the installer's own window alone: another
+    #terminal's title is not this script's to change
+    [ -z "${MINOS_INSTALLER_WINDOW:-}" ] || printf '\033]2;minos installer - %s\007' "${1}"
+}
+
+_key() { #[tenths] => key, the next key pressed, by its name: a character as itself; enter, esc, tab,
+    #backtab, backspace, delete, up, down, left, right, home, end, pageup, pagedown, clear (Ctrl-U),
+    #redraw (Ctrl-L), other; resize, when the terminal changed its size while no key came. With TENTHS of
+    #a second, none when no key comes in that time (0: at once).
+    #key_fresh says the key was read just now, not found behind another in what an earlier read gave
+    key_fresh=""
+    #what was drawn since the last key, written at once: a screen changes whole, never line by line
+    [ -z "${screen}" ] || { printf '%s' "${screen}"; screen=""; }
+    if [ -z "${keys_ahead}" ]; then
+        key_fresh="yes"
+        #a read never waits for ever: with no time said, a second at a time, again and again, so that a
+        #signal to this script alone (which the shell sees once the read ends) is answered within one
+        if [ "${1:-10}" != "${term_wait}" ]; then
+            term_wait="${1:-10}"
+            stty min 0 time "${term_wait}" <&3
+        fi
+        while :; do
+            #what one read gives: a key, the bytes of one (an arrow is three), or the keys typed ahead.
+            #The x keeps a newline at the end, which a command substitution would drop
+            keys_ahead="$(dd bs=64 count=1 <&3 2>/dev/null; printf x)"; keys_ahead="${keys_ahead%x}"
+            [ -z "${keys_ahead}" ] || break
+            [ -z "${1:-}" ] || { key="none"; return 0; }
+            #nothing in a second: the terminal may have changed its size meanwhile
+            [ "$(stty size <&3 2>/dev/null)" = "${term_size}" ] || { key="resize"; return 0; }
+        done
+    fi
+    _key__rest="${keys_ahead#?}"; key="${keys_ahead%"${_key__rest}"}"; keys_ahead="${_key__rest}"
+    case "${key}" in
+        "${c_esc}")
+            #alone, the Esc key; with more behind it, a key that says itself in several bytes, which may
+            #still be on their way
+            if [ -z "${keys_ahead}" ]; then
+                stty min 0 time 1 <&3; term_wait="1"
+                keys_ahead="$(dd bs=64 count=1 <&3 2>/dev/null; printf x)"; keys_ahead="${keys_ahead%x}"
+            fi
+            case "${keys_ahead}" in
+                "["*|O*)
+                    keys_ahead="${keys_ahead#?}"; _key__args=""
+                    while :; do
+                        _key__rest="${keys_ahead#?}"; _key__byte="${keys_ahead%"${_key__rest}"}"; keys_ahead="${_key__rest}"
+                        case "${_key__byte}" in
+                            [0-9\;]) _key__args="${_key__args}${_key__byte}" ;;
+                            *) break ;;
+                        esac
+                    done
+                    case "${_key__byte}${_key__args}" in
+                        A) key="up" ;; B) key="down" ;; C) key="right" ;; D) key="left" ;;
+                        H|"~1"|"~7") key="home" ;; F|"~4"|"~8") key="end" ;;
+                        Z) key="backtab" ;; "~3") key="delete" ;; "~5") key="pageup" ;; "~6") key="pagedown" ;;
+                        *) key="other" ;;
+                    esac ;;
+                *) key="esc" ;;
+            esac ;;
+        "${c_nl}"|"${c_cr}") key="enter" ;;
+        "${c_tab}") key="tab" ;;
+        "${c_del}"|"${c_bs}") key="backspace" ;;
+        "${c_ctrl_u}") key="clear" ;;
+        "${c_ctrl_l}") key="redraw" ;;
+    esac
+}
+
+_tick() { #=> a frame of an effect: true when it goes on, false once a key was pressed (the key is taken)
+    #or the effect has had its two seconds, looked at every 8 frames
+    _key 0
+    [ "${key}" = "none" ] || return 1
+    effect_frames="$((effect_frames + 1))"
+    [ "$((effect_frames % 8))" != 0 ] || [ "$(($(date +%s) - effect_began))" -lt 2 ] || return 1
+    sleep 0.03
+}
+
+################################################################################
+# Drawing: every screen is made of these
+################################################################################
+
+_rep() { #text count => rep, TEXT COUNT times
+    rep=""; _rep__left="${2}"
+    while [ "${_rep__left}" -gt 0 ]; do rep="${rep}${1}"; _rep__left="$((_rep__left - 1))"; done
+}
+
+_row() { #row style text => row ROW of the body, emptied, with TEXT in STYLE: plain characters, cut at the
+    #body's width. Like everything drawn, it goes to screen, which _key writes out whole
+    _row__text="${3}${blank_row}"
+    # shellcheck disable=SC2295 # the pattern of 76 characters is one
+    screen="${screen}${c_esc}[$((origin_row + ${1} + 1));$((origin_column + 3))H${2}${_row__text%"${_row__text#${first_row}}"}${s_off}"
+}
+
+_put() { #row column style text => TEXT in STYLE from COLUMN of row ROW of the body, over what is there
+    screen="${screen}${c_esc}[$((origin_row + ${1} + 1));$((origin_column + ${2} + 2))H${3}${4}${s_off}"
+}
+
+_rest() { #row => the rows of the body from ROW on, emptied
+    _rest__row="${1}"
+    while [ "${_rest__row}" -le "${body_rows}" ]; do
+        _row "${_rest__row}" "" ""
+        _rest__row="$((_rest__row + 1))"
+    done
+}
+
+_wrap() { #width text => wrapped, TEXT as lines of WIDTH columns at most; wrapped_count, how many
+    wrapped=""; wrapped_count=0; _wrap__line=""
+    for _wrap__word in ${2}; do
+        if [ -z "${_wrap__line}" ]; then
+            _wrap__line="${_wrap__word}"
+        elif [ "$((${#_wrap__line} + 1 + ${#_wrap__word}))" -le "${1}" ]; then
+            _wrap__line="${_wrap__line} ${_wrap__word}"
+        else
+            wrapped="${wrapped}${_wrap__line}${c_nl}"; wrapped_count="$((wrapped_count + 1))"
+            _wrap__line="${_wrap__word}"
+        fi
+    done
+    [ -z "${_wrap__line}" ] || { wrapped="${wrapped}${_wrap__line}${c_nl}"; wrapped_count="$((wrapped_count + 1))"; }
+}
+
+_rows() { #row style indent most text => TEXT wrapped from row ROW of the body, each line INDENT in, MOST
+    #lines of it; row is left on the row after the last one
+    _wrap "$((body_columns - ${3}))" "${5}"
+    row="${1}"; _rows__left="${4}"; _rep " " "${3}"
+    while IFS= read -r _rows__line; do
+        [ -n "${_rows__line}" ] || continue
+        [ "${_rows__left}" -gt 0 ] || break
+        _row "${row}" "${2}" "${rep}${_rows__line}"
+        row="$((row + 1))"; _rows__left="$((_rows__left - 1))"
+    done << E=O=F
+${wrapped}
+E=O=F
+}
+
+_frame() { #step key label... => the frame of a screen: the installer's name and the steps along the top,
+    #STEP (a name of steps, or none) lit; the sides; and along the bottom the KEYs of this screen, each
+    #with its LABEL (a key that starts with ~ does nothing here, and is dimmed). A screen with another
+    #step or other keys than the last one is another view: the terminal is emptied first, so nothing
+    #of the last one stays
+    _fit
+    if [ "${*}" != "${view}" ]; then
+        view="${*}"; screen="${screen}${c_esc}[0m${c_esc}[2J"
+    fi
+    _frame__step="${1}"; shift
+    #the top: ┌─ minos installer ────── 1 disk ─ 2 plan ─ 3 user ─ 4 confirm ─ 5 install ─┐
+    _frame__length=0; _frame__n=0
+    for _frame__name in ${steps}; do
+        _frame__n="$((_frame__n + 1))"
+        _frame__item=" ${_frame__n} ${_frame__name} "
+        _frame__length="$((_frame__length + ${#_frame__item} + 1))"
+    done
+    _rep "${g_h}" "$((canvas_columns - 21 - _frame__length))"
+    screen="${screen}${c_esc}[$((origin_row + 1));$((origin_column + 1))H${s_frame}${g_tl}${g_h}${s_bold} minos installer ${s_off}${s_frame}${rep}${g_h}"
+    _frame__n=0; _frame__style="${s_off}"
+    [ "${_frame__step}" != "none" ] || _frame__style="${s_dim}"
+    for _frame__name in ${steps}; do
+        _frame__n="$((_frame__n + 1))"
+        if [ "${_frame__name}" = "${_frame__step}" ]; then
+            screen="${screen}${s_here} ${_frame__n} ${_frame__name} ${s_off}${s_frame}${g_h}"
+            _frame__style="${s_dim}"
+        else
+            screen="${screen}${s_off}${_frame__style} ${_frame__n} ${_frame__name} ${s_off}${s_frame}${g_h}"
+        fi
+    done
+    screen="${screen}${g_tr}${s_off}"
+    #the sides, and the rule above the keys
+    _frame__row=2
+    while [ "${_frame__row}" -le "$((canvas_rows - 1))" ]; do
+        screen="${screen}${c_esc}[$((origin_row + _frame__row));$((origin_column + 1))H${s_frame}${g_v}${c_esc}[$((origin_row + _frame__row));$((origin_column + canvas_columns))H${g_v}${s_off}"
+        _frame__row="$((_frame__row + 1))"
+    done
+    _rep "${g_h}" "$((canvas_columns - 2))"
+    screen="${screen}${c_esc}[$((origin_row + canvas_rows - 2));$((origin_column + 1))H${s_frame}${g_lt}${rep}${g_rt}${s_off}"
+    #the bottom, which says try mode
+    if [ -n "${try}" ]; then
+        _frame__note=" try mode: the disk is written for real, minos is not installed "
+        _rep "${g_h}" "$((canvas_columns - 4 - ${#_frame__note}))"
+        screen="${screen}${c_esc}[$((origin_row + canvas_rows));$((origin_column + 1))H${s_frame}${g_bl}${rep}${s_warn}${_frame__note}${s_off}${s_frame}${g_h}${g_h}${g_br}${s_off}"
     else
-        _as_root sh "${engine}" "${@}"
+        screen="${screen}${c_esc}[$((origin_row + canvas_rows));$((origin_column + 1))H${s_frame}${g_bl}${rep}${g_br}${s_off}"
+    fi
+    _keys "${@}"
+}
+
+_keys() { #key label... => the row of keys at the bottom of the frame
+    screen="${screen}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H${blank_row}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H"
+    while [ "${#}" -ge 2 ]; do
+        case "${1}" in
+            "~"*) screen="${screen}${s_dim}${1#"~"} ${2}${s_off}   " ;;
+            *) screen="${screen}${s_bold}${1}${s_off} ${2}   " ;;
+        esac
+        shift 2
+    done
+}
+
+_ask_quit() { #=> asked in the row of keys whether to quit; true when the person says so
+    screen="${screen}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H${blank_row}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H${s_warn}Quit the installer? ${written}${s_off}   ${s_bold}y${s_off} quits   ${s_bold}any other key${s_off} stays"
+    _key
+    [ "${key}" = "y" ] || [ "${key}" = "Y" ]
+}
+
+_bar() { #row which => the disk as a bar on row ROW of the body: WHICH is now or after, the rows the
+    #engine gave of it. A partition is a stretch of ground as wide as its share of the disk, 3 columns
+    #at least, with its name and size when they fit; free room is an empty frame. The names that did
+    #not fit are left in captions, for the row under the two bars
+    if [ "${2}" = "now" ]; then _bar__rows="${r_now}"; else _bar__rows="${r_after}"; fi
+    if [ "${2}" = "now" ]; then _put "${1}" 3 "${s_dim}" "Now"; else _put "${1}" 3 "${s_dim}" "After"; fi
+    #how wide each stretch is: its share of the columns the gaps leave, 3 at least; the widest one
+    #gives back what the small ones took
+    _bar__total=0; _bar__count=0
+    while IFS="${c_tab}" read -r _ _bar__mib _ _bar__kind _; do
+        { [ -n "${_bar__mib}" ] && [ "${_bar__kind}" != "frame" ]; } || continue
+        _bar__total="$((_bar__total + _bar__mib))"; _bar__count="$((_bar__count + 1))"
+    done << E=O=F
+${_bar__rows}
+E=O=F
+    [ "${_bar__count}" -gt 0 ] || return 0
+    _bar__least=3; [ "${_bar__count}" -le 12 ] || _bar__least=1
+    _bar__room="$((bar_columns - _bar__count + 1))"
+    _bar__widths=""; _bar__sum=0; _bar__widest=0; _bar__at=0; _bar__index=0
+    while IFS="${c_tab}" read -r _ _bar__mib _ _bar__kind _; do
+        { [ -n "${_bar__mib}" ] && [ "${_bar__kind}" != "frame" ]; } || continue
+        _bar__index="$((_bar__index + 1))"
+        _bar__width="$((_bar__mib * _bar__room / (_bar__total > 0 ? _bar__total : 1)))"
+        [ "${_bar__width}" -ge "${_bar__least}" ] || _bar__width="${_bar__least}"
+        [ "${_bar__width}" -le "${_bar__widest}" ] || { _bar__widest="${_bar__width}"; _bar__at="${_bar__index}"; }
+        _bar__widths="${_bar__widths} ${_bar__width}"; _bar__sum="$((_bar__sum + _bar__width))"
+    done << E=O=F
+${_bar__rows}
+E=O=F
+    # shellcheck disable=SC2086 # the widths, a word each
+    set -- "${1}" "${2}" ${_bar__widths}
+    _bar__row="${1}"; _bar__which="${2}"; shift 2
+    _bar__column=11; _bar__index=0
+    while IFS="${c_tab}" read -r _ _bar__mib _bar__size _bar__kind _ _bar__name _bar__fate _; do
+        { [ -n "${_bar__mib}" ] && [ "${_bar__kind}" != "frame" ]; } || continue
+        _bar__index="$((_bar__index + 1))"
+        _bar__width="${1}"; shift
+        [ "${_bar__index}" != "${_bar__at}" ] || _bar__width="$((_bar__width + _bar__room - _bar__sum))"
+        [ "${_bar__width}" -ge 1 ] || _bar__width=1
+        _bar__text=" ${_bar__name} ${g_dot} ${_bar__size}"; _bar__length="$((${#_bar__name} + ${#_bar__size} + 4))"
+        if [ "${_bar__length}" -ge "${_bar__width}" ]; then
+            _bar__text=" ${_bar__name}"; _bar__length="$((${#_bar__name} + 1))"
+            if [ "${_bar__length}" -ge "${_bar__width}" ]; then
+                _bar__text=""; _bar__length=0
+                captions="${captions}${captions:+   }${_bar__name} ${_bar__size}"
+            fi
+        fi
+        if [ "${_bar__kind}" = "free" ]; then
+            #free room: an empty frame, its name in the middle
+            if [ "${_bar__width}" -ge 2 ]; then
+                _bar__side="$(( (_bar__width - 2 - _bar__length - (_bar__length > 0 ? 1 : 0)) / 2 ))"
+                [ "${_bar__side}" -ge 0 ] || _bar__side=0
+                _rep "${g_h}" "${_bar__side}"; _bar__left="${rep}"
+                _rep "${g_h}" "$((_bar__width - 2 - _bar__length - (_bar__length > 0 ? 1 : 0) - _bar__side))"
+                _put "${_bar__row}" "${_bar__column}" "${s_dim}" "${g_lt}${_bar__left}${_bar__text}${_bar__text:+ }${rep}${g_rt}"
+            else
+                _put "${_bar__row}" "${_bar__column}" "${s_dim}" "${g_h}"
+            fi
+        else
+            case "${_bar__which}:${_bar__fate}" in
+                now:kept|after:kept) _bar__style="${s_kept}" ;;
+                now:*) _bar__style="${s_gone}" ;;
+                *) _bar__style="${s_new}" ;;
+            esac
+            _rep " " "$((_bar__width - _bar__length))"
+            _put "${_bar__row}" "${_bar__column}" "${_bar__style}" "${_bar__text}${rep}"
+        fi
+        _bar__column="$((_bar__column + _bar__width + 1))"
+    done << E=O=F
+${_bar__rows}
+E=O=F
+}
+
+_bars() { #row => the disk now and after on ROW and the next row of the body, and under them the names
+    #that did not fit; row is left on the row after
+    _row "${1}" "" ""; _row "$((${1} + 1))" "" ""
+    captions=""; _bar "${1}" now
+    _bars__now="${captions}"; captions=""; _bar "$((${1} + 1))" after
+    if [ -n "${_bars__now}" ] && [ -n "${captions}" ] && [ "${_bars__now}" != "${captions}" ]; then
+        _row "$((${1} + 2))" "${s_dim}" "          now: ${_bars__now}   after: ${captions}"
+    else
+        _row "$((${1} + 2))" "${s_dim}" "          ${captions:-${_bars__now}}"
+    fi
+    row="$((${1} + 3))"
+}
+
+_buttons() { #row focus left left-style right right-style => two buttons on row ROW of the body, the one
+    #in FOCUS (left, right) lit
+    _row "${1}" "" ""
+    if [ "${2}" = "left" ]; then
+        _put "${1}" 5 "${s_here}" "[ ${3} ]"
+        _put "${1}" "$((5 + ${#3} + 4 + 4))" "${6}" "[ ${5} ]"
+    else
+        _put "${1}" 5 "${4}" "[ ${3} ]"
+        _put "${1}" "$((5 + ${#3} + 4 + 4))" "${6}${s_reverse}" "[ ${5} ]"
     fi
 }
 
-_text() { #line... => the lines, one text
-    printf "%s\n" "${@}"
+################################################################################
+# What the engine says, kept for the screens
+################################################################################
+
+_load() { #=> the plan choices make for disk, as the engine makes it: the plan in its file, its rows in
+    #the r_ variables, choices as the engine took them. False when the engine fails; what it said is
+    #in errors
+    r_problems=""; r_problem_count=0; r_now=""; r_after=""; r_actions=""; r_lines=""; r_line_count=0
+    r_options=""; r_sizes=""; r_loss_kind="none"; r_loss=""; r_button_kind="plain"; r_button=""; r_disk=""
+    # shellcheck disable=SC2086 # the choices, a word each
+    _load__rows="$(_engine edit "${disk}" "${plan}" ${choices} 2>"${errors}")" || return 1
+    while IFS="${c_tab}" read -r _load__tag _load__rest; do
+        case "${_load__tag}" in
+            choices) choices="${_load__rest}" ;;
+            disk) r_disk="${_load__rest}" ;;
+            line) r_lines="${r_lines}${_load__rest}${c_nl}"; r_line_count="$((r_line_count + 1))" ;;
+            option) r_options="${r_options}${_load__rest}${c_nl}" ;;
+            size) r_sizes="${r_sizes}${_load__rest}${c_nl}" ;;
+            problem) r_problems="${r_problems}${_load__rest}${c_nl}"; r_problem_count="$((r_problem_count + 1))" ;;
+            now) r_now="${r_now}${_load__rest}${c_nl}" ;;
+            after) r_after="${r_after}${_load__rest}${c_nl}" ;;
+            action) r_actions="${r_actions}${_load__rest}${c_nl}" ;;
+            loss) r_loss_kind="${_load__rest%%"${c_tab}"*}"; r_loss="${_load__rest#*"${c_tab}"}" ;;
+            button) r_button_kind="${_load__rest%%"${c_tab}"*}"; r_button="${_load__rest#*"${c_tab}"}" ;;
+        esac
+    done << E=O=F
+${_load__rows}
+E=O=F
+    #the disk in a line: its model, its size, what it holds, its name
+    IFS="${c_tab}" read -r _load__device _load__size _load__model _load__holds << E=O=F
+${r_disk}
+E=O=F
+    disk_model="${_load__model}"; [ "${disk_model}" != "-" ] || disk_model="disk"
+    disk_size="${_load__size}"; disk_holds="${_load__holds}"
+    loaded="${disk} ${choices}"
 }
 
-_split_lines() { #text => lines, the lines of TEXT as words for eval "set -- ${lines}": each one quoted,
-    #whatever it holds
-    lines="$(printf "%s\n" "${1}" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/" | tr '\n' ' ')"
+_choose() { #word... => choices with each WORD (KEY=VALUE) in the place of the one of its key
+    for _choose__word; do
+        _choose__kept=""
+        for _choose__old in ${choices}; do
+            [ "${_choose__old%%=*}" = "${_choose__word%%=*}" ] || _choose__kept="${_choose__kept}${_choose__kept:+ }${_choose__old}"
+        done
+        choices="${_choose__kept}${_choose__kept:+ }${_choose__word}"
+    done
+}
+
+_failed() { #what => a screen for what the engine could not do: what it said, and the way out
+    _frame none "Enter" "close"
+    _row 1 "" ""; _row 2 "${s_bold}" "  ${1}"; _row 3 "" ""
+    _rows 4 "${s_warn}" 4 12 "$(tr '\n' ' ' < "${errors}" 2>/dev/null)"
+    _rest "${row}"
+    _key
+    exit 1
 }
 
 ################################################################################
-# The screens: every one goes through these functions, so another toolkit takes
-# whiptail's place by changing them alone. One that asks leaves the answer in
-# the variable answer and returns 0; 1 when the person goes back (the second
-# button); 2 after an Esc that did not quit, for the same screen to be shown again
+# The intro: one screen, drawn in a style. Each style is one function, which
+# shows the same lines its own way and can be taken out without the others
 ################################################################################
 
-_ui() { #whiptail's options... => the box, in the installer's colours; on stdout what the person chose or
-    #typed. whiptail draws on its stdout and answers on its stderr: the two change places around it
-    NEWT_COLORS="${colours}" whiptail --backtitle "${backtitle}" "${@}" 3>&1 1>&2 2>&3
+intro_styles="cipher teletype scan"
+
+_intro_lines() { #=> intro, the lines of the intro screen, "row column style text" a line, tab-separated:
+    #the name in blocks, what this machine is, what is about to happen
+    intro=""
+    _intro_lines__row=2
+    for _intro_lines__cells in "X...X XXX X...X .XXX. .XXXX" "XX.XX .X. XX..X X...X X...." "X.X.X .X. X.X.X X...X .XXX." \
+        "X...X .X. X..XX X...X ....X" "X...X XXX X...X .XXX. XXXX."; do
+        _intro_lines__text=""
+        while [ -n "${_intro_lines__cells}" ]; do
+            _intro_lines__rest="${_intro_lines__cells#?}"
+            case "${_intro_lines__cells%"${_intro_lines__rest}"}" in
+                X) _intro_lines__text="${_intro_lines__text}${g_block}${g_block}" ;;
+                *) _intro_lines__text="${_intro_lines__text}  " ;;
+            esac
+            _intro_lines__cells="${_intro_lines__rest}"
+        done
+        intro="${intro}${_intro_lines__row}${c_tab}12${c_tab}logo${c_tab}${_intro_lines__text}${c_nl}"
+        _intro_lines__row="$((_intro_lines__row + 1))"
+    done
+    _intro_lines__disks="$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-" {n++; if (n <= 2) list = list (n > 1 ? ", " : "") substr($1, 6) " " $2 ($3 == "-" ? "" : " " $3)}
+        END {if (!n) print "none minos can go to"; else print substr(list (n > 2 ? ", " n - 2 " more" : ""), 1, 56)}')"
+    _intro_lines__firmware="UEFI"; [ "${firmware_now}" = "uefi" ] || _intro_lines__firmware="BIOS"
+    [ -z "${try}" ] || _intro_lines__firmware="${_intro_lines__firmware} (try mode: f asks as the other one would)"
+    intro="${intro}8${c_tab}12${c_tab}dim${c_tab}the installer: this live system, copied to a disk${c_nl}"
+    intro="${intro}10${c_tab}5${c_tab}plain${c_tab}> firmware     ${_intro_lines__firmware}${c_nl}"
+    intro="${intro}11${c_tab}5${c_tab}plain${c_tab}> disks        ${_intro_lines__disks}${c_nl}"
+    intro="${intro}12${c_tab}5${c_tab}plain${c_tab}> system       ${system_size}, copied as it runs here: no network needed${c_nl}"
+    intro="${intro}13${c_tab}5${c_tab}plain${c_tab}> writes       none until you confirm, on the last step${c_nl}"
+    _intro_lines__steps=""; _intro_lines__n=0
+    for _intro_lines__name in ${steps}; do
+        _intro_lines__n="$((_intro_lines__n + 1))"
+        _intro_lines__steps="${_intro_lines__steps}${_intro_lines__n} ${_intro_lines__name}   "
+    done
+    intro="${intro}15${c_tab}5${c_tab}bold${c_tab}${_intro_lines__steps}${c_nl}"
+    intro="${intro}17${c_tab}5${c_tab}plain${c_tab}Every step goes back and forward, and keeps what you answered.${c_nl}"
+    intro="${intro}18${c_tab}5${c_tab}plain${c_tab}The plan for the disk is proposed: accept it, or change any line of it.${c_nl}"
+    intro="${intro}20${c_tab}5${c_tab}dim${c_tab}intro: ${intro_style}   (s shows the next one: ${intro_styles})${c_nl}"
 }
 
-_ui_status() { #whiptail's exit status => 0 and 1 as they are; Esc (255) asks whether to quit, and then 2
+_intro_style() { #name => style, the escape sequence of a style of the intro's lines
     case "${1}" in
-        0|1) return "${1}" ;;
-    esac
-    #whiptail also leaves that way when its terminal is gone: nobody is there to ask
-    stty size >/dev/null 2>&1 || exit 129
-    if _ui --title "Quit" --yes-button "Quit" --no-button "Stay" --defaultno \
-        --yesno "Quit the installer? ${written}" 8 60; then
-        clear
-        exit 0
-    fi
-    return 2
-}
-
-_ui_message() { #title text [button] => TEXT, until the person presses BUTTON (Continue)
-    _ui --title "${1}" --ok-button "${3:-Continue}" --msgbox "${2}" "${box_rows}" "${box_columns}" || :
-}
-
-_ui_confirm() { #title text yes no [default] => 0 when the person takes YES, 1 for NO; DEFAULT no leaves
-    #the cursor on NO
-    if [ "${5:-yes}" = "no" ]; then
-        _ui --title "${1}" --yes-button "${3}" --no-button "${4}" --defaultno --yesno "${2}" "${box_rows}" "${box_columns}"
-    else
-        _ui --title "${1}" --yes-button "${3}" --no-button "${4}" --yesno "${2}" "${box_rows}" "${box_columns}"
-    fi
-    _ui_status "${?}"
-}
-
-_ui_choose() { #title text default name item... => one ITEM chosen from a list, its NAME in answer; the
-    #cursor starts on the item named DEFAULT
-    _ui_choose__title="${1}"; _ui_choose__text="${2}"; _ui_choose__default="${3}"; shift 3
-    answer="$(_ui --title "${_ui_choose__title}" --ok-button "Continue" --cancel-button "Back" --notags \
-        --default-item "${_ui_choose__default}" --menu "${_ui_choose__text}" "${box_rows}" "${box_columns}" \
-        "$((${#} / 2))" "${@}")"
-    _ui_status "${?}"
-}
-
-_ui_ask() { #title text default => a line typed over DEFAULT, in answer
-    answer="$(_ui --title "${1}" --ok-button "Continue" --cancel-button "Back" \
-        --inputbox "${2}" "${box_rows}" "${box_columns}" "${3}")"
-    _ui_status "${?}"
-}
-
-_ui_password() { #title text => a password typed, shown as stars, in answer
-    answer="$(_ui --title "${1}" --ok-button "Continue" --cancel-button "Back" \
-        --passwordbox "${2}" "${box_rows}" "${box_columns}")"
-    _ui_status "${?}"
-}
-
-################################################################################
-# The questions, in the order of _steps. Each returns 0 to go on, 1 to go back,
-# 2 to be asked again, and 3 when it has nothing to ask (one disk only, no EFI
-# system partition on BIOS): the next one in the person's direction is asked
-################################################################################
-
-_steps() { #=> the questions of the mode chosen, in order
-    case "${mode}" in
-        partitions) printf "%s " welcome disk mode cfdisk root keep esp chosen user password summary ;;
-        *) printf "%s " welcome disk mode whole user password summary ;;
+        logo) style="${s_logo}" ;; bold) style="${s_bold}" ;; dim) style="${s_dim}" ;; *) style="${s_off}" ;;
     esac
 }
 
-_describe_disk() { #disk => its name, size and model, from the engine's list: sdb (16G, VBOX HARDDISK)
-    _engine disks | awk -F '\t' -v disk="${1}" '$1 == disk {printf "%s (%s%s)", substr($1, 6), $2, ($3 == "-" ? "" : ", " $3)}'
+_intro_draw() { #=> the intro as it stays: every line, at once
+    _intro_draw__row=1
+    while IFS="${c_tab}" read -r _intro_draw__at _intro_draw__column _intro_draw__style _intro_draw__text; do
+        [ -n "${_intro_draw__at}" ] || continue
+        while [ "${_intro_draw__row}" -lt "${_intro_draw__at}" ]; do
+            _row "${_intro_draw__row}" "" ""; _intro_draw__row="$((_intro_draw__row + 1))"
+        done
+        _intro_style "${_intro_draw__style}"
+        _row "${_intro_draw__at}" "" ""; _put "${_intro_draw__at}" "${_intro_draw__column}" "${style}" "${_intro_draw__text}"
+        _intro_draw__row="$((_intro_draw__at + 1))"
+    done << E=O=F
+${intro}
+E=O=F
+    _rest "${_intro_draw__row}"
 }
 
-_describe_partitions() { #use [disk] => whiptail's items for the partitions the engine says can be USE
-    #(root, esp), of DISK or of every disk: its device, then a line about it, each on a line of its own
-    _engine partitions ${2:+"${2}"} | awk -F '\t' -v use="${1}" '
-        $3 == use {printf "%s\n%-10s %6s  %-22s %s\n", $1, substr($1, 6), $2, substr($4, 1, 22), substr($5, 1, 24)}'
+_intro_teletype() { #=> the intro typed out: the name a row at a time, then each line a few characters at
+    #a time behind a cursor, as a teletype prints
+    _rest 1
+    while IFS="${c_tab}" read -r _intro_teletype__at _intro_teletype__column _intro_teletype__style _intro_teletype__text; do
+        [ -n "${_intro_teletype__at}" ] || continue
+        _intro_style "${_intro_teletype__style}"
+        if [ "${_intro_teletype__style}" = "logo" ]; then
+            _put "${_intro_teletype__at}" "${_intro_teletype__column}" "${style}" "${_intro_teletype__text}"
+            _tick || return 0
+            continue
+        fi
+        _intro_teletype__typed=""; _intro_teletype__left="${_intro_teletype__text}"
+        while [ -n "${_intro_teletype__left}" ]; do
+            #twelve characters to a frame
+            _intro_teletype__next="${_intro_teletype__left#????????????}"
+            [ "${_intro_teletype__next}" != "${_intro_teletype__left}" ] || _intro_teletype__next=""
+            _intro_teletype__typed="${_intro_teletype__typed}${_intro_teletype__left%"${_intro_teletype__next}"}"
+            _intro_teletype__left="${_intro_teletype__next}"
+            _put "${_intro_teletype__at}" "${_intro_teletype__column}" "${style}" "${_intro_teletype__typed}${s_off}${g_block}"
+            _tick || return 0
+        done
+        _put "${_intro_teletype__at}" "${_intro_teletype__column}" "${style}" "${_intro_teletype__typed} "
+    done << E=O=F
+${intro}
+E=O=F
 }
 
-_ask_welcome() { #=> what is about to happen
-    _ui_confirm "Install minos" "$(_text \
-        "This copies minos, as it runs here, to a disk of this computer. It" \
-        "takes a few minutes and needs no network." "" \
-        "You choose the disk, a user name and a password. Nothing is written" \
-        "to the disk before the last screen, which asks once more.")" "Continue" "Quit"
+_intro_cipher() { #=> the intro out of noise: every line starts as signs drawn by chance and settles,
+    #character by character, into what it says; the name comes up through the greys where the
+    #terminal has them
+    _rest 1
+    _intro_cipher__seed="${$}"; _intro_cipher__frame=1
+    while [ "${_intro_cipher__frame}" -le 11 ]; do
+        while IFS="${c_tab}" read -r _intro_cipher__at _intro_cipher__column _intro_cipher__style _intro_cipher__text; do
+            [ -n "${_intro_cipher__at}" ] || continue
+            if [ "${_intro_cipher__style}" = "logo" ]; then
+                if [ -n "${colours_256}" ]; then
+                    _put "${_intro_cipher__at}" "${_intro_cipher__column}" "$(printf '\033[38;5;%dm' "$((233 + _intro_cipher__frame * 2))")" "${_intro_cipher__text}"
+                elif [ "${_intro_cipher__frame}" = 6 ]; then
+                    _put "${_intro_cipher__at}" "${_intro_cipher__column}" "${s_logo}" "${_intro_cipher__text}"
+                fi
+                continue
+            fi
+            _intro_style "${_intro_cipher__style}"
+            _intro_cipher__shown=""; _intro_cipher__left="${_intro_cipher__text}"; _intro_cipher__n=0
+            while [ -n "${_intro_cipher__left}" ]; do
+                _intro_cipher__rest="${_intro_cipher__left#?}"; _intro_cipher__char="${_intro_cipher__left%"${_intro_cipher__rest}"}"
+                _intro_cipher__left="${_intro_cipher__rest}"; _intro_cipher__n="$((_intro_cipher__n + 1))"
+                #a character settles at a frame of its own, the same each time it is drawn
+                if [ "${_intro_cipher__char}" = " " ] ||
+                   [ "$(( (_intro_cipher__n * 7 + _intro_cipher__at * 13) % 10 ))" -lt "${_intro_cipher__frame}" ]; then
+                    _intro_cipher__shown="${_intro_cipher__shown}${_intro_cipher__char}"
+                else
+                    _intro_cipher__seed="$(( (_intro_cipher__seed * 1103515245 + 12345) % 2147483648 ))"
+                    set -- "#" "%" "&" "@" "$" "+" "=" "<" ">" "/" "|" "[" "]" "{" "}" "0" "1" "2" "3" "4" "5" "6" "7" "8" "9" ":" "!" "?" "^" "~" "*" "x"
+                    shift "$(( (_intro_cipher__seed / 65536) % 32 ))"
+                    _intro_cipher__shown="${_intro_cipher__shown}${1}"
+                fi
+            done
+            _put "${_intro_cipher__at}" "${_intro_cipher__column}" "${style}" "${_intro_cipher__shown}"
+        done << E=O=F
+${intro}
+E=O=F
+        _tick || return 0
+        _tick || return 0
+        _tick || return 0
+        _intro_cipher__frame="$((_intro_cipher__frame + 1))"
+    done
 }
 
-_ask_disk() { #=> disk, the one minos goes to: asked when the machine has several it can go to
-    _ask_disk__disks="$(_engine disks | awk -F '\t' '$4 == "-" {print $1}')"
-    if [ -z "${_ask_disk__disks}" ]; then
-        _ui_message "No disk" "$(_text "There is no disk minos can go to:" "" \
-            "$(_engine disks | awk -F '\t' '{printf "  %s (%s): %s\n", substr($1, 6), $2, $4}')" "" \
-            "Attach a disk, or free one of these, and open the installer again.")" "Close"
-        clear; exit 1
-    fi
-    if [ "$(printf "%s\n" "${_ask_disk__disks}" | grep -c .)" = 1 ]; then
-        disk="${_ask_disk__disks}"
+_intro_scan() { #=> the intro under a scan line: a bright line comes down the screen and leaves each row
+    #behind it, first lit, then as it stays
+    _rest 1
+    _intro_scan__row=1; _rep "${g_h}" "${body_columns}"; _intro_scan__beam="${rep}"
+    while [ "${_intro_scan__row}" -le "$((body_rows + 1))" ]; do
+        while IFS="${c_tab}" read -r _intro_scan__at _intro_scan__column _intro_scan__style _intro_scan__text; do
+            [ -n "${_intro_scan__at}" ] || continue
+            if [ "${_intro_scan__at}" = "$((_intro_scan__row - 1))" ]; then
+                _row "${_intro_scan__at}" "" ""; _put "${_intro_scan__at}" "${_intro_scan__column}" "${s_bold}" "${_intro_scan__text}"
+            elif [ "${_intro_scan__at}" = "$((_intro_scan__row - 3))" ]; then
+                _intro_style "${_intro_scan__style}"
+                _put "${_intro_scan__at}" "${_intro_scan__column}" "${style}" "${_intro_scan__text}"
+            fi
+        done << E=O=F
+${intro}
+E=O=F
+        [ "${_intro_scan__row}" -gt "${body_rows}" ] || _put "${_intro_scan__row}" 1 "${s_scan}" "${_intro_scan__beam}"
+        [ "${_intro_scan__row}" -le 1 ] || [ "${_intro_scan__row}" -gt "$((body_rows + 1))" ] ||
+            { _intro_scan__lit="$(printf "%s" "${intro}" | grep -c "^$((_intro_scan__row - 1))${c_tab}")"
+              [ "${_intro_scan__lit}" != 0 ] || _row "$((_intro_scan__row - 1))" "" ""; }
+        _tick || return 0
+        _tick || return 0
+        _intro_scan__row="$((_intro_scan__row + 1))"
+    done
+}
+
+_step_intro() { #=> the first screen: what is about to happen. Enter goes on
+    _title "intro"
+    #the style plays once, when the installer opens, and again when s asks for another: coming back to
+    #this screen from a step, it is there at once
+    _step_intro__play=""
+    [ -n "${intro_played}" ] || _step_intro__play="yes"
+    intro_played="yes"
+    while :; do
+        _intro_lines
+        if [ -n "${try}" ]; then
+            _frame none "Enter" "begin" "s" "another intro" "f" "firmware" "q" "quit"
+        else
+            _frame none "Enter" "begin" "s" "another intro" "q" "quit"
+        fi
+        if [ -n "${_step_intro__play}" ] && [ "${effects}" = "on" ]; then
+            effect_began="$(date +%s)"; effect_frames=0
+            "_intro_${intro_style}"
+        fi
+        _step_intro__play=""
+        _intro_draw
+        _title "intro ready"
+        _key
+        case "${key}" in
+            enter|n|right) return 0 ;;
+            s)  #the next style, played
+                # shellcheck disable=SC2086 # the styles, a word each
+                set -- ${intro_styles} ${intro_styles}
+                while [ "${1}" != "${intro_style}" ]; do shift; done
+                intro_style="${2}"; _step_intro__play="yes" ;;
+            f)  [ -z "${try}" ] || {
+                    if [ "${firmware_now}" = "uefi" ]; then firmware_now="bios"; else firmware_now="uefi"; fi
+                    engine_options="--try --firmware ${firmware_now}"; loaded=""
+                } ;;
+            q|esc) ! _ask_quit || exit 0 ;;
+        esac
+    done
+}
+
+################################################################################
+# The steps. Each returns 0 to go on, 1 to go back, 3 when it has nothing to ask
+# (one disk only): the next one in the person's direction is shown; 4 to go back
+# to the plan
+################################################################################
+
+_step_disk() { #=> disk, the one minos goes to: asked when the machine has several it can go to
+    _step_disk__usable="$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-" {print $1}')"
+    _step_disk__count="$(printf "%s\n" "${_step_disk__usable}" | grep -c .)"
+    if [ "${_step_disk__count}" = 1 ]; then
+        disk="${_step_disk__usable}"
         return 3
     fi
-    set --
-    for _ask_disk__name in ${_ask_disk__disks}; do
-        set -- "${@}" "${_ask_disk__name}" "$(_engine disks | awk -F '\t' -v disk="${_ask_disk__name}" \
-            '$1 == disk {printf "%-10s %7s  %s", substr($1, 6), $2, ($3 == "-" ? "" : $3)}')"
+    _title "disk"
+    [ -n "${disk}" ] || disk="$(printf "%s\n" "${_step_disk__usable}" | head -n 1)"
+    while :; do
+        _frame disk "j k" "move" "Enter" "next" "Esc" "back" "q" "quit"
+        _row 1 "" ""; _row 2 "" ""
+        _put 2 3 "${s_bold}" "Which disk does minos go to?"
+        _put 2 39 "${s_dim}" "Nothing is written until you confirm."
+        _row 3 "" ""
+        row=4
+        while IFS="${c_tab}" read -r _step_disk__device _step_disk__size _step_disk__model _step_disk__refusal _step_disk__holds; do
+            { [ -n "${_step_disk__device}" ] && [ "${_step_disk__refusal}" = "-" ]; } || continue
+            [ "${_step_disk__model}" != "-" ] || _step_disk__model="disk"
+            _step_disk__text="$(printf "%-24.24s %7s   %-26.26s %s" "${_step_disk__model}" "${_step_disk__size}" "${_step_disk__holds}" "${_step_disk__device#/dev/}")"
+            if [ "${_step_disk__device}" = "${disk}" ]; then
+                _row "${row}" "${s_here}" "  > ${_step_disk__text}"
+            else
+                _row "${row}" "" "    ${_step_disk__text}"
+            fi
+            row="$((row + 1))"
+        done << E=O=F
+${disks}
+E=O=F
+        _row "${row}" "" ""; row="$((row + 1))"
+        #the ones minos cannot go to, and why
+        while IFS="${c_tab}" read -r _step_disk__device _step_disk__size _step_disk__model _step_disk__refusal _; do
+            { [ -n "${_step_disk__device}" ] && [ "${_step_disk__refusal}" != "-" ]; } || continue
+            [ "${row}" -le "${body_rows}" ] || break
+            _row "${row}" "${s_dim}" "    left out: ${_step_disk__device#/dev/} (${_step_disk__size}), ${_step_disk__refusal}"
+            row="$((row + 1))"
+        done << E=O=F
+${disks}
+E=O=F
+        _rest "${row}"
+        _key
+        case "${key}" in
+            j|down|k|up)
+                # shellcheck disable=SC2086 # the disks, a word each
+                set -- ${_step_disk__usable}
+                _step_disk__before=""; _step_disk__after=""; _step_disk__seen=""
+                for _step_disk__device; do
+                    if [ "${_step_disk__device}" = "${disk}" ]; then _step_disk__seen="yes"
+                    elif [ -z "${_step_disk__seen}" ]; then _step_disk__before="${_step_disk__device}"
+                    elif [ -z "${_step_disk__after}" ]; then _step_disk__after="${_step_disk__device}"; fi
+                done
+                case "${key}" in
+                    j|down) [ -z "${_step_disk__after}" ] || disk="${_step_disk__after}" ;;
+                    *) [ -z "${_step_disk__before}" ] || disk="${_step_disk__before}" ;;
+                esac ;;
+            enter|n|right) return 0 ;;
+            esc|b|left) return 1 ;;
+            q) ! _ask_quit || exit 0 ;;
+        esac
     done
-    _ui_choose "The disk" "$(_text "Which disk does minos go to?" "" \
-        "The one this session runs from, and any with a partition in use, are" "not offered.")" \
-        "${disk}" "${@}" || return "${?}"
-    [ "${answer}" = "${disk}" ] || { root=""; esp=""; }
-    disk="${answer}"
 }
 
-_ask_mode() { #=> mode: whole, the disk erased and partitioned by the engine, or partitions, chosen by hand
-    _ui_choose "The partitions" "$(_text "minos goes to $(_describe_disk "${disk}")." "" \
-        "It can take the whole disk, or partitions you make or pick yourself," \
-        "beside what the disk already holds.")" "${mode}" \
-        whole "Use the whole disk (suggested): everything on it is erased" \
-        partitions "Choose partitions (advanced): with cfdisk, then from a list" || return "${?}"
-    mode="${answer}"
+_draw_table() { #=> the partition table of the disk now and after, as the engine's rows have it: the same
+    #rows the bars are drawn from
+    _row 1 "" ""; _row 2 "" ""
+    _put 2 3 "${s_bold}" "The partition table of ${disk_model} ${disk_size} (${disk#/dev/})"
+    _put 2 62 "${s_dim}" "t closes it"
+    _row 3 "" ""
+    row=4
+    _draw_table__count="$(printf "%s" "${r_now}${r_after}" | grep -c .)"
+    for _draw_table__which in now after; do
+        if [ "${_draw_table__which}" = "now" ]; then
+            #no room for both: the table after says what happens to each one that is there now
+            [ "$((_draw_table__count + 7))" -le "$((body_rows - 3))" ] || continue
+            _draw_table__rows="${r_now}"
+            _row "${row}" "" "  Now:"; row="$((row + 1))"
+            _row "${row}" "${s_dim}" "$(printf "      %-10s %6s  %-9s  %-12s" NAME SIZE HOLDS "IT IS")"; row="$((row + 1))"
+        else
+            _draw_table__rows="${r_after}"
+            _row "${row}" "" "  After:"; row="$((row + 1))"
+            _row "${row}" "${s_dim}" "$(printf "      %-10s %6s  %-9s  %-12s  %-10s" NAME SIZE HOLDS "IT IS" "MOUNTED ON")"; row="$((row + 1))"
+        fi
+        _row "${row}" "" "$(printf "    %-12s %6s" "${disk#/dev/}" "${disk_size}")"; row="$((row + 1))"
+        _draw_table__left="$(printf "%s" "${_draw_table__rows}" | grep -c .)"
+        while IFS="${c_tab}" read -r _draw_table__device _ _draw_table__size _draw_table__kind _draw_table__holds _draw_table__name _draw_table__fate _draw_table__mount; do
+            [ -n "${_draw_table__device}" ] || continue
+            _draw_table__left="$((_draw_table__left - 1))"
+            [ "${row}" -le "$((body_rows - 1))" ] || { _row "${row}" "${s_dim}" "      ... and $((_draw_table__left + 1)) more"; row="$((row + 1))"; break; }
+            _draw_table__branch="${g_branch}"; [ "${_draw_table__left}" -gt 0 ] || _draw_table__branch="${g_last}"
+            [ "${_draw_table__holds}" != "-" ] || _draw_table__holds=""
+            [ "${_draw_table__mount}" != "-" ] || _draw_table__mount=""
+            case "${_draw_table__which}:${_draw_table__fate}" in
+                now:erased) _draw_table__says="erased"; _draw_table__style="${s_danger}" ;;
+                now:gone) _draw_table__says="deleted"; _draw_table__style="${s_danger}" ;;
+                after:new) _draw_table__says="new"; _draw_table__style="${s_accent}" ;;
+                after:formatted) _draw_table__says="formatted"; _draw_table__style="${s_danger}" ;;
+                after:kept) _draw_table__says="kept"; _draw_table__style="${s_dim}" ;;
+                *) _draw_table__says=""; _draw_table__style="" ;;
+            esac
+            [ "${_draw_table__kind}" != "free" ] || { _draw_table__says=""; _draw_table__device="/dev/(free)"; }
+            _row "${row}" "" ""
+            _put "${row}" 5 "${s_dim}" "${_draw_table__branch}"
+            _put "${row}" 7 "" "$(printf "%-10.10s %6s  %-9.9s  %-12.12s  %-10s" "${_draw_table__device#/dev/}" "${_draw_table__size}" \
+                "${_draw_table__holds}" "${_draw_table__name}" "${_draw_table__mount}")"
+            _put "${row}" 63 "${_draw_table__style}" "${_draw_table__says}"
+            row="$((row + 1))"
+        done << E=O=F
+${_draw_table__rows}
+E=O=F
+        _row "${row}" "" ""; row="$((row + 1))"
+    done
+    _rest "${row}"
 }
 
-_ask_whole() { #=> the engine's plan for the whole disk: what the disk holds now, and what it gets instead
-    _engine plan whole "${disk}" > "${plan}"
-    if ! _ask_whole__problems="$(_engine check "${plan}" 2>&1)"; then
-        _ui_message "Use the whole disk" "$(_text "${_ask_whole__problems}" "" "Go back and choose another disk.")" "Back"
-        return 1
+_draw_disk_line() { #row => the disk the plan is for, in a line
+    _row "${1}" "" ""
+    _put "${1}" 5 "${s_bold}" "$(printf "%.22s" "${disk_model}")${s_off} ${g_dot} ${disk_size} ${g_dot} $(printf "%.26s" "${disk_holds}") ${g_dot} ${s_dim}${disk#/dev/}"
+}
+
+_draw_problems() { #row most => what stops the plan, from ROW of the body, MOST rows of it
+    row="${1}"; _draw_problems__left="${2}"
+    while IFS= read -r _draw_problems__text; do
+        [ -n "${_draw_problems__text}" ] || continue
+        [ "${_draw_problems__left}" -gt 0 ] || break
+        _draw_problems__from="${row}"
+        _rows "${row}" "${s_warn}" 6 "${_draw_problems__left}" "${_draw_problems__text}"
+        _put "${_draw_problems__from}" 5 "${s_warn}" "!"
+        _draw_problems__left="$((_draw_problems__left - (row - _draw_problems__from)))"
+    done << E=O=F
+${r_problems}
+E=O=F
+}
+
+_draw_plan() { #=> the plan: the disk as a bar now and after, and what is done in words; or, when the
+    #engine proposes nothing (what the disk holds would be deleted, and that is chosen, not proposed),
+    #the ways in
+    _row 1 "" ""; _row 2 "" ""
+    _put 2 3 "${s_bold}" "Where minos goes"
+    _put 2 39 "${s_dim}" "Nothing is written until you confirm."
+    _row 3 "" ""
+    _draw_disk_line 4
+    _row 5 "" ""
+    if [ -z "${proposed}" ]; then
+        captions=""; _row 6 "" ""; _bar 6 now; _row 7 "${s_dim}" "          ${captions}"
+        _row 8 "" ""
+        _rows 9 "${s_bold}" 2 2 "No plan is proposed: ${disk#/dev/} holds something, and what is deleted is yours to choose."
+        _row "${row}" "" ""; row="$((row + 1))"
+        _row "${row}" "" ""; _put "${row}" 5 "${s_bold}" "p"; _put "${row}" 8 "" "Choose what to keep and what to replace, partition by partition"
+        row="$((row + 1))"
+        _row "${row}" "${s_dim}" "       nothing is erased that you do not mark, and free room can be used"; row="$((row + 1))"
+        _row "${row}" "" ""; row="$((row + 1))"
+        _row "${row}" "" ""; _put "${row}" 5 "${s_bold}" "e"; _put "${row}" 8 "" "Erase the whole disk"
+        row="$((row + 1))"
+        _row "${row}" "${s_danger}" "       everything on it is deleted: ${disk_holds}"; row="$((row + 1))"
+        _rest "${row}"
+        return 0
     fi
-    _ui_confirm "Use the whole disk" "$(_text "$(_engine show "${disk}")" "" "With the whole disk:" "" \
-        "$(_engine describe "${plan}")" "" \
-        "Nothing is written yet: the last screen asks once more.")" "Continue" "Back"
+    _bars 6
+    _row "${row}" "" ""; row="$((row + 1))"
+    if [ "${r_problem_count}" -gt 0 ]; then
+        _row "${row}" "${s_bold}" "  This plan cannot be used yet:"; row="$((row + 1))"
+        _draw_problems "${row}" 7
+    else
+        _draw_plan__n=0
+        while IFS="${c_tab}" read -r _draw_plan__kind _draw_plan__text; do
+            [ -n "${_draw_plan__kind}" ] || continue
+            [ "${row}" -le 16 ] || break
+            _draw_plan__n="$((_draw_plan__n + 1))"; _draw_plan__from="${row}"
+            _draw_plan__style=""; [ "${_draw_plan__kind}" != "erase" ] || _draw_plan__style="${s_danger}"
+            _rows "${row}" "${_draw_plan__style}" 7 2 "${_draw_plan__text}"
+            _put "${_draw_plan__from}" 5 "${_draw_plan__style}" "${_draw_plan__n}."
+        done << E=O=F
+${r_actions}
+E=O=F
+        _row "${row}" "" ""; row="$((row + 1))"
+        _draw_plan__style=""; [ "${r_loss_kind}" != "some" ] || _draw_plan__style="${s_danger}"
+        _rows "${row}" "${_draw_plan__style}" 4 2 "${r_loss}"
+    fi
+    _rest "${row}"
 }
 
-_ask_cfdisk() { #=> the partitions made by hand: what this firmware needs, as the engine says it, and cfdisk
-    #for as long as the person wants it
-    _ask_cfdisk__default="cfdisk"
-    [ -z "$(_describe_partitions root "${disk}")" ] || _ask_cfdisk__default="ready"
-    #a list leaves the text above it 11 lines: the needs without their blank lines, 5 lines of the disk
-    _ui_choose "Choose partitions" "$(_text "$(_engine needs | grep .)" \
-        "cfdisk makes them: New, Type, Write (it asks you to type yes), Quit." "" \
-        "$(_engine show "${disk}" | grep . | awk 'NR <= 5 {print} END {if (NR > 5) print "  ..."}')")" "${_ask_cfdisk__default}" \
-        cfdisk "Open cfdisk on ${disk#/dev/}, to make or change partitions" \
-        ready "The partitions are there: choose among them" || return "${?}"
-    if [ "${answer}" = "cfdisk" ]; then
-        _as_root cfdisk "${disk}"
-        udevadm settle
-        root=""; esp=""
-        return 2
+_line_at() { #n => line_id, what the engine calls line N of the plan
+    _line_at__n=0; line_id=""
+    while IFS="${c_tab}" read -r _line_at__id _; do
+        [ -n "${_line_at__id}" ] || continue
+        _line_at__n="$((_line_at__n + 1))"
+        [ "${_line_at__n}" = "${1}" ] || continue
+        line_id="${_line_at__id}"
+        break
+    done << E=O=F
+${r_lines}
+E=O=F
+}
+
+_options_of() { #id => options, the option rows of line ID ("words text current" a line); option_count
+    options=""; option_count=0; option_current=1
+    while IFS="${c_tab}" read -r _options_of__id _options_of__rest; do
+        [ "${_options_of__id}" = "${1}" ] || continue
+        options="${options}${_options_of__rest}${c_nl}"; option_count="$((option_count + 1))"
+        case "${_options_of__rest}" in *"${c_tab}current") option_current="${option_count}" ;; esac
+    done << E=O=F
+${r_options}
+E=O=F
+}
+
+_size_of() { #id => the size row of line ID in size_key, size_mib, size_least, size_most, size_step;
+    #false when the line has no size to change
+    size_key=""
+    while IFS="${c_tab}" read -r _size_of__id _size_of__key _size_of__mib _size_of__least _size_of__most _size_of__step; do
+        [ "${_size_of__id}" = "${1}" ] || continue
+        size_key="${_size_of__key}"; size_mib="${_size_of__mib}"; size_least="${_size_of__least}"
+        size_most="${_size_of__most}"; size_step="${_size_of__step}"
+    done << E=O=F
+${r_sizes}
+E=O=F
+    [ -n "${size_key}" ]
+}
+
+_draw_edit() { #=> the plan as lines, each one a choice: the line under the cursor lit, its choices under
+    #it when it is open, and the bars, which follow every change
+    _row 1 "" ""; _row 2 "" ""
+    _put 2 3 "${s_bold}" "The plan, line by line"
+    _put 2 39 "${s_dim}" "Nothing is written until you confirm."
+    _row 3 "" ""
+    #9 rows for the lines and the choices of the open one: the lines around the cursor
+    _draw_edit__room=9
+    [ -z "${edit_open}" ] || _draw_edit__room="$((9 - option_count))"
+    [ "${_draw_edit__room}" -ge 1 ] || _draw_edit__room=1
+    _draw_edit__first="$((edit_line - _draw_edit__room / 2))"
+    [ "$((_draw_edit__first + _draw_edit__room - 1))" -le "${r_line_count}" ] || _draw_edit__first="$((r_line_count - _draw_edit__room + 1))"
+    [ "${_draw_edit__first}" -ge 1 ] || _draw_edit__first=1
+    row=4; _draw_edit__n=0; _draw_edit__note="-"
+    while IFS="${c_tab}" read -r _draw_edit__id _draw_edit__label _draw_edit__value _draw_edit__says _draw_edit__tone; do
+        [ -n "${_draw_edit__id}" ] || continue
+        _draw_edit__n="$((_draw_edit__n + 1))"
+        { [ "${_draw_edit__n}" -ge "${_draw_edit__first}" ] && [ "${_draw_edit__n}" -lt "$((_draw_edit__first + _draw_edit__room))" ]; } || continue
+        _draw_edit__text="$(printf "%-10.10s %-60.60s" "${_draw_edit__label}" "${_draw_edit__value}")"
+        if [ "${_draw_edit__n}" = "${edit_line}" ]; then
+            _row "${row}" "${s_here}" "  > ${_draw_edit__text}"
+            _draw_edit__note="${_draw_edit__says}"
+        else
+            case "${_draw_edit__tone}" in
+                erase) _draw_edit__style="${s_danger}" ;; new) _draw_edit__style="${s_accent}" ;;
+                off) _draw_edit__style="${s_dim}" ;; *) _draw_edit__style="" ;;
+            esac
+            _row "${row}" "${_draw_edit__style}" "    ${_draw_edit__text}"
+        fi
+        row="$((row + 1))"
+        if [ "${_draw_edit__n}" = "${edit_line}" ] && [ -n "${edit_open}" ]; then
+            _draw_edit__o=0
+            while IFS="${c_tab}" read -r _ _draw_edit__option _draw_edit__current; do
+                [ -n "${_draw_edit__option}" ] || continue
+                _draw_edit__o="$((_draw_edit__o + 1))"
+                _draw_edit__mark="( )"; [ "${_draw_edit__current}" != "current" ] || _draw_edit__mark="(*)"
+                if [ "${_draw_edit__o}" = "${edit_option}" ]; then
+                    _row "${row}" "" ""; _put "${row}" 9 "${s_bold}" "${_draw_edit__mark} ${_draw_edit__option}"
+                    _put "${row}" 7 "${s_bold}" ">"
+                else
+                    _row "${row}" "" "        ${_draw_edit__mark} ${_draw_edit__option}"
+                fi
+                row="$((row + 1))"
+            done << E=O=F
+${options}
+E=O=F
+        fi
+    done << E=O=F
+${r_lines}
+E=O=F
+    if [ "$((_draw_edit__first + _draw_edit__room - 1))" -lt "${r_line_count}" ] || [ "${_draw_edit__first}" -gt 1 ]; then
+        _put 3 5 "${s_dim}" "line ${edit_line} of ${r_line_count}: j and k bring the others"
     fi
+    while [ "${row}" -le 13 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
+    [ "${_draw_edit__note}" != "-" ] || _draw_edit__note=""
+    _row 14 "${s_dim}" "    ${_draw_edit__note}"
+    _row 15 "" ""
+    _bars 16
+    if [ "${r_problem_count}" -gt 0 ]; then
+        _draw_problems 19 2
+    else
+        _draw_edit__style=""; [ "${r_loss_kind}" != "some" ] || _draw_edit__style="${s_danger}"
+        _rows 19 "${_draw_edit__style}" 4 2 "${r_loss}"
+    fi
+    _rest "${row}"
+}
+
+_step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Enter or changed line by line
+    #(p), with its partition table one key away (t)
+    [ "${loaded}" = "${disk} ${choices}" ] || {
+        #another disk, or the first time: the plan the engine suggests
+        [ "${loaded%% *}" = "${disk}" ] || { choices=""; proposed=""; plan_view="plan"; edit_line=1; }
+        _load || _failed "The installer could not read ${disk}:"
+        #a plan that deletes something, or that lacks something, is not proposed: it is chosen
+        if [ -z "${proposed}" ]; then
+            { [ "${r_loss_kind}" = "some" ] || [ "${r_problem_count}" -gt 0 ]; } || proposed="yes"
+        fi
+    }
+    _title "plan"
+    edit_open=""; _step_plan__table=""
+    while :; do
+        if [ -n "${_step_plan__table}" ]; then
+            _frame plan "t" "back to the plan" "Esc" "back to the plan" "q" "quit"
+            _draw_table
+        elif [ "${plan_view}" = "edit" ] && [ -n "${edit_open}" ]; then
+            _frame plan "j k" "move" "Enter" "take it" "Esc" "leave it as it was"
+            _draw_edit
+        elif [ "${plan_view}" = "edit" ]; then
+            _line_at "${edit_line}"
+            if _size_of "${line_id}"; then
+                _frame plan "j k" "move" "Enter" "change" "+ -" "size" "r" "reset" "t" "table" "n" "next" "Esc" "back"
+            else
+                _frame plan "j k" "move" "Enter" "change" "r" "reset" "t" "table" "n" "next" "Esc" "back"
+            fi
+            _draw_edit
+        elif [ -z "${proposed}" ]; then
+            _frame plan "p" "choose partitions" "e" "erase the disk" "t" "table" "Esc" "back" "q" "quit"
+            _draw_plan
+        elif [ "${r_problem_count}" -gt 0 ]; then
+            _frame plan "~Enter" "use this plan" "p" "change it" "r" "reset" "t" "table" "Esc" "back" "q" "quit"
+            _draw_plan
+        else
+            _frame plan "Enter" "use this plan" "p" "change it" "t" "table" "Esc" "back" "q" "quit"
+            _draw_plan
+        fi
+        _key
+        if [ -n "${_step_plan__table}" ]; then
+            case "${key}" in
+                q) ! _ask_quit || exit 0 ;;
+                *) _step_plan__table="" ;;
+            esac
+            continue
+        fi
+        if [ "${plan_view}" = "edit" ] && [ -n "${edit_open}" ]; then
+            case "${key}" in
+                j|down) [ "${edit_option}" -ge "${option_count}" ] || edit_option="$((edit_option + 1))" ;;
+                k|up) [ "${edit_option}" -le 1 ] || edit_option="$((edit_option - 1))" ;;
+                enter)
+                    _step_plan__words="$(printf "%s" "${options}" | sed -n "${edit_option}p" | cut -f1)"
+                    edit_open=""
+                    # shellcheck disable=SC2086 # the choices, a word each
+                    case "${_step_plan__words}" in
+                        disk=*) disk="${_step_plan__words#disk=}"; choices=""; edit_line=1 ;;
+                        *) _choose ${_step_plan__words} ;;
+                    esac
+                    _load || _failed "The installer could not make that plan:"
+                    proposed="yes"
+                    [ "${edit_line}" -le "${r_line_count}" ] || edit_line="${r_line_count}" ;;
+                esc|left|b|q) edit_open="" ;;
+            esac
+            continue
+        fi
+        case "${key}" in
+            t) _step_plan__table="yes" ;;
+            q) ! _ask_quit || exit 0 ;;
+            r)  #the plan the engine suggests, again
+                choices=""; proposed=""
+                _load || _failed "The installer could not read ${disk}:"
+                { [ "${r_loss_kind}" = "some" ] || [ "${r_problem_count}" -gt 0 ]; } || proposed="yes"
+                [ -n "${proposed}" ] || plan_view="plan"
+                edit_line=1 ;;
+        esac
+        if [ "${plan_view}" = "edit" ]; then
+            case "${key}" in
+                j|down) [ "${edit_line}" -ge "${r_line_count}" ] || edit_line="$((edit_line + 1))" ;;
+                k|up) [ "${edit_line}" -le 1 ] || edit_line="$((edit_line - 1))" ;;
+                enter|right|l)
+                    _line_at "${edit_line}"; _options_of "${line_id}"
+                    if [ "${option_count}" -gt 1 ]; then
+                        edit_open="yes"; edit_option="${option_current}"
+                    fi ;;
+                "+"|"="|"-")
+                    _line_at "${edit_line}"
+                    if _size_of "${line_id}"; then
+                        if [ "${key}" = "-" ]; then _step_plan__mib="$((size_mib - size_step))"; else _step_plan__mib="$((size_mib + size_step))"; fi
+                        [ "${_step_plan__mib}" -le "${size_most}" ] || _step_plan__mib="${size_most}"
+                        [ "${_step_plan__mib}" -ge "${size_least}" ] || _step_plan__mib="${size_least}"
+                        if [ "${_step_plan__mib}" != "${size_mib}" ]; then
+                            _choose "${size_key}${_step_plan__mib}"
+                            _load || _failed "The installer could not make that plan:"
+                        fi
+                    fi ;;
+                n)  if [ "${r_problem_count}" = 0 ]; then return 0; fi ;;
+                esc|b|left) plan_view="plan" ;;
+            esac
+            continue
+        fi
+        case "${key}" in
+            enter|n|right) if [ -n "${proposed}" ] && [ "${r_problem_count}" = 0 ]; then return 0; fi ;;
+            p)  plan_view="edit"
+                if [ -z "${proposed}" ]; then
+                    #the way in that deletes nothing unasked: the disk's partitions, each one to choose
+                    choices="use=parts root=none"
+                    _load || _failed "The installer could not read ${disk}:"
+                    proposed="yes"
+                fi
+                [ "${edit_line}" -le "${r_line_count}" ] || edit_line=1 ;;
+            e)  if [ -z "${proposed}" ]; then
+                    choices="use=whole"
+                    _load || _failed "The installer could not read ${disk}:"
+                    proposed="yes"
+                fi ;;
+            esc|b|left) return 1 ;;
+        esac
+    done
+}
+
+_secret_count() { #name => count, how many characters the secret NAME (pass, pass_again) holds
+    _secret_count__units=""
+    eval "_secret_count__units=\"\${${1}_units}\""
+    # shellcheck disable=SC2086 # the units, a word each
+    set -- ${_secret_count__units}
+    count="${#}"
+}
+
+_secret_type() { #name => key, just typed, at the end of the secret NAME. What the secret is made of is
+    #kept in NAME_units, the bytes of each thing typed: a character of several bytes arrives whole in
+    #one read, its bytes one after the other, and they stay one unit
+    eval "_secret_type__units=\"\${${1}_units}\""
+    case "${key}" in
+        [\ -~]) _secret_type__units="${_secret_type__units} 1"; secret_wide="" ;;
+        *)  if [ -z "${key_fresh}" ] && [ -n "${secret_wide}" ]; then
+                _secret_type__units="${_secret_type__units% *} $((${_secret_type__units##* } + 1))"
+            else
+                _secret_type__units="${_secret_type__units} 1"
+            fi
+            secret_wide="yes" ;;
+    esac
+    eval "${1}=\"\${${1}}\${key}\"; ${1}_units=\"\${_secret_type__units}\""
+}
+
+_secret_back() { #name => the secret NAME without the last thing typed: a whole character, never half of one
+    eval "_secret_back__units=\"\${${1}_units}\"; _secret_back__value=\"\${${1}}\""
+    [ -n "${_secret_back__units}" ] || return 0
+    _secret_back__bytes="${_secret_back__units##* }"; _secret_back__units="${_secret_back__units% *}"
+    while [ "${_secret_back__bytes}" -gt 0 ]; do
+        _secret_back__value="${_secret_back__value%?}"; _secret_back__bytes="$((_secret_back__bytes - 1))"
+    done
+    secret_wide=""
+    eval "${1}=\"\${_secret_back__value}\"; ${1}_units=\"\${_secret_back__units}\""
+}
+
+_draw_field() { #row label text here secret => a field on row ROW of the body: TEXT typed so far, lit when
+    #HERE; SECRET is the name of a secret, shown as a star a character
+    _row "${1}" "" ""
+    _put "${1}" 5 "" "${2}"
+    _draw_field__shown="${3}"
+    if [ -n "${5}" ]; then _secret_count "${5}"; _rep "*" "${count}"; _draw_field__shown="${rep}"; fi
+    _draw_field__shown="$(printf "%-32.32s" "${_draw_field__shown}")"
+    if [ -n "${4}" ]; then
+        _put "${1}" 19 "${s_field_here}" " ${_draw_field__shown} "
+    else
+        _put "${1}" 19 "${s_field}" " ${_draw_field__shown} "
+    fi
+}
+
+_step_user() { #=> user and pass, the account minos is installed for: its name, and its password twice
+    _title "user"
+    _frame user "Enter" "next" "Tab" "next field" "Esc" "back" "Ctrl-U" "empty the field"
+    _step_user__field="${user_field:-1}"; _step_user__problem=""
+    while :; do
+        _row 1 "" ""; _row 2 "" ""
+        _put 2 3 "${s_bold}" "Who it is for"
+        _put 2 39 "${s_dim}" "Nothing is written until you confirm."
+        _row 3 "" ""
+        _draw_field 4 "User name" "${user}" "$([ "${_step_user__field}" != 1 ] || printf yes)" ""
+        _row 5 "${s_dim}" "                    lower case letters, digits, - and _, a letter first"
+        _row 6 "" ""
+        _draw_field 7 "Password" "" "$([ "${_step_user__field}" != 2 ] || printf yes)" pass
+        _row 8 "" ""
+        _draw_field 9 "The same again" "" "$([ "${_step_user__field}" != 3 ] || printf yes)" pass_again
+        _row 10 "" ""
+        if [ -n "${_step_user__problem}" ]; then
+            _rows 11 "${s_warn}" 4 3 "${_step_user__problem}"
+        else
+            row=11
+        fi
+        while [ "${row}" -le 14 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
+        _row 15 "${s_dim}" "    The name you log in with. It can run commands as root, with sudo."
+        _row 16 "${s_dim}" "    The password is typed blind: a star a character. It is asked when the"
+        _row 17 "${s_dim}" "    computer starts, and by sudo."
+        _rest 18
+        #the cursor, where the next character goes
+        case "${_step_user__field}" in
+            1) _step_user__column="${#user}"; _step_user__row=4 ;;
+            2) _secret_count pass; _step_user__column="${count}"; _step_user__row=7 ;;
+            *) _secret_count pass_again; _step_user__column="${count}"; _step_user__row=9 ;;
+        esac
+        [ "${_step_user__column}" -le 32 ] || _step_user__column=32
+        screen="${screen}${c_esc}[$((origin_row + _step_user__row + 1));$((origin_column + 22 + _step_user__column))H${c_esc}[?25h"
+        _key
+        screen="${screen}${c_esc}[?25l"
+        _step_user__problem=""
+        case "${key}" in
+            enter|tab|down)
+                case "${_step_user__field}" in
+                    1) if _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=2; fi ;;
+                    2) if _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=3; fi ;;
+                    *) if [ "${key}" = "enter" ]; then
+                           if ! _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=1
+                           elif ! _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=2
+                           elif [ "${pass}" != "${pass_again}" ]; then
+                               _step_user__problem="The two passwords differ. Type the second one again."
+                               pass_again=""; pass_again_units=""
+                           else
+                               user_field=3
+                               return 0
+                           fi
+                       fi ;;
+                esac ;;
+            backtab|up) [ "${_step_user__field}" -le 1 ] || _step_user__field="$((_step_user__field - 1))" ;;
+            esc) user_field="${_step_user__field}"; return 1 ;;
+            backspace)
+                case "${_step_user__field}" in
+                    1) user="${user%?}" ;; 2) _secret_back pass ;; *) _secret_back pass_again ;;
+                esac ;;
+            clear)
+                case "${_step_user__field}" in
+                    1) user="" ;; 2) pass=""; pass_units="" ;; *) pass_again=""; pass_again_units="" ;;
+                esac ;;
+            none|redraw|other|left|right|home|end|delete|pageup|pagedown) ;;
+            *)  #a character: of a name, the ones a name takes; of a password, any
+                case "${_step_user__field}" in
+                    1) case "${key}" in [a-z0-9_-]) [ "${#user}" -ge 32 ] || user="${user}${key}" ;; esac ;;
+                    2) _secret_type pass ;;
+                    *) _secret_type pass_again ;;
+                esac ;;
+        esac
+    done
+}
+
+_step_confirm() { #=> the one confirmation: what will be done, and two buttons. The one that goes back
+    #holds the cursor; the other says what it erases
+    _title "confirm"
+    _step_confirm__focus="left"; _step_confirm__table=""
+    #the plan as the disk is now: what the screens showed may be minutes old
+    _load || _failed "The installer could not read ${disk}:"
+    if [ "${r_problem_count}" -gt 0 ]; then
+        return 4
+    fi
+    while :; do
+        if [ -n "${_step_confirm__table}" ]; then
+            _frame confirm "t" "back" "Esc" "back" "q" "quit"
+            _draw_table
+            _key
+            case "${key}" in q) ! _ask_quit || exit 0 ;; *) _step_confirm__table="" ;; esac
+            continue
+        fi
+        _frame confirm "h l" "move" "Enter" "press the lit button" "t" "table" "Esc" "back" "q" "quit"
+        _row 1 "" ""; _row 2 "" ""
+        _put 2 3 "${s_bold}" "Ready to install"
+        _put 2 47 "${s_dim}" "Nothing has been written yet."
+        _row 3 "" ""
+        _draw_disk_line 4
+        _row 5 "" ""
+        _bars 6
+        _row 9 "" ""
+        _step_confirm__style=""; [ "${r_loss_kind}" != "some" ] || _step_confirm__style="${s_danger}"
+        _rows 10 "${_step_confirm__style}" 4 2 "${r_loss}"
+        _row "${row}" "" ""; row="$((row + 1))"
+        _row "${row}" "" "    User    ${user}"; row="$((row + 1))"
+        _row "${row}" "" "    Starts  by $([ "${firmware_now}" = "uefi" ] && printf UEFI || printf BIOS), on its own, once the installation medium is out"; row="$((row + 1))"
+        while [ "${row}" -le 16 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
+        _row 17 "" "    This is the last step you can go back from."
+        _row 18 "" ""
+        _step_confirm__style=""; [ "${r_button_kind}" != "danger" ] || _step_confirm__style="${s_danger}"
+        _buttons 19 "${_step_confirm__focus}" "Back" "" "${r_button}" "${_step_confirm__style}"
+        _rest 20
+        _key
+        case "${key}" in
+            h|l|left|right|tab|backtab)
+                if [ "${_step_confirm__focus}" = "left" ]; then _step_confirm__focus="right"; else _step_confirm__focus="left"; fi ;;
+            enter) if [ "${_step_confirm__focus}" = "left" ]; then return 1; else return 0; fi ;;
+            esc|b) return 1 ;;
+            t) _step_confirm__table="yes" ;;
+            q) ! _ask_quit || exit 0 ;;
+        esac
+    done
+}
+
+_log_lines() { #count => the last COUNT lines the engine and the tools said, as plain text of the width
+    #of the box they are shown in
+    sed "s/${c_esc}\\[[0-9;]*[a-zA-Z]//g" "${log}" 2>/dev/null | tr '\r' '\n' | tr -d '\b' | tr -c '\n -~' '?' | grep '[^ ]' | tail -n "${1}" | cut -c1-68
+}
+
+_step_install() { #=> the plan applied, and seen as it happens: how far it is, what is being done, what
+    #the engine and the tools say. From here on nothing goes back; the apply runs in a session of its
+    #own, so that it ends what it began even when this window is closed
+    _title "install"
+    _frame install "~" "the install runs: a few minutes. Do not turn the computer off."
+    if [ -z "${watch}" ]; then
+        if [ "$(id -u)" = 0 ]; then
+            # shellcheck disable=SC2086 # the engine's options, a word each
+            printf "%s\n" "${pass}" | setsid sh "${engine}" ${engine_options} apply "${plan}" "${user}" >/dev/null 2>"${errors}" &
+        else
+            # shellcheck disable=SC2086 # the engine's options, a word each
+            printf "%s\n" "${pass}" | setsid sudo sh "${engine}" ${engine_options} apply "${plan}" "${user}" >/dev/null 2>"${errors}" &
+        fi
+        watch="${!}"; _step_install__waited="yes"
+    else
+        _step_install__waited=""
+    fi
+    _step_install__began="$(date +%s)"; _step_install__spin=0
+    _row 1 "" ""; _row 2 "" ""; _put 2 3 "${s_bold}" "Installing minos"
+    _row 3 "" ""; _row 5 "" ""; _row 7 "" ""
+    _rep "${g_h}" 44; _row 8 "" ""; _put 8 3 "${s_frame}" "${g_tl}${g_h} what the installer says ${rep}${g_tr}"
+    _rep "${g_h}" 70; _row 19 "" ""; _put 19 3 "${s_frame}" "${g_bl}${rep}${g_br}"
+    _row 20 "${s_dim}" "  All of it is kept in ${log}"
+    while [ -d "/proc/${watch}" ]; do
+        #once a second, in one pass over what was said so far: how many steps were said (the engine's and
+        #setup's), how many of them since the copy began, the one being done, and the last ten lines.
+        #One pass and one second: the copy has the processor, not this screen
+        _step_install__said="$(tr '\r' '\n' < "${log}" 2>/dev/null | awk '
+            {   gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); gsub(/\010/, ""); gsub(/[^ -~]/, "?")
+                if ($0 !~ /[^ ]/) next
+                if ($0 ~ /^\[\+\] / || $0 ~ /^\[minos installer\] /) {
+                    steps++; now = $0; sub(/^\[[^]]*\] /, "", now)
+                    if ($0 ~ /^\[\+\] copying the live system/) copying = 1
+                    if (copying && $0 ~ /^\[\+\] /) after++
+                }
+                line[++n] = substr($0, 1, 68)
+            }
+            END {
+                printf "%d %d\n%s\n", steps, after, substr(now, 1, 66)
+                for (i = (n > 10 ? n - 9 : 1); i <= n; i++) print line[i]
+            }')"
+        _step_install__steps=0; _step_install__after=0; _step_install__now=""; _step_install__n=0; row=9
+        while IFS= read -r _step_install__line; do
+            _step_install__n="$((_step_install__n + 1))"
+            case "${_step_install__n}" in
+                1) _step_install__steps="${_step_install__line%% *}"; _step_install__after="${_step_install__line##* }" ;;
+                2) _step_install__now="${_step_install__line}" ;;
+                *) _row "${row}" "" ""; _put "${row}" 3 "${s_frame}" "${g_v}"; _put "${row}" 5 "${s_dim}" "${_step_install__line}"; _put "${row}" 74 "${s_frame}" "${g_v}"
+                   row="$((row + 1))" ;;
+            esac
+        done << E=O=F
+${_step_install__said}
+E=O=F
+        while [ "${row}" -le 18 ]; do
+            _row "${row}" "" ""; _put "${row}" 3 "${s_frame}" "${g_v}"; _put "${row}" 74 "${s_frame}" "${g_v}"
+            row="$((row + 1))"
+        done
+        #how far: the steps said so far, and within the copy, what is copied of what the system weighs
+        if [ "${_step_install__after:-0}" = 0 ]; then
+            _step_install__percent="$((${_step_install__steps:-0} * 3))"
+            [ "${_step_install__percent}" -le 9 ] || _step_install__percent=9
+        elif [ "${_step_install__after}" = 1 ]; then
+            { read -r _step_install__used _step_install__all < "${progress_file}"; } 2>/dev/null || { _step_install__used=0; _step_install__all=1; }
+            _step_install__percent="$((10 + 45 * _step_install__used / (_step_install__all > 0 ? _step_install__all : 1)))"
+            [ "${_step_install__percent}" -le 55 ] || _step_install__percent=55
+        else
+            _step_install__percent="$((55 + (_step_install__after - 1) * 5))"
+            [ "${_step_install__percent}" -le 97 ] || _step_install__percent=97
+        fi
+        _step_install__secs="$(($(date +%s) - _step_install__began))"
+        _put 2 62 "${s_dim}" "$(printf "%02d:%02d elapsed" "$((_step_install__secs / 60))" "$((_step_install__secs % 60))")"
+        _step_install__done="$((bar_columns * _step_install__percent / 100))"
+        _row 4 "" ""
+        _rep "${g_block}" "${_step_install__done}"; _put 4 5 "${s_accent}" "${rep}"
+        _rep "${g_h}" "$((bar_columns - _step_install__done))"
+        _put 4 "$((5 + _step_install__done))" "${s_frame}" "${rep}${s_off}  ${_step_install__percent}%"
+        _step_install__spin="$(( (_step_install__spin + 1) % 4 ))"
+        set -- "|" "/" "-" "\\"; shift "${_step_install__spin}"
+        _row 6 "" ""; _put 6 5 "${s_accent}" "${1}"; _put 6 7 "${s_bold}" "${_step_install__now:-starting}"
+        _key 10
+    done
+    if [ -n "${_step_install__waited}" ]; then
+        wait "${watch}"; install_status="${?}"
+    else
+        install_status="$(cat "${status_file}" 2>/dev/null)"; install_status="${install_status:-1}"
+    fi
+    keys_ahead=""
     return 0
 }
 
-_ask_root() { #=> root, the partition minos is copied to, from those of the disk the engine says can be
-    _ask_root__items="$(_describe_partitions root "${disk}")"
-    if [ -z "${_ask_root__items}" ]; then
-        _ui_message "The partition for minos" "$(_text "${disk#/dev/} has no partition minos can go to." "" "$(_engine needs)")" "Back"
-        return 1
+_step_end() { #=> how it ended: minos is installed, and the computer restarts or stays; or the install
+    #stopped, with the last that was said; or, in try mode, the disk as it was left and the command that
+    #would have installed minos
+    _title "end"
+    if [ "${install_status}" != 0 ]; then
+        _frame install "Enter" "close"
+        _row 1 "" ""; _row 2 "" ""; _put 2 3 "${s_danger}" "The install stopped: minos is not installed"
+        _row 3 "" ""; row=4
+        _rows 4 "${s_warn}" 4 4 "$(tr '\n' ' ' < "${errors}" 2>/dev/null)"
+        _row "${row}" "" "    The last that was said:"; row="$((row + 1))"
+        _log_lines 9 > "${errors}.log" 2>/dev/null
+        while IFS= read -r _step_end__line; do
+            _row "${row}" "${s_dim}" "      ${_step_end__line}"; row="$((row + 1))"
+        done < "${errors}.log"
+        _row "${row}" "" ""; row="$((row + 1))"
+        [ "${row}" -gt 19 ] || { _row "${row}" "" "    All of it is in ${log}. Open the installer again to start over."; row="$((row + 1))"; }
+        _rest "${row}"
+        while :; do _key; [ "${key}" != "enter" ] || exit 1; done
     fi
-    _split_lines "${_ask_root__items}"; eval "set -- ${lines}"
-    _ui_choose "The partition for minos" "$(_text "Which partition of ${disk#/dev/} does minos go to?" "" \
-        "It becomes /, the whole system and your files.")" "${root:-${1}}" "${@}" || return "${?}"
-    root="${answer}"
-}
-
-_ask_keep() { #=> keep: yes when a partition that is ext4 already keeps its file system
-    keep=""
-    _ask_keep__holds="$(_engine partitions "${disk}" | awk -F '\t' -v root="${root}" '$1 == root {print $4}')"
-    case "${_ask_keep__holds}" in ext4*) ;; *) return 3 ;; esac
-    _ui_choose "The partition for minos" "$(_text "${root#/dev/} holds a file system already: ${_ask_keep__holds}." "" \
-        "Keep it only when you made it for minos just now: minos is copied" \
-        "over whatever files it holds.")" format \
-        format "Format ${root#/dev/} as ext4 (suggested): what it holds is erased" \
-        keep "Keep its file system, and the files on it" || return "${?}"
-    [ "${answer}" = "format" ] || keep="yes"
-}
-
-_ask_esp() { #=> esp, the EFI system partition the boot loader goes to (UEFI only): those of the disk
-    #first, then the other disks'
-    esp=""
-    [ "$(_engine facts | awk '$1 == "firmware" {print $2}')" = "uefi" ] || return 3
-    _ask_esp__items="$(_describe_partitions esp "${disk}"; _describe_partitions esp | awk -v disk="${disk}" '
-        NR % 2 == 1 {skip = (index($0, disk) == 1)} !skip')"
-    if [ -z "${_ask_esp__items}" ]; then
-        _ui_message "The EFI system partition" "$(_text "There is no EFI system partition." "" "$(_engine needs)")" "Back"
-        return 1
-    fi
-    _split_lines "${_ask_esp__items}"; eval "set -- ${lines}"
-    _ui_choose "The EFI system partition" "$(_text "Which EFI system partition does the boot loader go to?" "" \
-        "UEFI starts minos from it. One that is FAT already is not formatted:" \
-        "the boot loaders of other systems on it stay.")" "${1}" "${@}" || return "${?}"
-    esp="${answer}"
-}
-
-_ask_chosen() { #=> the engine's plan for the partitions chosen; asks nothing unless the engine finds
-    #something that stops it
-    _engine plan partitions "${root}" ${esp:+"${esp}"} ${keep:+keep} > "${plan}"
-    if ! _ask_chosen__problems="$(_engine check "${plan}" 2>&1)"; then
-        _ui_message "Choose partitions" "$(_text "These partitions will not do:" "" "${_ask_chosen__problems}")" "Back"
-        return 1
-    fi
-    return 3
-}
-
-_ask_user() { #=> user, the name of the account minos is installed for
-    _ui_ask "Your user" "$(_text "The name you will log in with." "" \
-        "Lower case letters, digits, - and _, a letter first.")" "${user}" || return "${?}"
-    if ! _ask_user__problem="$(_engine user "${answer}" 2>&1)"; then
-        _ui_message "Your user" "${_ask_user__problem}" "Back"
-        return 2
-    fi
-    user="${answer}"
-}
-
-_ask_password() { #=> pass, the password of user, typed twice
-    _ui_password "Your password" "A password for ${user}:" || return "${?}"
-    _ask_password__first="${answer}"
-    if ! _ask_password__problem="$(printf "%s\n" "${answer}" | _engine password 2>&1)"; then
-        _ui_message "Your password" "${_ask_password__problem}" "Back"
-        return 2
-    fi
-    _ui_password "Your password" "The same password again:" || return 2
-    if [ "${answer}" != "${_ask_password__first}" ]; then
-        _ui_message "Your password" "The two passwords differ. Type them again." "Back"
-        return 2
-    fi
-    pass="${answer}"
-}
-
-_ask_summary() { #=> the plan as the engine describes it, and the one confirmation
-    _ui_confirm "Ready to install" "$(_text "The installer has written nothing so far. With Install:" "" \
-        "$(_engine describe "${plan}")" "User:    ${user}")" "Install" "Back" no
+    _step_end__focus="left"
+    while :; do
+        _row 1 "" ""; _row 2 "" ""; _row 3 "" ""
+        if [ -n "${try}" ]; then
+            _frame install "h l" "move" "Enter" "press the lit button"
+            _put 2 3 "${s_bold}" "Try mode stops here"
+            _row 4 "" "    ${disk#/dev/} is written as the plan said. minos is not installed: on the ISO"
+            _row 5 "" "    the installer would now run"
+            _row 6 "" ""
+            _rows 7 "${s_accent}" 6 3 "$(grep -A 1 'minos would now be installed with' "${log}" 2>/dev/null | tail -n 1)"
+            _row "${row}" "" ""; row="$((row + 1))"
+            _row "${row}" "" "    and show it happen, then offer to restart."; row="$((row + 1))"
+            while [ "${row}" -le 15 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
+            _row 16 "" "    Empty ${disk#/dev/} again, for the next try? Its partitions and file systems go."
+            _row 17 "" ""
+            _buttons 18 "${_step_end__focus}" "Empty it and close" "" "Leave it as it is and close" ""
+        else
+            _frame install "h l" "move" "Enter" "press the lit button"
+            _put 2 3 "${s_bold}" "minos is installed"
+            _row 4 "" "    It is on ${disk:+${disk#/dev/}, }${user:+for the user ${user}, }and starts on its own."
+            _row 5 "" ""
+            _row 6 "" "    Restart to use it, and take the installation medium out (the USB"
+            _row 7 "" "    stick or the CD) as the computer restarts, or it starts from the medium"
+            _row 8 "" "    again."
+            _row 9 "" ""
+            _row 10 "${s_dim}" "    With a network, minos fetches at its first start the drivers the medium"
+            _row 11 "${s_dim}" "    left out: it takes a few minutes, by itself."
+            row=12
+            while [ "${row}" -le 17 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
+            _buttons 18 "${_step_end__focus}" "Restart now" "" "Stay in the live session" ""
+        fi
+        _rest 19
+        _key
+        case "${key}" in
+            h|l|left|right|tab|backtab)
+                if [ "${_step_end__focus}" = "left" ]; then _step_end__focus="right"; else _step_end__focus="left"; fi ;;
+            enter)
+                if [ -n "${try}" ]; then
+                    [ "${_step_end__focus}" != "left" ] || _engine empty "${disk}" >/dev/null 2>&1
+                elif [ "${_step_end__focus}" = "left" ]; then
+                    _term_back
+                    _as_root reboot
+                fi
+                exit 0 ;;
+        esac
+    done
 }
 
 ################################################################################
@@ -328,88 +1445,138 @@ case "${firmware}" in
     uefi|bios) [ -n "${try}" ] || _usage ;;
     *) _usage ;;
 esac
-engine="$(dirname "$(readlink -f "${0}")")/minos-installer-engine"
-[ -f "${engine}" ] || _end "The installer is not whole: there is no ${engine}."
-command -v whiptail >/dev/null 2>&1 || _end "The installer needs whiptail (package whiptail)."
-_as_root true 2>/dev/null < /dev/null || _end "The installer needs sudo without a password for $(id -un), or root."
-#cfdisk is in root's path, not always in a user's
-_as_root sh -c "command -v cfdisk" >/dev/null 2>&1 || _end "The installer needs cfdisk (package fdisk)."
-#what the engine cannot do here, it says
-facts="$(_engine facts 2>&1)" || _end "${facts}"
-log="$(printf "%s\n" "${facts}" | awk '$1 == "log" {print $2}')"
 
-#mostly black, as minos is: light grey on black, the choice under the cursor in reverse
-colours="root=lightgray,black roottext=gray,black window=lightgray,black border=gray,black shadow=black,black
-title=white,black textbox=lightgray,black acttextbox=black,lightgray button=black,lightgray
-actbutton=black,white compactbutton=lightgray,black listbox=lightgray,black actlistbox=black,lightgray
-sellistbox=lightgray,black actsellistbox=black,lightgray entry=white,gray disentry=gray,black
-label=lightgray,black helpline=gray,black"
-backtitle="minos installer${try:+, try mode} - arrows and Tab move, Enter chooses, Esc quits"
+#a terminal to draw on: one that is there, that moves its cursor, and that is large enough
+{ [ -t 0 ] && [ -t 1 ]; } || _end "The installer draws its screens on a terminal, and this is not one."
+case "${TERM:-dumb}" in
+    dumb|unknown|"") _end "The installer draws its screens, and this terminal (TERM=${TERM:-none}) cannot move its cursor." ;;
+esac
+#in the installer's own window the size is the window's, read once it is drawn on (_fit): i3 gives the
+#window its size after it opens. Anywhere else a terminal too small is said before anything is drawn
 # shellcheck disable=SC2046 # the rows and the columns, two words
 set -- $(stty size 2>/dev/null || printf "%s" "0 0")
-if [ "${1}" -lt "$((box_rows + 4))" ] || [ "${2}" -lt "$((box_columns + 4))" ]; then
-    _end "The installer needs a terminal of $((box_columns + 4)) columns by $((box_rows + 4)) rows: this one has ${2} by ${1}."
+if [ -z "${MINOS_INSTALLER_WINDOW:-}" ]; then
+    if [ "${1:-0}" -lt "${canvas_rows}" ] || [ "${2:-0}" -lt "${canvas_columns}" ]; then
+        _end "The installer needs a terminal of ${canvas_columns} columns by ${canvas_rows} rows: this one has ${2:-0} by ${1:-0}."
+    fi
 fi
-written="It has written nothing to the disk."
-answer=""; disk=""; mode="whole"; root=""; esp=""; keep=""; user=""; pass=""
-plan="$(mktemp)" || _end "No temporary file for the plan."
-trap 'rm -f "${plan}"' EXIT
-trap 'exit 130' INT TERM HUP
+origin_row=0; origin_column=0
 
+engine="$(dirname "$(readlink -f "${0}")")/minos-installer-engine"
+[ -f "${engine}" ] || _end "The installer is not whole: there is no ${engine}."
+_as_root true 2>/dev/null < /dev/null || _end "The installer needs sudo without a password for $(id -un), or root."
+engine_options=""
+[ -z "${try}" ] || engine_options="--try"
+[ -z "${firmware}" ] || engine_options="--try --firmware ${firmware}"
+#what the engine cannot do here, it says
+facts="$(_engine facts 2>&1)" || _end "${facts}"
+_fact() { printf "%s\n" "${facts}" | awk -v name="${1}" '$1 == name {print $2}'; }
+log="$(_fact log)"; progress_file="$(_fact progress)"; status_file="${log%.log}.status"
+firmware_now="$(_fact firmware)"
+system_size="$(_fact system-mib)M"
+#try mode asks as UEFI would unless told: the box it runs in starts by BIOS, and the questions that need
+#seeing are the other firmware's
 if [ -n "${try}" ] && [ -z "${firmware}" ]; then
-    _ui_choose "Try mode" "$(_text "The installer of the minos ISO, tried on this machine." "" \
-        "The disk you choose is partitioned and formatted for real. Then the" \
-        "command that would install minos is shown, not run." "" \
-        "The questions depend on how a computer started. Ask those of:")" "uefi" \
-        uefi "UEFI" bios "BIOS" || { clear; exit 0; }
-    firmware="${answer}"
+    firmware_now="uefi"; engine_options="--try --firmware uefi"
 fi
 
-position=1; direction=1
+#what the terminal can show: lines and blocks where it reads UTF-8, their plain stand-ins elsewhere; 256
+#colours where it has them. minos is mostly black: greys, one colour for what is made for minos, red
+#for what is deleted
+case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*)
+        g_h="─"; g_v="│"; g_tl="┌"; g_tr="┐"; g_bl="└"; g_br="┘"; g_lt="├"; g_rt="┤"; g_block="█"; g_dot="·"
+        g_branch="├─"; g_last="└─" ;;
+    *)  g_h="-"; g_v="|"; g_tl="+"; g_tr="+"; g_bl="+"; g_br="+"; g_lt="+"; g_rt="+"; g_block="#"; g_dot="-"
+        g_branch="|-"; g_last="\`-" ;;
+esac
+#from here on a character is a byte to this shell, whatever the terminal reads: what is measured and cut
+#is plain text
+LC_ALL=C; export LC_ALL
+c_esc="$(printf '\033')"; c_tab="$(printf '\t')"; c_cr="$(printf '\r')"; c_del="$(printf '\177')"; c_bs="$(printf '\010')"
+c_ctrl_u="$(printf '\025')"; c_ctrl_l="$(printf '\014')"
+c_nl="$(printf '\nx')"; c_nl="${c_nl%x}"
+#a row of the body, empty, and the pattern that is its width of any characters
+blank_row="                                                                            "
+first_row="????????????????????????????????????????????????????????????????????????????"
+s_off="${c_esc}[0m"; s_bold="${c_esc}[1;97m"; s_reverse="${c_esc}[7m"; s_here="${c_esc}[0;7m"
+s_accent="${c_esc}[36m"; s_danger="${c_esc}[91m"; s_warn="${c_esc}[33m"
+s_kept="${c_esc}[30;47m"; s_new="${c_esc}[30;46m"; s_gone="${c_esc}[97;41m"
+s_field="${c_esc}[4m"; s_field_here="${c_esc}[7m"
+colours_256=""
+case "${TERM}:${COLORTERM:-}" in *256color*|*:truecolor|*:24bit) colours_256="yes" ;; esac
+if [ -n "${colours_256}" ]; then
+    s_dim="${c_esc}[38;5;245m"; s_frame="${c_esc}[38;5;240m"; s_logo="${c_esc}[38;5;255m"; s_scan="${c_esc}[38;5;51m"
+else
+    s_dim="${c_esc}[90m"; s_frame="${c_esc}[90m"; s_logo="${c_esc}[97m"; s_scan="${c_esc}[96m"
+fi
+effects="on"
+case "${MINOS_INSTALLER_EFFECTS:-}" in off|no|0) effects="off" ;; esac
+
+written="Nothing was written."
+disk=""; choices=""; loaded=""; proposed=""; plan_view="plan"; edit_line=1; edit_open=""; edit_option=1
+# shellcheck disable=SC2034 # the units of a secret are read by its name, through eval
+{ pass_units=""; pass_again_units=""; }
+user=""; pass=""; pass_again=""; secret_wide=""; key_fresh=""; user_field=""; keys_ahead=""; install_status=1; watch=""
+intro_style="${intro_styles%% *}"; intro_played=""; effect_began=0; effect_frames=0
+#the plan the engine writes, and what it says when it fails, in a directory of this user's own: in /tmp
+#itself root may not write into another user's file (fs.protected_regular)
+work="$(mktemp -d)" || _end "No temporary directory for the plan."
+trap 'rm -rf "${work}"' EXIT
+plan="${work}/plan"; errors="${work}/errors"
+disks="$(_engine disks 2>"${errors}")" || _end "$(cat "${errors}")"
+steps="plan user confirm install"
+[ "$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-"' | grep -c .)" -le 1 ] || steps="disk plan user confirm install"
+
+if [ -n "${MINOS_INSTALLER_WINDOW:-}" ]; then
+    #the installer's own window is given its place and size by i3 once it is open: the first screen waits
+    #until the size holds still, a second at most
+    _main__size=""; _main__tries=0
+    while [ "${_main__tries}" -lt 10 ]; do
+        _main__now="$(stty size 2>/dev/null)"
+        [ "${_main__now}" != "${_main__size}" ] || break
+        _main__size="${_main__now}"; _main__tries="$((_main__tries + 1))"
+        sleep 0.1
+    done
+fi
+_term_take
+if [ -z "$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-"')" ]; then
+    #no disk minos can go to: said, with why each one is left out
+    _frame none "Enter" "close"
+    _row 1 "" ""; _row 2 "${s_bold}" "  There is no disk minos can go to"; _row 3 "" ""; row=4
+    while IFS="${c_tab}" read -r _main__device _main__size _ _main__refusal _; do
+        [ -n "${_main__device}" ] || continue
+        _row "${row}" "" "    ${_main__device#/dev/} (${_main__size}): ${_main__refusal}"; row="$((row + 1))"
+    done << E=O=F
+${disks}
+E=O=F
+    _row "${row}" "" ""; row="$((row + 1))"
+    _row "${row}" "" "    Attach a disk, or free one of these, and open the installer again."; row="$((row + 1))"
+    _rest "${row}"
+    while :; do _key; case "${key}" in enter|q|esc) exit 1 ;; esac; done
+fi
+
+#an install that is running already (this window was closed and opened again) is the one to show
+watch="$(_fact applying)"; [ "${watch}" != "-" ] || watch=""
+if [ -n "${watch}" ]; then
+    _step_install
+    _step_end
+fi
+
+position=0; direction=1
 while :; do
-    # shellcheck disable=SC2046 # the names of the questions, a word each
-    set -- $(_steps)
-    [ "${position}" -ge 1 ] || { clear; exit 0; }
-    [ "${position}" -le "${#}" ] || break
-    shift "$((position - 1))"
-    "_ask_${1}"
+    # shellcheck disable=SC2086 # the names of the steps, a word each
+    set -- intro disk plan user confirm install end
+    [ "${position}" -ge 0 ] || position=0
+    shift "${position}"
+    "_step_${1}"
     case "${?}" in
         0) direction=1; position="$((position + 1))" ;;
         1) direction=-1; position="$((position - 1))" ;;
         3) position="$((position + direction))" ;;
+        #the plan no longer holds (the disk changed under it): back to the plan, which says why
+        4) direction=-1; position="$((position - 2))" ;;
     esac
 done
-
-#the plan applied: what the engine and the tools say is the screen now
-clear
-printf "%s\n" "${pass}" | _engine apply "${plan}" "${user}"
-code="${?}"
-if [ "${code}" != 0 ]; then
-    _ui_message "The install stopped" "$(_text "minos is not installed. The last that was said:" "" \
-        "$(sed "s/$(printf '\033')\\[[0-9;]*m//g" "${log}" 2>/dev/null | tr '\r' '\n' | tr -d '\b' | grep '[^ ]' | tail -n 8 | cut -c1-72)" "" \
-        "All of it is in ${log}. Open the installer again to start over.")" "Close"
-    clear
-    exit 1
-fi
-if [ -n "${try}" ]; then
-    _ui_message "Try mode" "$(_text "Try mode stops here: the disk is written, minos is not installed." "" \
-        "minos would now be installed with:" "$(grep -A 1 'minos would now be installed with' "${log}" | tail -n 1)" "" \
-        "$(_engine show "${disk}")")"
-    if _ui_confirm "Try mode" "$(_text "Empty ${disk#/dev/} again, for the next try?" "" \
-        "Its partition table and file systems go, and it is as a new disk.")" "Empty it" "Leave it as it is"; then
-        _engine empty "${disk}" || _ui_message "Try mode" "${disk#/dev/} could not be emptied." "Close"
-    fi
-fi
-note=""
-[ -z "${try}" ] || note="(Try mode: nothing was installed, and Restart now does not restart.)"
-#a live session started by UEFI waits for a key before it restarts, on a screen that says nothing (casper
-#asks for the medium to be taken out through plymouth, whose theme shows no messages)
-if _ui_confirm "minos is installed" "$(_text "minos is on ${disk#/dev/}, for the user ${user}." "" \
-    "Restart to start it. If the screen then stays dark, it is waiting for" \
-    "you: take the installation medium out (the USB stick or the CD) and" \
-    "press Enter." "" "${note}")" "Restart now" "Stay in the live session"; then
-    [ -n "${try}" ] || _as_root reboot
-fi
-clear
 
 # vim: set ts=8 sw=4 tw=0 ft=sh :

@@ -8,7 +8,7 @@
 #
 # In try mode the installer partitions and formats the empty disk for real, shows the command that would
 # install minos, and stops; it offers to empty the disk again for the next try. The box starts by BIOS:
-# the installer asks which firmware's questions to walk, or takes it from --firmware.
+# the installer makes its plans as for UEFI unless told (f on its first screen, or --firmware bios).
 Vagrant.configure("2") do |config|
   config.vm.box     = "minos/desktop-26.04"
   config.vm.box_url = "https://minos.io/vagrant/desktop-26.04.json"
@@ -35,9 +35,10 @@ Vagrant.configure("2") do |config|
   # Win+i in the box's i3, as in the live session (iso/build writes the same two lines there, for the
   # installer the ISO carries): the installer's terminal floats in the middle of the screen
   config.vm.provision "shell", inline: <<~'SHELL'
-    # the installer's screens are whiptail's, which the ISO's live system carries and this box does not
-    command -v whiptail >/dev/null || { apt-get update -q &&
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends whiptail; }
+    # the installer draws its own screens and needs nothing the box lacks: sfdisk for its engine, which
+    # the ISO's live system carries, comes with the box's fdisk
+    command -v sfdisk >/dev/null || { apt-get update -q &&
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends fdisk; }
     grep -q minos-installer /etc/i3/config || printf '%s\n' '' \
         '#the installer of the minos ISO, in try mode, from /vagrant' \
         'for_window [class="^URxvt$" instance="^minos-installer$"] floating enable, move position center' \
