@@ -42,8 +42,11 @@ _end() { #message... => said on the terminal, which stays open until Enter when 
 
 _open_window() { #argument... => the installer with ARGUMENTS in a terminal of its own, the size of its
     #screens, which i3 floats in the middle of the screen (the for_window of its instance name); when
-    #one is open already, that one comes to the front instead
-    if pgrep -f "urxvt -name minos-installer" >/dev/null 2>&1; then
+    #one is open already, that one comes to the front instead. Open means its terminal is running: a
+    #command line that begins with it. One that only names it is no window (a pgrep that looks for it,
+    #as this one does: that of an installer started at the same moment, or of a script that watches for
+    #it), and taken for one it left the key with nothing to show: the pattern does not match its own text
+    if pgrep -f "^[u]rxvt -name minos-installer" >/dev/null 2>&1; then
         i3-msg '[instance="^minos-installer$"] focus' >/dev/null 2>&1
         exit 0
     fi
