@@ -48,9 +48,50 @@ _line "network" "${address:-no address }$(grep -o 'net.ifnames=0' /proc/cmdline)
 _line "dns" "archive.ubuntu.com ${resolved:-NOT RESOLVED} after ${waited}s; $(ip -4 route show default | head -n 1 | cut -d' ' -f1-5); $(resolvectl dns 2>/dev/null | tr '\n' ' ' | tr -s ' ' | cut -c1-100)"
 _line "sudo without password (${user})" "$(su - "${user}" -c 'sudo -n true' >/dev/null 2>&1 && echo ok || echo FAIL)"
 
-#does this tmux take minos' configuration, the user's copy?
+#does this tmux take minos' configuration, the user's copy? A server of its own (-L probe) loads it, says
+#what it finds wrong in it, and is killed. The configuration starts minos' plugins in the background, and
+#a plugin's script that calls tmux once its server is gone starts a server of its own, which loads the
+#configuration and starts the plugins again; that server has no session, so it ends at once, and its
+#plugins start the next one: it never stops, and keeps every processor of the system busy from then on.
+#So the server is killed when nothing it started runs any more (what it starts carries its socket in
+#TMUX; its panes' shells apart, which live as long as it does; a minute at most), and whatever outlives it
+#is killed and said, which fails the check as tmux's own words do. It takes the seconds the plugins take
+#to load, and two more
 _line "tmux -V" "$(tmux -V 2>&1) ($(dpkg -S "$(readlink -f "$(command -v tmux)")" 2>/dev/null | cut -d: -f1))"
-_line "tmux source-file ~/.tmux.conf" "$(su - "${user}" -c 'tmux -f /dev/null -L probe new-session -d && tmux -L probe source-file ~/.tmux.conf; tmux -L probe kill-server' 2>&1 | head -3 | tr '\n' ' ' | cut -c1-170 | grep . || echo "no errors")"
+tmux_check="$(cat << 'E=O=F'
+tmux -f /dev/null -L probe new-session -d && tmux -L probe source-file ~/.tmux.conf
+_panes() { tmux -L probe list-panes -a -F '/proc/#{pane_pid}/environ' 2>/dev/null; }
+panes="$(_panes)"
+socket="$({ tr '\0' '\n' < "$(printf "%s\n" "${panes:-none}" | head -n 1)"; } 2>/dev/null | sed -n 's/^TMUX=\([^,]*\),.*/\1/p')"
+_started() { #=> the processes the check's server started that are running, as /proc/PID/environ, a line each
+    [ -n "${socket}" ] || return 0
+    grep -l -z "^TMUX=${socket}," /proc/[0-9]*/environ 2>/dev/null | grep -v -x -F "${panes:-none}"
+}
+#nothing running in two looks a second apart: a script's last act may be to ask the server for another
+waited=0; quiet=0
+while [ "${quiet}" -lt 2 ] && [ "${waited}" -lt 60 ]; do
+    sleep 1; waited="$((waited + 1))"; panes="$(_panes)"
+    if [ -n "$(_started)" ]; then quiet=0; else quiet="$((quiet + 1))"; fi
+done
+tmux -L probe kill-server
+#the panes' shells end with the server: a few seconds for them, and what is left then is not theirs. tmux
+#itself is not asked again: a command of its own could start the server anew
+panes=""; waited=0
+while [ -n "$(_started)" ] && [ "${waited}" -lt 5 ]; do sleep 1; waited="$((waited + 1))"; done
+left="$(_started)"
+if [ -n "${left}" ]; then
+    printf "%s processes outlived the check's tmux server and were killed, the first: %s\n" "$(printf "%s\n" "${left}" | grep -c .)" \
+        "$({ tr '\0' ' ' < "$(printf "%s\n" "${left}" | head -n 1 | sed 's/environ$/cmdline/')"; } 2>/dev/null | cut -c1-70)"
+    #each of them may be starting others meanwhile: until a look finds none, ten seconds at most
+    rounds=0
+    while [ -n "${left}" ] && [ "${rounds}" -lt 50 ]; do
+        for process in ${left}; do process="${process#/proc/}"; kill -9 "${process%/environ}" 2>/dev/null; done
+        sleep 0.2; rounds="$((rounds + 1))"; left="$(_started)"
+    done
+fi
+E=O=F
+)"
+_line "tmux source-file ~/.tmux.conf" "$(su - "${user}" -c "${tmux_check}" 2>&1 | head -3 | tr '\n' ' ' | cut -c1-170 | grep . || echo "no errors")"
 
 #the firmware this boot asked the kernel for, and what there is of it
 _line "firmware asked for (dmesg)" "$(dmesg 2>/dev/null | grep -iE 'firmware.*(fail|direct-load|not found)|failed to load.*firmware' | head -3 | tr '\n' ' ' | cut -c1-200 | grep . || echo none); $(find /usr/lib/firmware -type f 2>/dev/null | wc -l) files in /usr/lib/firmware"
