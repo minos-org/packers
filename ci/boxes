@@ -9,7 +9,7 @@
 #(scripts/live.sh, as root), its first boot with box.sh as Packer runs it, export.sh; no Packer, no subiquity,
 #no Ubuntu ISO. BUILD=given checks the box BOX_DIR already holds (NAME.box and NAME.sha256).
 #usage: [FLAVOURS="core desktop"] [BUILD=packer|live|given] [ORIGIN=bench BENCH=DIR] [SETUP=FILE]
-#       [MIRROR=URI] [BOX_DIR=DIR] ci/boxes RELEASE...
+#       [MIRROR=URI] [BOX_DIR=DIR] [DISK_SIZE=SIZE] [STEPS="install vagrant"] ci/boxes RELEASE...
 #       MIRROR, the Ubuntu archive the installer fetches from (minos.pkr.hcl's mirror): by default the one
 #       this machine's apt reads (ci/mirror), on a GitHub-hosted runner its cloud's; the box keeps
 #       archive.ubuntu.com and security.ubuntu.com in its sources (scripts/box.sh). BUILD=live leaves it
@@ -17,7 +17,9 @@
 #       ORIGIN=bench, for test builds: minos from the packages in DIR/SERIES (minos' bench leaves them in
 #       out/SERIES) and the setup script FILE, instead of the minos archive and minos.io/s (minos.pkr.hcl,
 #       origin bench); it needs dpkg-scanpackages (dpkg-dev). ci/verdict passes only boxes of the archive
-#       BUILD=live, from the minos archive only: SETUP names the installer it runs (minos-org.github.com/setup)
+#       BUILD=live, from the minos archive only: SETUP names the installer it runs (minos-org.github.com/setup);
+#       DISK_SIZE the size of the box's disk (10G) and STEPS the steps of scripts/live.sh it runs: install alone
+#       stops after it and keeps the disk, vagrant alone goes on from the disk that install kept
 #       needs packer's and the boxes' tools on the PATH: qemu-system-x86, qemu-utils, xorriso, curl, unzip,
 #       file, libxml2-utils, openssh-client, zerofree, e2fsprogs, xz-utils, and sudo for installing
 #       Vagrant's package and for the qemu-nbd of scripts/export.sh; BUILD=live needs sudo for losetup,
@@ -154,17 +156,33 @@ _build_packer() { #Packer installs Ubuntu's live-server ISO with minos' recipe (
     _line "zeros at export" "$(grep -ho 'zeros: .*' "${logs}/packer.log" | sed 's/^zeros: //' | awk '{printf "%s%s", (NR > 1 ? "; " : ""), $0}' | cut -c1-300)"
 }
 
+_wants() { #$1 a step of scripts/live.sh => true when STEPS runs it (both by default)
+    case " ${STEPS:-install vagrant} " in *" ${1} "*) return 0 ;; esac
+    return 1
+}
+
+_kill_qemu() { #$1 pid: the machine stopped, and gone before what comes next takes its port
+    kill "${1}" 2>/dev/null
+    while kill -0 "${1}" 2>/dev/null; do sleep 1; done
+}
+
 _build_live() { #setup's live mode onto a loop disk and the vagrant step inside it (scripts/live.sh, as root),
                 #then what Packer does after an install: the first boot with box.sh, a clean poweroff, export.sh
     start="$(date +%s)"
+    #sudo keeps none of this environment: what live.sh reads is given to it
     # shellcheck disable=SC2024 # the log is this user's: only live.sh needs root
-    sudo sh "${w}/scripts/live.sh" "${release}" "${flavour}" "${setup}" "${out}" > "${logs}/live.log" 2>&1; status="${?}"
+    sudo env STEPS="${STEPS:-install vagrant}" DISK_SIZE="${DISK_SIZE:-10G}" \
+        sh "${w}/scripts/live.sh" "${release}" "${flavour}" "${setup}" "${out}" > "${logs}/live.log" 2>&1; status="${?}"
     sudo chown -R "$(id -u):$(id -g)" "${out}/${name}"
     if [ -f "${out}/${name}/install.log" ]; then sed 's/^[0-9]* //' "${out}/${name}/install.log" > "${logs}/install.log"; fi
     installed="$(date +%s)"
     _line "live install" "$(grep -h '^live: ' "${logs}/live.log" | sed 's/^live: //' | tr '\n' ';' | cut -c1-400)"
     if [ "${status}" != "0" ]; then
         _line "live build (${origin})" "FAIL  (${status}) $(tail -3 "${logs}/live.log" | tr '\n' ' ' | cut -c1-220)"
+        return 1
+    fi
+    if ! _wants vagrant; then
+        _line "live build (${origin})" "stopped after the steps asked (${STEPS}): the disk stays in ${out}/${name}"
         return 1
     fi
     #the first boot, as Packer's: KVM, virtio, the disk's freed blocks handed back to the image file, Vagrant's key
@@ -176,16 +194,25 @@ _build_live() { #setup's live mode onto a loop disk and the vagrant step inside 
         { _line "live build (${origin})" "FAIL  qemu did not start for the first boot"; return 1; }
     qemu="$(cat "${tmp}/box.pid")"
     until _ssh "${key}" true 2>/dev/null; do
-        [ "$(($(date +%s) - installed))" -gt 300 ] && break
+        if [ "$(($(date +%s) - installed))" -gt 300 ]; then
+            _line "live build (${origin})" "FAIL  the first boot let no ssh in within 300s: $(tr -d '\r' < "${logs}/first-boot-serial.log" | tail -2 | tr '\n' ' ' | cut -c1-160)"
+            _kill_qemu "${qemu}"; return 1
+        fi
         sleep 3
     done
     #the provisioner: box.sh as root, uploaded where Packer puts its scripts; no MIRROR, setup's live mode
     #fetched from archive.ubuntu.com itself
     _ssh "${key}" 'cat > /tmp/box.sh' < "${w}/scripts/box.sh" &&
         _ssh "${key}" 'sudo sh /tmp/box.sh' >> "${logs}/live.log" 2>&1; status="${?}"
+    #the poweroff, given the time Packer gives its shutdown_command (shutdown_timeout, 5 minutes): a machine still
+    #up then is stopped, and its disk, which may be halfway written, is not exported
     _ssh "${key}" 'sudo shutdown -P now' >/dev/null 2>&1
+    shutdown="$(date +%s)"
     while kill -0 "${qemu}" 2>/dev/null; do
-        [ "$(($(date +%s) - installed))" -gt 900 ] && { _line "live build (${origin})" "FAIL  the first boot is still up"; kill "${qemu}"; }
+        if [ "$(($(date +%s) - shutdown))" -gt 300 ]; then
+            _line "live build (${origin})" "FAIL  the first boot was still up 300s after its poweroff"
+            _kill_qemu "${qemu}"; return 1
+        fi
         sleep 1
     done
     booted="$(date +%s)"
@@ -210,7 +237,9 @@ _box() { #build, check and add one box
     release="${1}"; flavour="${2}"
     name="minos-${flavour}-${release}"
     logs="${out}/logs/${name}"
-    rm -rf "${out:?}/${name}" "${out}/${name}".* "${logs}" "${tmp}"; mkdir -p "${logs}" "${tmp}"
+    rm -rf "${out:?}/${name}".* "${logs}" "${tmp}"; mkdir -p "${logs}" "${tmp}"
+    #a live build that skips the install step goes on from the disk the last one kept
+    { [ "${build}" = "live" ] && ! _wants install; } || rm -rf "${out:?}/${name}"
     _tools > "${logs}/tools.log" 2>&1 || { _line "tools" "FAIL  $(tail -2 "${logs}/tools.log" | tr '\n' ' ')"; return 1; }
     export PATH="${cache}/bin:${PATH}" PACKER_CACHE_DIR="${cache}/packer" PACKER_PLUGIN_PATH="${cache}/plugins" CHECKPOINT_DISABLE=1
 
@@ -369,7 +398,10 @@ case "${build}" in
         #setup's live mode installs minos from the minos archive; the bench's packages reach only Packer's
         [ "${origin}" = "ppa" ] || { printf "%s\\n" "BUILD=live installs from the minos archive: ORIGIN=ppa" >&2; exit 2; }
         [ -f "${SETUP:-}" ] || { printf "%s\\n" "BUILD=live: SETUP names the setup script it runs" >&2; exit 2; }
-        setup="$(cd "$(dirname "${SETUP}")" && pwd)/$(basename "${SETUP}")" ;;
+        setup="$(cd "$(dirname "${SETUP}")" && pwd)/$(basename "${SETUP}")"
+        for step in ${STEPS:-install vagrant}; do
+            case "${step}" in install|vagrant) : ;; *) printf "%s\\n" "BUILD=live: STEPS=${STEPS}: the steps are install and vagrant" >&2; exit 2 ;; esac
+        done ;;
     *) printf "%s\\n" "BUILD=${build}: the build is packer, live or given" >&2; exit 2 ;;
 esac
 mkdir -p "${cache}" "${out}"

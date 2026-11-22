@@ -4,7 +4,7 @@
 #Ubuntu ISO), then scripts/live-vagrant.sh adds inside it what a Vagrant base box needs, as
 #autoinstall/vagrant.yaml does for the boxes Packer makes. ci/boxes boots the image once for scripts/box.sh
 #and packs it with scripts/export.sh, as Packer does.
-#usage: [STEPS="install vagrant"] live.sh RELEASE FLAVOUR SETUP OUTPUT     (as root)
+#usage: [STEPS="install vagrant"] [DISK_SIZE=10G] live.sh RELEASE FLAVOUR SETUP OUTPUT     (as root)
 #       => OUTPUT/minos-FLAVOUR-RELEASE/minos-FLAVOUR-RELEASE.raw, and beside it install.log: setup's output,
 #          each line after the second it was printed at
 #       needs losetup, sfdisk, mkfs.ext4, chroot, perl and the network; setup fetches debootstrap when the
