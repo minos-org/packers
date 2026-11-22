@@ -11,7 +11,11 @@
 #screen; and, the desktop bare again, a click on the wallpaper opens the menu of the background, "Install
 #minos" its first row, whose row Enter takes, and another menu, whose second row a click takes. A watcher
 #the probe leaves behind says what shows (the installer's window, a terminal, the menu with its entries
-#and its place), and the lines for ci/verdict.
+#and its place, the disks the installer keeps between openings), another the titles of the installer's
+#windows as they change, and the lines for ci/verdict. The installer's read of the disks is watched on the
+#way: the first opening draws its first screen while it reads them, r reads them again to what was kept,
+#the menu's opening reads none, a disk added (a USB stick, through QMP) is listed at the next opening, and a
+#window closed in the middle of a read (held there by a script typed in a terminal) leaves nothing behind.
 #usage: [CABLE=no] live-check ISO FIRMWARE MEDIUM OUTPUT [MINUTES]
 #  FIRMWARE    bios (SeaBIOS), uefi (OVMF) or secureboot (OVMF with Secure Boot on, Microsoft's keys)
 #  MEDIUM      cd or usb
@@ -22,14 +26,15 @@
 #     background-menu,menu-enter,menu-pointer,menu-click}.png; exit 0 when the
 #     desktop came up within MINUTES (10), the probe found an address and resolved a name (no cable: none),
 #     with secureboot Secure Boot was on, Win+i opened the installer, a click on the wallpaper opened the menu
-#     with "Install minos" first, Enter on it opened the installer and a click on its Terminal a terminal
-#needs qemu-system-x86_64, KVM, socat, xorriso and netpbm (pngtopnm, pnmtopng, pamfile, pamcut, pamchannel,
-#pamsumm); OVMF
+#     with "Install minos" first, Enter on it opened the installer and a click on its Terminal a terminal,
+#     and the installer read the disks as said above
+#needs qemu-system-x86_64, qemu-img, KVM, socat, xorriso, sfdisk and netpbm (pngtopnm, pnmtopng, pamfile, pamcut,
+#pamchannel, pamsumm); OVMF
 #for uefi and secureboot
 
 set -eu
 iso="${1:-}"; firmware="${2:-}"; medium="${3:-}"; out="${4:-}"; minutes="${5:-10}"
-if [ ! -f "${iso}" ] || [ -z "${medium}" ] || [ -z "${out}" ]; then sed -n '14,23s/^#//p' "${0}" >&2; exit 2; fi
+if [ ! -f "${iso}" ] || [ -z "${medium}" ] || [ -z "${out}" ]; then sed -n '19,30s/^#//p' "${0}" >&2; exit 2; fi
 cable="${CABLE:-yes}"
 name="${firmware}-${medium}"; [ "${cable}" = yes ] || name="${name}-nocable"
 
@@ -106,7 +111,63 @@ journalctl -b -p err --no-pager -q | tail -n 10 | while read -r line; do _say "j
 #command line names the installer's window, and it is none: the installer opens beside it each time the
 #check asks, or its guard against a second window is taking a name for a window again
 setsid sh "$(dirname "${0}")/watch" "not a window: urxvt -name minos-installer" < /dev/null > /dev/null 2>&1 &
+setsid sh "$(dirname "${0}")/titles" < /dev/null > /dev/null 2>&1 &
 _say "done" ""
+E=O=F
+    cat > "${1}/probe/titles" << 'E=O=F'
+#!/bin/sh
+#live-check's titles: each title an installer's window takes, as it takes it, on the serial port as "titles:
+#N MS TITLE" lines, N the window's number (the Nth installer's window to show), MS this machine's clock in
+#milliseconds. A window is found as it gets the focus, which i3 gives a new window at once, and told by
+#its terminal's process (X reuses the numbers of windows gone); its title is followed from then on, by the
+#X server's own events, while that process lives
+export DISPLAY=":0" XAUTHORITY="/home/minos/.Xauthority"
+seen=""; n=0
+xprop -root -spy _NET_ACTIVE_WINDOW | while read -r line; do
+    window="${line##* }"
+    xprop -id "${window}" WM_CLASS 2>/dev/null | grep -q '"minos-installer"' || continue
+    pid="$(xprop -id "${window}" _NET_WM_PID 2>/dev/null | sed -n 's/.* = //p')"
+    case " ${seen} " in *" ${pid:-none} "*) continue ;; esac
+    seen="${seen} ${pid}"; n="$((n + 1))"
+    xprop -id "${window}" -spy WM_NAME 2>/dev/null | while read -r title; do
+        [ -d "/proc/${pid}" ] || break
+        title="${title#*= \"}"
+        printf "titles: %s %s %s\n" "${n}" "$(($(date +%s%N) / 1000000))" "${title%\"}" > /dev/ttyS0
+    done &
+done
+E=O=F
+    cat > "${1}/probe/hold" << 'E=O=F'
+#!/bin/sh
+#live-check's hold, typed as root in a terminal: the installer's next read of the disks held (SIGSTOP) as soon
+#as it runs; its window waited for to close; the read let go, and how many processes it starts until it is
+#gone, and what of it is left. On the serial port, "hold: " lines
+_say() { printf "hold: %s\n" "${*}" > /dev/ttyS0; }
+_count() { awk '$1 == "processes" {print $2}' /proc/stat; }
+_say "armed; the disks: $(lsblk -dno NAME,SIZE,TYPE | awk '$3 == "disk" {printf "%s %s, ", $1, $2}')"
+waited=0
+until pid="$(pgrep -f '^sh [^ ]*minos-installer-engine.* disks')"; do
+    sleep 0.05; waited="$((waited + 1))"; [ "${waited}" -lt 1200 ] || { _say "no read in a minute"; exit 1; }
+done
+pid="${pid%%[!0-9]*}"
+kill -STOP "${pid}"
+#its session: the sudo that started it, which may stop itself when its command stops, is let go too
+sid="$(ps -o sid= -p "${pid}" | tr -d ' ')"
+_say "held: $(ps -o pid=,stat=,comm= -s "${sid}" | tr -s ' \n' '  ')"
+waited=0
+while pgrep -f '^[u]rxvt -name minos-installer' > /dev/null; do
+    sleep 0.05; waited="$((waited + 1))"; [ "${waited}" -lt 1200 ] || { _say "the window was not closed in a minute"; exit 1; }
+done
+#what starts from here on until the engine is gone, but for this wait's own sleeps, the two of the
+#count's substitution and the pkill that lets the session go (a list of its processes may hold one that
+#has ended since)
+at="$(date +%s%N)"; before="$(_count)"; n=0
+pkill -CONT -s "${sid}"
+while [ -d "/proc/${pid}" ] && [ "${n}" -lt 500 ]; do sleep 0.02; n="$((n + 1))"; done
+after="$(_count)"; ended="$(( ($(date +%s%N) - at) / 1000000 ))"
+#and the rest of its session a moment later: sudo ends once its command has
+sleep 1
+left="$(ps -o pid=,comm= -s "${sid}" | tr -s ' \n' '  ')"
+_say "let go once the window was gone: ended ${ended} ms later, $((after - before - n - 3)) processes started by it; left: ${left:-nothing}"
 E=O=F
     cat > "${1}/probe/watch" << 'E=O=F'
 #!/bin/sh
@@ -124,8 +185,18 @@ _terminal_shows() { #=> true when a terminal's window is on the screen: urxvt's,
     done
     return 1
 }
+#the disks the installer keeps between openings, in the live user's directory of the session
+kept="/run/user/$(id -u minos)/minos-installer-disks"; kept_last=""
 last=""; told=""
 while :; do
+    #when they were written, a digest of their rows and how many rows, each time they are written: "kept:
+    #WHEN DIGEST ROWS" lines
+    kept_now="$(stat -c %y "${kept}" 2>/dev/null | tr ' ' '_')"
+    if [ "${kept_now}" != "${kept_last}" ]; then
+        printf "kept: %s %s %s\n" "${kept_now:-none}" "$(sed -n '/^rows$/,/^end$/p' "${kept}" 2>/dev/null | md5sum | cut -c1-12)" \
+            "$(sed -n '/^rows$/,/^end$/p' "${kept}" 2>/dev/null | grep -c "$(printf '\t')")" > /dev/ttyS0
+        kept_last="${kept_now}"
+    fi
     now="nothing"
     pid="$(pgrep -o -f '/(m|minos)-menu ')"
     if [ -n "${pid}" ]; then
@@ -193,11 +264,13 @@ if [ "${firmware}" != bios ]; then
     firmware_options="${firmware_options} -drive if=pflash,format=raw,unit=1,file=${run}/vars.fd"
 fi
 
-#the medium, the probe on the next SATA port, a network card, the serial port to a file
+#the medium, the probe on the next SATA port, a USB controller for a disk added later, a network card, the
+#serial port to a file
 _step "booting the live session of $(basename "${iso}") (${firmware}, ${medium})"
 # shellcheck disable=SC2086 # lists of options
 qemu-system-x86_64 -enable-kvm -machine "${machine}" -cpu host -smp 2 -m 4096 ${firmware_options} ${medium_options} \
     -drive "if=none,id=probe,media=cdrom,readonly=on,format=raw,file=${run}/probe.iso" -device ide-cd,drive=probe,bus=ide.1 \
+    -device qemu-xhci,id=hotplug \
     -netdev user,id=net0 -device virtio-net-pci,netdev=net0,id=nic0 -vga std -display none -serial "file:${serial}" \
     -monitor "unix:${run}/monitor,server,nowait" -qmp "unix:${run}/qmp,server,nowait" -no-reboot -daemonize -pidfile "${run}/qemu.pid" -S
 qemu="$(cat "${run}/qemu.pid")"
@@ -280,6 +353,51 @@ _first_screen meta_l-i
 _wait_serial "watch: installer" 30 || { _screen installer; _die "Win+i opened no installer"; }
 sleep 5
 _screen installer
+#the disks, which the installer reads while it draws. The facts are what its window's title said, in order
+#(the probe's titles, with this machine's times), and what it kept, as the watcher saw it written
+_titles() { #n => the titles the Nth window of the installer took, "MS TITLE" a line: the Nth to show
+    tr -d '\r' < "${serial}" | awk -v n="${1}" '$1 == "titles:" && $2 == n {ms = $3; $1 = $2 = $3 = ""; sub(/^ +/, ""); print ms, $0}'
+}
+_title_first() { #n => title_at and title, the first title the installer itself gave its Nth window
+    title_at=""; title=""
+    # shellcheck disable=SC2046 # the time and the title
+    set -- $(_titles "${1}" | awk '$2 == "minos" && $3 == "installer" && $4 == "-" {$2 = $3 = $4 = ""; print; exit}')
+    title_at="${1:-}"; [ "${#}" = 0 ] || shift; title="${*}"
+}
+_kept_last() { #=> the last thing the watcher said of the disks the installer keeps: WHEN DIGEST ROWS
+    sed -n 's/^kept: //p' "${serial}" | tr -d '\r' | tail -n 1
+}
+#the first opening, with nothing kept: its first screen drawn while it read the disks, which its title
+#says (it is given as the screen is drawn) until they are known
+_title_first 1
+[ "${title}" = "intro reading" ] ||
+    _die "the installer, with nothing kept, did not draw its first screen while it read the disks: its first title was \"${title}\""
+_listed__at="$(_titles 1 | awk '$2 == "minos" && $4 == "-" && $5 == "intro" && ($6 == "" || $6 == "ready") {print $1; exit}')"
+[ -n "${_listed__at}" ] || _die "the installer never listed the disks: its titles were $(_titles 1 | tr '\n' ',')"
+disks_listed="$((_listed__at - title_at))"
+_kept__first="$(_kept_last)"
+[ -n "${_kept__first}" ] || _die "the installer read the disks and kept nothing"
+_step "the installer's first screen drawn while it read the disks, listed ${disks_listed} ms after it; kept: ${_kept__first}"
+#r reads them again: from the intro (Enter) to the screen that lists the disks, here the one that says
+#there is none minos can go to (the medium aside, this machine has no disk). What it reads is kept again,
+#and is what was kept before
+_read__start="$(date +%s)"; _read__kept="$(_count_serial '^kept: ')"
+_press ret
+_read__waited=0
+until _titles 1 | tail -n 1 | grep -q ' minos installer - disk$'; do
+    _read__waited="$((_read__waited + 1))"
+    [ "${_read__waited}" -le 20 ] || { _screen disk; _die "Enter on the intro did not show the disks: $(_titles 1 | tail -n 1)"; }
+    sleep 0.5
+done
+_press r
+_wait_serial_count "^kept: " "$((_read__kept + 1))" 30 || { _screen disk; _die "r on the screen of the disks read nothing again"; }
+_screen disk
+# shellcheck disable=SC2046,SC2086 # when, the digest, the rows, of each
+set -- $(_kept_last) ${_kept__first}
+[ "${1}" != "${4}" ] || _die "r on the screen of the disks kept nothing new: ${*}"
+[ "${2} ${3}" = "${5} ${6}" ] || _die "r read other disks than the ones kept: $(_kept_last), kept before ${_kept__first}"
+read_again="${3}"
+_step "r read the disks again: the same ${read_again} rows as kept ($(($(date +%s) - _read__start)) s)"
 #the menu of the background. The installer is left and the terminal too, so the wallpaper is bare; a click
 #on it, where the pointer has been all along, opens the menu, which on the ISO has "Install minos" as its
 #first row: the watcher says what its script was given, and where rofi drew it. Then a row is taken twice,
@@ -289,8 +407,8 @@ _screen installer
 _watch_last() { #=> the serial log's last "watch: " line
     grep '^watch: ' "${serial}" | tail -n 1 | tr -d '\r'
 }
-_installer_leave() { #=> the installer's window closed: q (this machine has no disk, and the screen that says
-    #so closes on it; where it has one, q asks and y answers)
+_installer_leave() { #=> the installer's window closed: q (on the screen that says there is no disk minos can
+    #go to, q closes it; elsewhere q asks and y answers)
     _press q
     sleep 3
     [ "$(_watch_last)" != "watch: installer" ] || _press y
@@ -325,7 +443,11 @@ _wait_serial_count "^watch: installer" "$((_menu__installers + 1))" 30 ||
 sleep 3
 _screen menu-enter
 _step "a row by Enter: Install minos, the installer's window"
+#its second opening: the disks listed from what was kept, with no read
+_title_first 2
+[ "${title}" = "intro" ] || _die "the installer, opened again, did not list the disks it kept: its first title was \"${title}\""
 _installer_leave
+[ "$(_count_serial '^kept: ')" = "$((_read__kept + 1))" ] || _die "the installer, opened again, read the disks again: $(_kept_last)"
 _bare || { _screen menu-enter; _die "the installer, left, did not leave the wallpaper bare"; }
 _click
 _wait_serial_count "^watch: menu at " 2 30 || { _screen menu-click; _die "a second click on the wallpaper opened no menu"; }
@@ -346,6 +468,55 @@ _wait_serial_count "^watch: terminal" "$((_menu__terminals + 1))" 30 ||
 sleep 3
 _screen menu-click
 _step "a row by a click: Terminal, at ${_menu__x},${_menu__y}, a terminal"
+#a disk added while the session runs: a USB stick with eight partitions, on the controller kept for it.
+#The next opening reads the disks, since the kernel's partitions are not the ones kept: the probe's hold,
+#typed in the terminal, holds that read in the middle, and the window is closed meanwhile; once it is gone
+#the read is let go, and must end by itself, the rest unread, leaving nothing of it behind
+_added__start="$(date +%s)"
+qemu-img create -q -f raw "${run}/added.img" 1G
+{ printf "%s\n" "label: gpt"; for _added__n in 1 2 3 4 5 6 7 8; do printf "%s\n" ",64M,L"; done; } |
+    sfdisk -q "${run}/added.img" > /dev/null || _die "cannot write the partitions of the disk to add"
+_monitor "drive_add 0 if=none,id=added,file=${run}/added.img,format=raw" >/dev/null
+_monitor "device_add usb-storage,bus=hotplug.0,drive=added,id=added" >/dev/null
+sleep 3
+_type "sudo sh /mnt/hold"; _press ret
+_wait_serial "^hold: armed" 30 || { _screen hold; _die "the probe's hold did not start"; }
+_hold__disks="$(sed -n 's/^hold: armed; the disks: //p' "${serial}" | tr -d '\r' | tail -n 1)"
+case "${_hold__disks}" in *" 1G,"*) ;; *) _die "the disk added is not one of the machine's: ${_hold__disks}" ;; esac
+_press meta_l-i
+_wait_serial "^hold: held" 30 || { _screen hold; _die "the installer, opened with a disk added, did not read the disks"; }
+sleep 2
+_screen installer-held
+_press q; sleep 1; _press y
+_wait_serial "^hold: let go" 60 || { _screen hold; _die "the installer's window, closed while it read, did not go"; }
+_hold__line="$(sed -n 's/^hold: let go once the window was gone: //p' "${serial}" | tr -d '\r' | tail -n 1)"
+_hold__processes="$(printf "%s" "${_hold__line}" | sed -n 's/.* ms later, \([0-9-]*\) processes started by it;.*/\1/p')"
+#once let go, the engine stops before the next disk or partition: what it began goes on (held in its
+#start, 19 processes were seen), and a whole read is over 60 (the eight partitions, 8 each)
+case "${_hold__line}" in
+    *"; left: nothing") ;;
+    *) _die "the read, its window closed, left processes behind: ${_hold__line}" ;;
+esac
+{ [ -n "${_hold__processes}" ] && [ "${_hold__processes}" -le 30 ]; } ||
+    _die "the read, its window closed, read on: ${_hold__line}"
+_step "closed while it read: ${_hold__line}"
+#the next opening lists the disk added, with no key pressed: it reads the disks again by itself
+_added__kept="$(_count_serial '^kept: ')"
+# shellcheck disable=SC2046 # when, the digest, the rows
+set -- $(_kept_last)
+_added__rows="${3}"
+_press meta_l-i
+_wait_serial_count "^kept: " "$((_added__kept + 1))" 30 || { _screen installer-added; _die "the installer, a disk added, did not read the disks"; }
+sleep 2
+_screen installer-added
+# shellcheck disable=SC2046 # when, the digest, the rows
+set -- $(_kept_last)
+[ "${3}" = "$((_added__rows + 1))" ] || _die "the installer, a disk added, lists ${3} disks, ${_added__rows} before"
+added_rows="${3}"
+_title_first 4
+[ "${title}" = "intro reading" ] || _die "the installer, a disk added, did not read the disks again: its first title was \"${title}\""
+_installer_leave
+_step "a disk added: listed at the next opening, ${added_rows} disks ($(($(date +%s) - _added__start)) s)"
 _monitor quit >/dev/null
 qemu=""
 #what the two rows did, seen above in the watcher's lines, and how long the installer's first screen took,
@@ -355,6 +526,11 @@ qemu=""
 #fast that answers goes by the node and by the run (1.0 s to the first screen on one node; from 1.4 to
 #2.6 s on another, whose session from the CD takes 1.1 to 1.3 s). That time is read apart
 printf "probe: %-34s %s\r\n" "installer's first screen, ${medium}" "${first_screen} ms after its key" \
+    "installer, nothing kept" "the first screen drawn while the disks were read, listed ${disks_listed} ms after it" \
+    "installer, read again by its key" "r read the disks again: the same ${read_again} rows as kept" \
+    "installer, opened again" "the disks listed with no read: the ones kept" \
+    "installer, a disk added" "listed at the next opening, no key pressed: one more disk, ${added_rows} in all" \
+    "installer, closed while it reads" "the read ended with the window: ${_hold__processes} processes after it, nothing left" \
     "menu, a row by Enter" "Install minos: the window of the installer" \
     "menu, a row by a click" "Terminal: a terminal" >> "${serial}"
 sed -n 's/^probe: //p' "${serial}"

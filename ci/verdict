@@ -57,6 +57,15 @@ awk -v flavour="${flavour}" -v release="${release}" '
             #on another, whose session from the CD takes 1.1 to 1.3 s), and its line (installer.s first
             #screen, usb) is there to be read
             must("^installer.s first screen, cd$", "^1?[0-9]{1,3} ms after its key$")
+            #the first screen does not wait for the disks: it is drawn while the engine reads them, and what
+            #they were is kept for the next opening, which reads none; r reads them again, to what was kept;
+            #a disk added is listed at the next opening by itself; and a window closed in the middle of a read
+            #leaves nothing of it behind (iso/live-check). The times are printed, not judged
+            must("^installer, nothing kept$", "^the first screen drawn while the disks were read, listed [0-9]+ ms after it$")
+            must("^installer, read again by its key$", "^r read the disks again: the same [0-9]+ rows as kept$")
+            must("^installer, opened again$", "^the disks listed with no read: the ones kept$")
+            must("^installer, a disk added$", "^listed at the next opening, no key pressed: one more disk, [0-9]+ in all$")
+            must("^installer, closed while it reads$", "^the read ended with the window: [0-9]+ processes after it, nothing left$")
             #a click on the wallpaper opens the menu of the background, whose first row on the ISO is the
             #installer (iso/live-check)
             must("^menu of the background$", "^[0-9]+ entries, the first: Install minos +\\| +Win\\+i +\\| +minos-installer --window; drawn by rofi$")

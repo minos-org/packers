@@ -135,7 +135,11 @@ has "Install minos" as its first entry. The session's clock is in the time zone 
 
 The installer is two files, `iso/installer/minos-installer` and `iso/installer/minos-installer-engine`,
 copied to `/usr/local/bin` as they are. The engine knows the machine and writes the disk; it asks nothing
-and draws nothing:
+and draws nothing. The installer draws its first screen before it has the disks, which the engine reads in
+the background, and keeps what it read in the user's directory of the session (`$XDG_RUNTIME_DIR`, a
+tmpfs): the next opening lists them from there, with no process started, while the kernel's partitions
+and mounts are the ones they were read with, and `r` on the screen of the disks reads them again. What
+writes to a disk never takes them from there: `edit`, `apply` and `empty` read the disk themselves.
 
     # minos-installer-engine disks                    # the disks, and why minos cannot go to one
     # minos-installer-engine plan whole /dev/sda > plan     # or: plan partitions ROOT [ESP] [keep]
@@ -294,7 +298,10 @@ waited for, where the medium is mounted, the plugins the image brought and wheth
 any left to install, and `ci/probe-common`, which the CD carries: the network and
 whether names resolve among it), then opens the installer with its key (Win+i) and reads off the screen
 how long its first screen takes to show (`ci/verdict` wants it under two seconds in the session booted
-from the CD); and, the desktop bare again, a
+from the CD), that it was drawn while the disks were read, that `r` reads them again to what was kept, that
+the next opening reads none, that a USB stick added through QMP is listed at the opening after, and that a
+window closed in the middle of a read (held there by a script typed in a terminal) leaves nothing of it
+behind; and, the desktop bare again, a
 click on the wallpaper must open the menu of the background with "Install minos" as its first row. With `CABLE=no` the network card's cable is out from power on: the session
 must come up all the same, and the probe find no address.
 It keeps the screen at GRUB's menu, on the desktop, with the probe and with the installer's terminal:
