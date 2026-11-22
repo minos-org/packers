@@ -1407,19 +1407,83 @@ _keyboard_read() { #=> keyboard, the one that is active now (layout, or layout:v
     keyboard_name="$(printf "%s\n" "${keyboards}" | awk -F '\t' -v layout="${keyboard%%:*}" '$1 == layout {print $2; exit}')"
 }
 
-_keyboard_change() { #layout => LAYOUT made the keyboard, when the session lets the installer change it; what
-    #was typed as a password goes with the old one, since its keys now say other characters. said is
-    #left with what to tell the person; false when the session did not take it
+_keyboard_keys() { #=> keyboard_keys, what each key of the session's keyboard says now, as the engine reads
+    #it (its keyboard keys); nothing when it cannot be read
+    keyboard_keys="$(sh "${engine}" keyboard keys 2>/dev/null)" || keyboard_keys=""
+}
+
+_keyboard_judge() { #=> the password and its repetition, typed with the keyboard whose keys keyboard_keys
+    #holds, judged against the keyboard there is now: kept when every character of them comes from keys
+    #(and levels: Shift, AltGr) that say the same character now; emptied when one does not, since the
+    #installed system asks for it with this keyboard, and whenever that cannot be told: no keys read of
+    #either keyboard, a keyboard of several groups (which one types is not read here), a character that
+    #no key of the old one says. Nothing that is not judged is kept. The passwords go to awk on its
+    #standard input, from printf, which is no process of its own. said is left with which, and why;
+    #keyboard_keys with the keys there are now
+    _keyboard_judge__was="${keyboard_keys}"
+    _keyboard_keys
+    said="The keyboard is now ${keyboard%%:*}."
+    [ -n "${pass}${pass_again}" ] || return 0
+    _keyboard_judge__verdict=2
+    if [ -n "${_keyboard_judge__was}" ] && [ -n "${keyboard_keys}" ]; then
+        #xmodmap -pke: "keycode N = KEYSYM...", group 1 levels 1 and 2, group 2 levels 1 and 2, group 1
+        #levels 3 and 4. A keyboard of one group repeats the first two in the next two
+        printf "%s\n" "${pass}" "${pass_again}" "${_keyboard_judge__was}" "now" "${keyboard_keys}" | awk '
+            BEGIN {
+                n = split("space exclam quotedbl numbersign dollar percent ampersand apostrophe parenleft parenright asterisk plus comma minus period slash", name, " ")
+                for (i = 1; i <= n; i++) char[name[i]] = sprintf("%c", 31 + i)
+                n = split("colon semicolon less equal greater question at", name, " ")
+                for (i = 1; i <= n; i++) char[name[i]] = sprintf("%c", 57 + i)
+                n = split("bracketleft backslash bracketright asciicircum underscore grave", name, " ")
+                for (i = 1; i <= n; i++) char[name[i]] = sprintf("%c", 90 + i)
+                n = split("braceleft bar braceright asciitilde", name, " ")
+                for (i = 1; i <= n; i++) char[name[i]] = sprintf("%c", 122 + i)
+                for (i = 0; i <= 9; i++) char["KP_" i] = i ""
+                char["KP_Space"] = " "; char["KP_Equal"] = "="; char["KP_Multiply"] = "*"; char["KP_Add"] = "+"
+                char["KP_Separator"] = ","; char["KP_Subtract"] = "-"; char["KP_Decimal"] = "."; char["KP_Divide"] = "/"
+            }
+            NR == 1 {pass = $0; next}
+            NR == 2 {again = $0; next}
+            $0 == "now" {side = "n"; next}
+            $1 == "keycode" && $3 == "=" {
+                s = (side == "n") ? "n" : "o"; read[s] = 1
+                if (($6 != "" && $6 != $4) || ($7 != "" && $7 != $5)) groups[s] = 1
+                for (level = 1; level <= 4; level++) {
+                    keysym = $(level <= 2 ? 3 + level : 5 + level)
+                    c = (keysym in char) ? char[keysym] : (keysym ~ /^[A-Za-z0-9]$/ ? keysym : "")
+                    if (c == "") continue
+                    says[s, $2, level] = c
+                    if (s == "o") keys[c] = keys[c] " " $2 ":" level
+                }
+            }
+            END {
+                if (!read["o"] || !read["n"] || groups["o"] || groups["n"]) exit 2
+                text = pass again; unknown = 0
+                for (i = 1; i <= length(text); i++) {
+                    c = substr(text, i, 1)
+                    if (!(c in keys)) { unknown = 1; continue }
+                    n = split(keys[c], key, " ")
+                    for (j = 1; j <= n; j++) { split(key[j], at, ":"); if (says["n", at[1], at[2]] != c) exit 1 }
+                }
+                exit (unknown ? 2 : 0)
+            }'
+        _keyboard_judge__verdict="${?}"
+    fi
+    case "${_keyboard_judge__verdict}" in
+        0) said="The keyboard is now ${keyboard%%:*}, and the password stays: each of its keys says the same with it." ;;
+        1) said="The keyboard is now ${keyboard%%:*}: some keys of the password say other characters with it, so it went. Type it again." ;;
+        *) said="The keyboard is now ${keyboard%%:*}: the installer cannot tell whether the keys of the password say the same with it, so it went. Type it again." ;;
+    esac
+    [ "${_keyboard_judge__verdict}" = 0 ] || { pass=""; pass_again=""; pass_units=""; pass_again_units=""; }
+}
+
+_keyboard_change() { #layout => LAYOUT made the keyboard, when the session lets the installer change it; the
+    #password typed with the old one is judged against it (_keyboard_judge). said is left with what to
+    #tell the person; false when the session did not take it
     _keyboard_change__was="${keyboard}"
     said="$(sh "${engine}" keyboard set "${1}" 2>&1)" || return 1
     _keyboard_read
-    if [ "${keyboard}" != "${_keyboard_change__was}" ]; then
-        said="The keyboard is now ${keyboard%%:*}."
-        if [ -n "${pass}${pass_again}" ]; then
-            pass=""; pass_again=""; pass_units=""; pass_again_units=""
-            said="The keyboard is now ${keyboard%%:*}: type the password again, with it."
-        fi
-    fi
+    [ "${keyboard}" = "${_keyboard_change__was}" ] || _keyboard_judge
 }
 
 _step_keyboards() { #=> any keyboard xkb knows, chosen from a list, minos' own first and marked. What is typed
@@ -1655,7 +1719,7 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
     #F5 does, for a terminal that keeps the function keys to itself.
     #A name is taken as typed and judged by the engine, which says in words what a name is
     _step_user__field="${user_field:-3}"; _step_user__problem=""; _step_user__draw="yes"; _step_user__told=""
-    _keyboard_read; _zone_time "${timezone}"
+    _keyboard_read; _keyboard_keys; _zone_time "${timezone}"
     while :; do
         #the last field: the second password is not asked while the first is seen
         _step_user__last=5; [ -z "${pass_seen}" ] || _step_user__last=4
@@ -1724,11 +1788,8 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
             _step_user__was="${keyboard}"; _step_user__time="${zone_time}"
             _keyboard_read; _zone_time "${timezone}"
             if [ "${keyboard}" != "${_step_user__was}" ]; then
-                _step_user__problem="The keyboard is now ${keyboard%%:*}."
-                if [ -n "${pass}${pass_again}" ]; then
-                    pass=""; pass_again=""; pass_units=""; pass_again_units=""
-                    _step_user__problem="The keyboard is now ${keyboard%%:*}: type the password again, with it."
-                fi
+                #judged as a keyboard taken in the list is
+                _keyboard_judge; _step_user__problem="${said}"
             elif [ "${zone_time}" = "${_step_user__time}" ] && [ "$(stty size <&3 2>/dev/null)" = "${term_size}" ]; then
                 _step_user__draw=""
             fi
@@ -2150,7 +2211,7 @@ disk=""; choices=""; loaded=""; proposed=""; plan_view="plan"; edit_line=1; edit
 # shellcheck disable=SC2034 # the units of a secret are read by its name, through eval
 { pass_units=""; pass_again_units=""; }
 user=""; pass=""; pass_again=""; pass_seen=""; secret_wide=""; key_fresh=""; user_field=""; keys_ahead=""; install_status=1; watch=""
-keyboard="us"; keyboard_where="system"; keyboard_name=""; keyboards=""; said=""; list_taken=""; zones=""; zone_time=""
+keyboard="us"; keyboard_where="system"; keyboard_name=""; keyboards=""; keyboard_keys=""; said=""; list_taken=""; zones=""; zone_time=""
 intro_played=""; effect_began=0; effect_frames=0
 #the plan the engine writes, and what it says when it fails, in a directory of this user's own: in /tmp
 #itself root may not write into another user's file (fs.protected_regular)

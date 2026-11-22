@@ -51,6 +51,9 @@
 #  keyboard set LAYOUT [VARIANT]
 #                           LAYOUT made the keyboard of the X session, by the user it is run as. The
 #                           console's is not changed from here: it is said so, and exit 1
+#  keyboard keys            what each key of the X session's keyboard says, as xmodmap -pke lists it:
+#                           a line a key, its keysyms by group and level. Exit 1 with no X session or
+#                           no xmodmap. Needs no root
 #  keyboards                the layouts to choose from, a line each, tab-separated: layout, its name,
 #                           own or other: minos' own list first (minos-config keyboard-layouts), then
 #                           every layout xkb knows. Needs no root
@@ -1673,6 +1676,7 @@ case "${verb}" in
         case "${1:-}" in
             "") _keyboard_now ;;
             set) { [ "${#}" -ge 2 ] && [ "${#}" -le 3 ]; } || _usage; _keyboard_set "${2}" "${3:-}" || exit 1 ;;
+            keys) { [ -n "${DISPLAY:-}" ] && command -v xmodmap >/dev/null 2>&1; } || exit 1; xmodmap -pke || exit 1 ;;
             *) _usage ;;
         esac
         exit 0 ;;
