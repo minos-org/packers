@@ -1,17 +1,24 @@
 #!/bin/sh
 #on a machine with KVM, as root (a GitHub-hosted runner, .github/workflows/boxes.yml): the minos ISO of a
 #release built from scratch by iso/build, from the Ubuntu archive, the minos archive and the installer at
-#minos.io/s, then used in QEMU the way a person uses it. Its live session boots by BIOS from a CD and by UEFI
-#with Secure Boot from a USB stick (iso/live-check), and its probe says what the session is, ci/probe-common
-#among it; the session boots with the network's cable out too, and must come up all the same, with its
-#plugins. Then minos is installed from the live session, its installer answered by its keys, onto an empty
-#disk with no network, by UEFI and by BIOS (with another keyboard and another time zone than the session's,
-#chosen in the installer), and beside what a disk holds; on btrfs by BIOS, and on xfs with /home on a btrfs
-#by UEFI, chosen on the plan; each disk boots alone with the same keys for its password and says its time
-#zone, by UEFI with a network as well, once minos-untrim has given it back what the ISO left out
-#(iso/install-check).
-#One line per check; ci/verdict iso reads them.
-#usage: [SETUP=FILE|URL] [MIRROR=URI] [ISO_LANES=1|2] ci/iso RELEASE
+#minos.io/s, then used in QEMU the way a person uses it. By default, one general test: the ISO boots by UEFI,
+#minos is installed from its live session onto an empty SATA disk with no network, its installer answered
+#by its keys and its plan taken as proposed, and the disk boots alone to i3 with the same keys for its
+#password (iso/install-check). The installer seldom changes: the detailed checks are cases, run when named
+#  live-bios        the live session by BIOS from a CD, and its probe: what the session is, ci/probe-common
+#                   among it; the installer's first screen, its read of the disks, the menu of the background
+#  live-secureboot  the same by UEFI with Secure Boot from a USB stick
+#  live-nocable     by UEFI from a CD with the network's cable out: it comes up all the same, with its plugins
+#  untrim           the general test's disk booted again with a network, once minos-untrim has given it back
+#                   what the ISO left out
+#  keyboard         installed by BIOS with another keyboard and another time zone than the session's,
+#                   chosen in the installer's fields; the disk has them
+#  beside           installed by UEFI beside what an NVMe disk holds, the plan changed line by line (c)
+#  btrfs            installed by BIOS on btrfs, minos and /home in its subvolumes
+#  xfs              installed by UEFI on xfs with /home on a btrfs of its own, both chosen on the plan (f)
+#  all              every case
+#One line per check, and a line that says the cases run; ci/verdict iso reads them, and judges what ran.
+#usage: [SETUP=FILE|URL] [MIRROR=URI] [ISO_LANES=1|2] ci/iso RELEASE [CASE...|all]
 #  MIRROR, the Ubuntu archive the build fetches from: by default the one this machine's apt reads
 #  (ci/mirror), on a GitHub-hosted runner its cloud's mirror; the ISO's sources say archive.ubuntu.com
 #  ISO_LANES, how many of the checks' machines run at once after the build: 2 by default, 1 (one after
@@ -68,6 +75,8 @@ _install() { #label firmware disk phases [layout [keyboard [zone [fs]]]] => LABE
     #as iso/install-check names the run: the city of the zone, in lower case
     [ -z "${7:-}" ] || _install__name="${_install__name}-$(printf "%s" "${7##*/}" | tr '[:upper:]_' '[:lower:]-')"
     _install__log="${logs}/install-${_install__name}.log"
+    #a disk booted again by a run without the install has a log of its own, named by its phases
+    case " ${4} " in *" install "*) ;; *) _install__log="${logs}/install-${_install__name}-$(printf "%s" "${4}" | tr ' ' '-').log" ;; esac
     #a directory of its own: install-check removes and ci/iso copies the screens of a run by its name and a
     #glob, and one name begins another's (uefi-sata, uefi-sata-home-xfs-btrfs), which may run at the same time
     _install__dir="${tmp}/install/${_install__name}"
@@ -79,8 +88,9 @@ _install() { #label firmware disk phases [layout [keyboard [zone [fs]]]] => LABE
                           "${_install__dir}/${_install__name}"-*.png; do
         [ ! -f "${_install__file}" ] || cp "${_install__file}" "${logs}/install/"
     done
-    #the disk weighs gigabytes, and the next check needs the room
-    rm -rf "${_install__dir}"
+    #the disk weighs gigabytes, and the next check needs the room; but for the one install_keep names, which a
+    #later run of install-check boots again
+    [ "${install_keep:-}" = "${_install__name}" ] || rm -rf "${_install__dir}"
     if [ "${_install__status}" = 0 ]; then
         _line "${1}" "ok    ${_install__secs}s; $(grep '^dpkg --verify' "${logs}/install/${_install__name}.facts" | tail -n 1 | cut -c1-160)"
     else
@@ -89,6 +99,11 @@ _install() { #label firmware disk phases [layout [keyboard [zone [fs]]]] => LABE
     #the keyboard and the time zone, taken from their fields' lists, as install-check says it went
     _install__fields="$(sed -n 's/^ *[0-9]*s  fields: //p' "${_install__log}" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
     [ -z "${_install__fields}" ] || _line "installer fields" "${_install__fields}"
+}
+
+_named() { #case => true when CASE was named
+    case " ${cases} " in *" ${1} "*) return 0 ;; esac
+    return 1
 }
 
 _lanes_fit() { #=> true when this machine holds two of the checks' machines at once: 2 processors each, and
@@ -106,10 +121,25 @@ case "${lanes}" in
     *) printf "%s\\n" "ci/iso: ISO_LANES is 1 or 2" >&2; exit 2 ;;
 esac
 [ -c /dev/kvm ] || { printf "%s\\n" "no /dev/kvm on $(hostname): the ISO is checked with KVM only" >&2; exit 2; }
-release="${1:?usage: [SETUP=FILE|URL] ci/iso RELEASE}"
+release="${1:?usage: [SETUP=FILE|URL] ci/iso RELEASE [CASE...|all]}"; shift
+#the cases named, each once, in the order of the list above
+all_cases="live-bios live-secureboot live-nocable untrim keyboard beside btrfs xfs"
+for case_named; do
+    case " all ${all_cases} " in
+        *" ${case_named} "*) ;;
+        *) printf "%s\\n" "ci/iso: no case ${case_named}: the cases are ${all_cases}, or all" >&2; exit 2 ;;
+    esac
+done
+cases=""
+for case_known in ${all_cases}; do
+    case " ${*} " in *" ${case_known} "*|*" all "*) cases="${cases} ${case_known}" ;; esac
+done
+cases="${cases# }"
 name="minos-${release}-amd64"; iso="${out}/${name}.iso"; logs="${out}/logs/${name}"
 rm -rf "${out:?}/${name}".* "${logs}" "${tmp}/install" "${tmp}/sessions"; mkdir -p "${cache}" "${logs}/live" "${tmp}/install"
 printf "\\n=== %s ===\\n" "${name}.iso"
+#what ci/verdict judges: the general test, and the cases named besides
+_line "iso cases" "${cases:-none}"
 began="$(date +%s)"
 
 #the build: iso/build empties its own work directory, unmounting first what a killed run left mounted there.
@@ -142,46 +172,85 @@ fi
 (cd "${out}" && sha256sum "${name}.iso" > "${name}.sha256")
 _line "sha256" "$(awk '{printf "%s %s  ", $2, $1}' "${out}/${name}.sha256")"
 
-#the sessions, numbered in the order their lines are said, each a machine of its own (or two, an install's)
-#that shares nothing it writes with another: its own directory under mktemp's (QEMU's monitor and the
-#firmware's variables), a disk and logs named by it, no port, no display, the ISO read only
-#the live session, as a person boots it
-_session_1() { _live "live bios cd" bios cd yes; }
-_session_2() { _live "live secureboot usb" secureboot usb yes; }
-_session_3() { _live "live uefi cd, no cable" uefi cd no; }
-#minos installed from the live session, with no network, then the disk alone
-_session_4() { _install "install uefi sata" uefi sata "install boot untrim"; }
+#the sessions, each a machine of its own (or two, an install's) that shares nothing it writes with another:
+#its own directory under mktemp's (QEMU's monitor and the firmware's variables), a disk and logs named by
+#it, no port, no display, the ISO read only. Their lines are said in this order
+sessions="live-bios live-secureboot live-nocable general keyboard beside btrfs xfs"
+_session_live_bios() { _live "live bios cd" bios cd yes; }
+_session_live_secureboot() { _live "live secureboot usb" secureboot usb yes; }
+_session_live_nocable() { _live "live uefi cd, no cable" uefi cd no; }
+#the general test: minos installed from the live session, with no network, then the disk alone; with untrim,
+#the same disk booted again with a network
+_session_general() {
+    if _named untrim; then install_keep="uefi-sata"; fi
+    _install "install uefi sata" uefi sata "install boot"
+    if _named untrim; then
+        install_keep=""
+        _install "install uefi sata, untrim" uefi sata "untrim"
+    fi
+}
 #the keyboard changed in the installer before the password is typed, and the same keys at the disk's login;
-#a time zone chosen there, and the disk in it. The other two installs take the session's keyboard and the
-#zone an install starts on, minos' own, which the session's clock is in
-_session_5() { _install "install bios sata, keyboard, zone" bios sata "install boot" empty latam Asia/Tokyo; }
+#a time zone chosen there, and the disk in it. The other installs take the session's keyboard and the zone
+#an install starts on, minos' own, which the session's clock is in
+_session_keyboard() { _install "install bios sata, keyboard, zone" bios sata "install boot" empty latam Asia/Tokyo; }
 #beside what a disk holds, the plan changed in the installer, on a disk the kernel names as NVMe ones; there
 #the plan opened line by line by its key, c, and not by p, which was its key before
-_session_6() {
+_session_beside() {
     _install "install uefi nvme, beside" uefi nvme "install boot" beside
     _line "plan, c and p" "$(sed -n 's/^plan keys: //p' "${logs}/install/uefi-nvme-beside.facts" 2>/dev/null | head -n 1)"
 }
 #the file systems the installer offers besides ext4, each installed once and booted, on the two firmwares:
 #btrfs for minos and /home in its subvolumes, by BIOS; by UEFI xfs for minos and a btrfs of its own for
 #/home, both chosen on the plan in one visit of its chooser (f), which the plan must then say
-_session_7() {
+_session_btrfs() {
     _install "install bios sata, btrfs" bios sata "install boot" empty "" "" btrfs
     _line "file systems, bios btrfs" "$(sed -n 's/^file systems: //p' "${logs}/install/bios-sata-btrfs.facts" 2>/dev/null | tail -n 1)"
 }
-_session_8() {
+_session_xfs() {
     _install "install uefi sata, xfs, home btrfs" uefi sata "install boot" home "" "" xfs:btrfs
     _line "file systems, uefi xfs, home btrfs" "$(sed -n 's/^file systems: //p' "${logs}/install/uefi-sata-home-xfs-btrfs.facts" 2>/dev/null | tail -n 1)"
     _line "plan, f" "$(sed -n 's/^plan file systems: //p' "${logs}/install/uefi-sata-home-xfs-btrfs.facts" 2>/dev/null | head -n 1)"
 }
+_seconds() { #session => about what it takes alone on a 4-processor machine, to balance the lanes by
+    case "${1}" in
+        live-*) printf "%s" 320 ;;
+        general) if _named untrim; then printf "%s" 1010; else printf "%s" 800; fi ;;
+        *) printf "%s" 700 ;;
+    esac
+}
+
+#the sessions to run: the general test, and the cases named
+run_sessions=""
+for session in ${sessions}; do
+    [ "${session}" = general ] || _named "${session}" || continue
+    run_sessions="${run_sessions} ${session}"
+done
+[ "${lanes}" = 1 ] || [ "${run_sessions}" != " general" ] || lanes=1
 
 if [ "${lanes}" = 1 ]; then
-    for session in 1 2 3 4 5 6 7 8; do "_session_${session}"; done
+    for session in ${run_sessions}; do "_session_$(printf "%s" "${session}" | tr '-' '_')"; done
 else
     #two lanes, each its sessions one after another, their lines kept apart and said in the sessions' order
     #once both lanes are through, whichever ends first. A failed session is a FAIL line, as with one lane,
-    #and its lane goes on. Balanced by what each session took alone on a 4-processor machine: the three
-    #longest installs (1845 s) in one, the live sessions and the other two (1733 s) in the other, which keeps
-    #two live sessions, the largest machines, from ever running together
+    #and its lane goes on. The general test starts one, and the live sessions, the largest machines, all go
+    #to the other, so that two of them never run together; each install then goes, in the order above, to
+    #the lane with less to do. With every case: the general test with untrim, beside and xfs in one (2364 s
+    #alone on one node), the live sessions, keyboard and btrfs in the other (2378 s)
+    lane_one="general"; lane_one_secs="$(_seconds general)"; lane_two=""; lane_two_secs=0
+    for session in ${run_sessions}; do
+        case "${session}" in
+            general) ;;
+            live-*) lane_two="${lane_two} ${session}"; lane_two_secs="$((lane_two_secs + $(_seconds "${session}")))" ;;
+        esac
+    done
+    for session in ${run_sessions}; do
+        case "${session}" in general|live-*) continue ;; esac
+        if [ "${lane_two_secs}" -lt "${lane_one_secs}" ]; then
+            lane_two="${lane_two} ${session}"; lane_two_secs="$((lane_two_secs + $(_seconds "${session}")))"
+        else
+            lane_one="${lane_one} ${session}"; lane_one_secs="$((lane_one_secs + $(_seconds "${session}")))"
+        fi
+    done
     _stop_lanes() { #status => the lanes and what they run stopped, then exit STATUS: a session run in the
         #background ignores INT, and its check, told TERM, stops its machine on its way out. A lane is held
         #still meanwhile, so that it starts no other check when its own ends
@@ -197,13 +266,15 @@ else
     mkdir -p "${tmp}/sessions"
     trap '_stop_lanes 130' INT; trap '_stop_lanes 143' TERM; trap '_stop_lanes 129' HUP
     lane_pids=""
-    for lane in "4 5 6" "1 2 3 7 8"; do
-        ( for session in ${lane}; do "_session_${session}" > "${tmp}/sessions/${session}"; done ) &
+    for lane in "${lane_one}" "${lane_two}"; do
+        ( for session in ${lane}; do
+              "_session_$(printf "%s" "${session}" | tr '-' '_')" > "${tmp}/sessions/${session}"
+          done ) &
         lane_pids="${lane_pids} ${!}"
     done
     wait
     trap - INT TERM HUP
-    for session in 1 2 3 4 5 6 7 8; do
+    for session in ${run_sessions}; do
         if [ -f "${tmp}/sessions/${session}" ]; then
             cat "${tmp}/sessions/${session}"
         else

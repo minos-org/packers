@@ -5,16 +5,21 @@
 #pass is named here with the value it must have, and a missing line fails like a wrong one (a box that
 #never answered ssh prints none of box-check's); a line that comes more than once (the probe of each live
 #session) is judged each time; any value that starts with FAIL fails too. The other lines (sizes,
-#weights, versions) are there to be read, not judged.
+#weights, versions) are there to be read, not judged. The ISO's checks are those of what ci/iso ran: its
+#general test always, and the cases its line "iso cases" names; a check of a case not run is not judged,
+#and a log without that line is judged as the general test alone, its missing line a failure.
 #usage: ci/verdict FLAVOUR RELEASE LOG   => FLAVOUR core or desktop for a box, iso for the ISO; one line per
 #       check; exits 1 when one fails
 
 flavour="${1:?usage: ci/verdict core|desktop|iso RELEASE LOG}"; release="${2:?}"; log="${3:?}"
 case "${flavour}" in core|desktop|iso) ;; *) printf "%s\\n" "verdict: ${flavour}: core, desktop or iso" >&2; exit 2 ;; esac
 [ -f "${log}" ] || { printf "%s\\n" "verdict: no ${log}"; exit 1; }
+cases="$(sed -n 's/^iso cases  *//p' "${log}" | head -n 1)"
 
-awk -v flavour="${flavour}" -v release="${release}" '
+awk -v flavour="${flavour}" -v release="${release}" -v cases="${cases}" '
     function must(label, value) { n++; want_label[n] = label; want_value[n] = value }
+    #true when ci/iso ran CASE (ci/iso: its line "iso cases")
+    function ran(case) { return index(" " cases " ", " " case " ") > 0 }
     #what every minos system shows (ci/probe-common), for the system FLAVOUR whose user is USER
     function common(flavour, user) {
         must("^minos-" flavour "$", "^install ok installed ")
@@ -40,73 +45,87 @@ awk -v flavour="${flavour}" -v release="${release}" '
         several = "([2-9]|[1-9][0-9]+)"
         plugins = "^vim " several ", tmux " several ", shundle " several "; login hook: nothing to install$"
         if (flavour == "iso") {
-            common("desktop", "minos")
+            #the line that says what ran: without it, the general test alone is judged
+            if (cases == "") must("^iso cases$", "^(none|[a-z -]+)$")
             must("^iso build$", "^ok ")
             #the owner: under 700 MB, as minos ISOs used to be
             must("^iso size$", "under 700 MB$")
             must("^sha256$", "^minos-" r "-amd64\\.iso [0-9a-f]{64} *$")
+            #the general test: minos installed from the live session with no network, and the disk came up
+            #alone to i3 (iso/install-check); with untrim, by UEFI also with a network, until minos-untrim gave
+            #back what the ISO left out
+            must("^install uefi sata$", "^ok ")
+            if (ran("untrim")) must("^install uefi sata, untrim$", "^ok ")
             #each boot of the live session came to i3 and ran its probe (iso/live-check), with Secure Boot on
             #from the USB stick, and with no cable it came up all the same and found no address
-            must("^live bios cd$", "^ok ")
-            must("^live secureboot usb$", "^ok ")
-            must("^live uefi cd, no cable$", "^ok ")
+            if (ran("live-bios") || ran("live-secureboot")) common("desktop", "minos")
+            if (ran("live-bios")) must("^live bios cd$", "^ok ")
+            if (ran("live-secureboot")) must("^live secureboot usb$", "^ok ")
+            if (ran("live-nocable")) must("^live uefi cd, no cable$", "^ok ")
             #the window of the installer is not left empty: its first screen shows within two seconds of
             #its key, Win+i, the first time the session opens it (iso/live-check reads it off the screen).
             #Judged in the session booted from the CD: from the stick it also counts the USB storage QEMU
             #gives the machine, which goes by the node and by the run (1.0 s on one node; from 1.4 to 2.6 s
             #on another, whose session from the CD takes 1.1 to 1.3 s), and its line (installer.s first
             #screen, usb) is there to be read
-            must("^installer.s first screen, cd$", "^1?[0-9]{1,3} ms after its key$")
-            #the first screen does not wait for the disks: it is drawn while the engine reads them, and what
-            #they were is kept for the next opening, which reads none; r reads them again, to what was kept;
-            #a disk added is listed at the next opening by itself; and a window closed in the middle of a read
-            #leaves nothing of it behind (iso/live-check). The times are printed, not judged
-            must("^installer, nothing kept$", "^the first screen drawn while the disks were read, listed [0-9]+ ms after it$")
-            must("^installer, read again by its key$", "^r read the disks again: the same [0-9]+ rows as kept$")
-            must("^installer, opened again$", "^the disks listed with no read: the ones kept$")
-            must("^installer, a disk added$", "^listed at the next opening, no key pressed: one more disk, [0-9]+ in all$")
-            must("^installer, closed while it reads$", "^the read ended with the window: [0-9]+ processes after it, nothing left$")
-            #a click on the wallpaper opens the menu of the background, whose first row on the ISO is the
-            #installer (iso/live-check)
-            must("^menu of the background$", "^[0-9]+ entries, the first: Install minos +\\| +Win\\+i +\\| +minos-installer --window; drawn by rofi$")
-            #and a row of it is taken as a person takes one: Enter takes the first, marked, and a click the
-            #second, and each runs its command
-            must("^menu, a row by Enter$", "^Install minos: the window of the installer$")
-            must("^menu, a row by a click$", "^Terminal: a terminal$")
-            #casper booted the medium: its squashfs, read-only, under the session
-            must("^medium$", " on /cdrom \\(iso9660\\), .* on /rofs \\(squashfs\\)")
-            must("^network$", "^[a-z][a-z0-9]* [0-9.]+/[0-9]+ ")
-            #the session carries the drivers of the cards of virtual machines (Cirrus by its name on 6.8 or on
-            #7.0), and the VGA card QEMU gives it (iso/live-check) is driven by its own, bochs, which offers more
-            #than one mode: no card is left to the framebuffer of the firmware (simple-framebuffer), which has
-            #the one mode it was left in
-            must("^display$", "^drivers vmwgfx vboxvideo virtio-gpu bochs hyperv_drm qxl cirrus(-qemu)?; card[0-9] bochs-drm, ([2-9]|[1-9][0-9]+) modes; fb: ")
-            #the vim, tmux and shell plugins came with the image: each manager has plugins besides itself, and
-            #the login hook of minos-core-settings found none to install, with the cable in and with it out
-            must("^plugins$", plugins)
-            must("^plugins, no cable$", plugins)
-            #minos installed from the live session with no network, and the disk came up alone to i3
-            #(iso/install-check); by UEFI also with a network, until minos-untrim gave back what the ISO left out
-            must("^install uefi sata$", "^ok ")
-            must("^install bios sata, keyboard, zone$", "^ok ")
+            if (ran("live-bios")) must("^installer.s first screen, cd$", "^1?[0-9]{1,3} ms after its key$")
+            if (ran("live-bios") || ran("live-secureboot")) {
+                #the first screen does not wait for the disks: it is drawn while the engine reads them, and what
+                #they were is kept for the next opening, which reads none; r reads them again, to what was kept;
+                #a disk added is listed at the next opening by itself; and a window closed in the middle of a read
+                #leaves nothing of it behind (iso/live-check). The times are printed, not judged
+                must("^installer, nothing kept$", "^the first screen drawn while the disks were read, listed [0-9]+ ms after it$")
+                must("^installer, read again by its key$", "^r read the disks again: the same [0-9]+ rows as kept$")
+                must("^installer, opened again$", "^the disks listed with no read: the ones kept$")
+                must("^installer, a disk added$", "^listed at the next opening, no key pressed: one more disk, [0-9]+ in all$")
+                must("^installer, closed while it reads$", "^the read ended with the window: [0-9]+ processes after it, nothing left$")
+                #a click on the wallpaper opens the menu of the background, whose first row on the ISO is the
+                #installer (iso/live-check)
+                must("^menu of the background$", "^[0-9]+ entries, the first: Install minos +\\| +Win\\+i +\\| +minos-installer --window; drawn by rofi$")
+                #and a row of it is taken as a person takes one: Enter takes the first, marked, and a click the
+                #second, and each runs its command
+                must("^menu, a row by Enter$", "^Install minos: the window of the installer$")
+                must("^menu, a row by a click$", "^Terminal: a terminal$")
+                #casper booted the medium: its squashfs, read-only, under the session
+                must("^medium$", " on /cdrom \\(iso9660\\), .* on /rofs \\(squashfs\\)")
+                must("^network$", "^[a-z][a-z0-9]* [0-9.]+/[0-9]+ ")
+                #the session carries the drivers of the cards of virtual machines (Cirrus by its name on 6.8 or on
+                #7.0), and the VGA card QEMU gives it (iso/live-check) is driven by its own, bochs, which offers more
+                #than one mode: no card is left to the framebuffer of the firmware (simple-framebuffer), which has
+                #the one mode it was left in
+                must("^display$", "^drivers vmwgfx vboxvideo virtio-gpu bochs hyperv_drm qxl cirrus(-qemu)?; card[0-9] bochs-drm, ([2-9]|[1-9][0-9]+) modes; fb: ")
+                #the vim, tmux and shell plugins came with the image: each manager has plugins besides itself, and
+                #the login hook of minos-core-settings found none to install, with the cable in and with it out
+                must("^plugins$", plugins)
+            }
+            if (ran("live-nocable")) must("^plugins, no cable$", plugins)
             #there the keyboard and the time zone were fields: reached with Tab, each taken from the list Enter
             #opens, by what was typed; the function keys that once changed them changed nothing; and the disk
             #has what was taken
-            must("^installer fields$", "^F2 F3 F4 change nothing; keyboard [a-z]+ from its list; zone [A-Za-z_/]+ from its list; the disk has keyboard [a-z]+, zone [A-Za-z_/]+$")
-            #and beside what a disk holds, the plan changed in the installer, on an NVMe disk
-            must("^install uefi nvme, beside$", "^ok ")
-            #where it was changed by its key, c: p, the key before, leaves the plan as it is
-            must("^plan, c and p$", "^p left the plan as it was; c opened it line by line$")
+            if (ran("keyboard")) {
+                must("^install bios sata, keyboard, zone$", "^ok ")
+                must("^installer fields$", "^F2 F3 F4 change nothing; keyboard [a-z]+ from its list; zone [A-Za-z_/]+ from its list; the disk has keyboard [a-z]+, zone [A-Za-z_/]+$")
+            }
+            #and beside what a disk holds, the plan changed in the installer, on an NVMe disk, where it was
+            #changed by its key, c: p, the key before, leaves the plan as it is
+            if (ran("beside")) {
+                must("^install uefi nvme, beside$", "^ok ")
+                must("^plan, c and p$", "^p left the plan as it was; c opened it line by line$")
+            }
             #the file systems the installer offers besides ext4, each installed and booted (iso/install-check): btrfs
             #by BIOS, minos and /home on its subvolumes @ and @home; by UEFI xfs, and /home on a btrfs of its own.
             #Each mounted by fstab, its module and its check in the initramfs, its tools installed
-            must("^install bios sata, btrfs$", "^ok ")
-            must("^file systems, bios btrfs$", "^/ btrfs [(]fstab btrfs subvol=@ 0 1[)], /home btrfs [(]fstab btrfs subvol=@home 0 2[)]; subvolumes @ @home; initramfs ([^;]* )?btrfs[.]ko[^;]* fsck[.]btrfs[ ;].* btrfs-progs ii")
-            must("^install uefi sata, xfs, home btrfs$", "^ok ")
-            must("^file systems, uefi xfs, home btrfs$", "^/ xfs [(]fstab xfs defaults 0 1[)], /home btrfs [(]fstab btrfs defaults 0 2[)]; initramfs [^;]*fsck[.]xfs[^;]* xfs[.]ko[^;]*; tools .* btrfs-progs ii, xfsprogs ii$")
+            if (ran("btrfs")) {
+                must("^install bios sata, btrfs$", "^ok ")
+                must("^file systems, bios btrfs$", "^/ btrfs [(]fstab btrfs subvol=@ 0 1[)], /home btrfs [(]fstab btrfs subvol=@home 0 2[)]; subvolumes @ @home; initramfs ([^;]* )?btrfs[.]ko[^;]* fsck[.]btrfs[ ;].* btrfs-progs ii")
+            }
             #both chosen on the plan by its key (f), in one visit of the chooser: the plan said ext4 before, and
             #then what was chosen
-            must("^plan, f$", "^before f: minos ext4, /home ext4; after: minos xfs, /home btrfs$")
+            if (ran("xfs")) {
+                must("^install uefi sata, xfs, home btrfs$", "^ok ")
+                must("^file systems, uefi xfs, home btrfs$", "^/ xfs [(]fstab xfs defaults 0 1[)], /home btrfs [(]fstab btrfs defaults 0 2[)]; initramfs [^;]*fsck[.]xfs[^;]* xfs[.]ko[^;]*; tools .* btrfs-progs ii, xfsprogs ii$")
+                must("^plan, f$", "^before f: minos ext4, /home ext4; after: minos xfs, /home btrfs$")
+            }
         } else {
             common(flavour, "vagrant")
             must("^packer build \\(ppa\\)$", "^ok ")

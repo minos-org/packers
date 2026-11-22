@@ -85,15 +85,22 @@ Continuous integration
 `.github/workflows/boxes.yml` builds the boxes and the ISOs on GitHub-hosted runners with KVM and checks
 each one. `ci/boxes` builds a box and boots its disk the way VirtualBox and QEMU would, `ci/box-check`
 looks at minos inside it. `ci/iso` builds the ISO of a release (`iso/build`), a job for each of 22.04,
-24.04 and 26.04, and uses it as a person would: its live session by BIOS from a CD, by UEFI with Secure
-Boot from a USB stick, and with the network's cable out (`iso/live-check`), and minos installed from it by
-UEFI and by BIOS onto an empty disk, which then boots alone (`iso/install-check`); after the build, two
-of those machines run at once where 4 processors and the memory of two allow it (`ISO_LANES=1` runs one at
-a time), and the lines come out in the same order either way. Both print one line per check, and `ci/verdict` says whether each passed.
+24.04 and 26.04, checks its size and its checksum, and runs one general test: minos installed from it by
+UEFI onto an empty SATA disk with no network, the plan taken as the installer proposes it, and the disk
+booted alone (`iso/install-check`). The installer seldom changes, so the detailed checks are cases, run
+only when named: `ci/iso 26.04 btrfs keyboard`, or `ci/iso 26.04 all` for every one. They are the live
+session by BIOS from a CD (`live-bios`), by UEFI with Secure Boot from a USB stick (`live-secureboot`) and
+with the network's cable out (`live-nocable`) (`iso/live-check`); the general test's disk booted again
+with a network until `minos-untrim` is through (`untrim`); and installs by BIOS with another keyboard and
+time zone (`keyboard`), beside what an NVMe disk holds (`beside`), on btrfs (`btrfs`) and on xfs with
+`/home` on a btrfs (`xfs`). After the build two of those machines run at once where 4 processors and the
+memory of two allow it (`ISO_LANES=1` runs one at a time), and the lines come out in the same order
+either way. Both print one line per check, and `ci/verdict` says whether each passed: for an ISO, the
+checks of the general test and of the cases its log says were run, and no others.
 What every minos system must show, whatever made it (the metapackage installed, an address and a name
 resolved, sudo, tmux's and i3's configurations, slim, no failed unit), is `ci/probe-common`: `box-check`
-runs it inside each box and the live session's probe runs it from its CD, and `ci/verdict` judges those
-lines alike for both. A push to `master` that changes what they are made of builds them; a scheduled run
+runs it inside each box and the live session's probe runs it from its CD (the cases `live-bios` and
+`live-secureboot`), and `ci/verdict` judges those lines alike for both. A push to `master` that changes what they are made of builds them; a scheduled run
 builds them when the minos archive or the installer changed (`ci/fingerprint`); another branch builds them
 only when run by hand. The boxes and the ISOs are kept as artifacts of the run for three days.
 

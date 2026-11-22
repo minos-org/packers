@@ -261,9 +261,8 @@ jobs:
           retention-days: 3
 
   # the ISO of minos-desktop of each release, built from scratch and used in QEMU as a person uses it
-  # (ci/iso): its live session by BIOS from a CD, by UEFI with Secure Boot from a USB stick and with the
-  # network's cable out; minos installed from it with no network, its installer answered by its keys, onto
-  # an empty disk by UEFI and by BIOS and beside what a disk holds, and each disk alone
+  # (ci/iso, its general test: no case is named): minos installed from it by UEFI with no network, its
+  # installer answered by its keys, onto an empty disk with the plan it proposes, and the disk alone
   iso:
     name: iso-${{ matrix.release }}
     needs: decide
