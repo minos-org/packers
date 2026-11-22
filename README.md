@@ -87,7 +87,9 @@ each one. `ci/boxes` builds a box and boots its disk the way VirtualBox and QEMU
 looks at minos inside it. `ci/iso` builds the ISO of a release (`iso/build`), a job for each of 22.04,
 24.04 and 26.04, and uses it as a person would: its live session by BIOS from a CD, by UEFI with Secure
 Boot from a USB stick, and with the network's cable out (`iso/live-check`), and minos installed from it by
-UEFI and by BIOS onto an empty disk, which then boots alone (`iso/install-check`). Both print one line per check, and `ci/verdict` says whether each passed.
+UEFI and by BIOS onto an empty disk, which then boots alone (`iso/install-check`); after the build, two
+of those machines run at once where 4 processors and the memory of two allow it (`ISO_LANES=1` runs one at
+a time), and the lines come out in the same order either way. Both print one line per check, and `ci/verdict` says whether each passed.
 What every minos system must show, whatever made it (the metapackage installed, an address and a name
 resolved, sudo, tmux's and i3's configurations, slim, no failed unit), is `ci/probe-common`: `box-check`
 runs it inside each box and the live session's probe runs it from its CD, and `ci/verdict` judges those

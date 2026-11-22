@@ -11,9 +11,12 @@
 #zone, by UEFI with a network as well, once minos-untrim has given it back what the ISO left out
 #(iso/install-check).
 #One line per check; ci/verdict iso reads them.
-#usage: [SETUP=FILE|URL] [MIRROR=URI] ci/iso RELEASE
+#usage: [SETUP=FILE|URL] [MIRROR=URI] [ISO_LANES=1|2] ci/iso RELEASE
 #  MIRROR, the Ubuntu archive the build fetches from: by default the one this machine's apt reads
 #  (ci/mirror), on a GitHub-hosted runner its cloud's mirror; the ISO's sources say archive.ubuntu.com
+#  ISO_LANES, how many of the checks' machines run at once after the build: 2 by default, 1 (one after
+#  another, each line said as its check ends) when asked or when this machine cannot hold two (_lanes_fit).
+#  The lines and their order are the same either way
 #  => $ISO_OUT (~/minos-iso-out): minos-RELEASE-amd64.iso, its .sha256 and logs/minos-RELEASE-amd64/: the
 #     build's logs, each check's, the serial logs, the disks' facts and the screens
 #  needs iso/build's tools (debootstrap, squashfs-tools, xorriso, dosfstools, mtools, kmod, wget or curl) and
@@ -65,16 +68,19 @@ _install() { #label firmware disk phases [layout [keyboard [zone [fs]]]] => LABE
     #as iso/install-check names the run: the city of the zone, in lower case
     [ -z "${7:-}" ] || _install__name="${_install__name}-$(printf "%s" "${7##*/}" | tr '[:upper:]_' '[:lower:]-')"
     _install__log="${logs}/install-${_install__name}.log"
+    #a directory of its own: install-check removes and ci/iso copies the screens of a run by its name and a
+    #glob, and one name begins another's (uefi-sata, uefi-sata-home-xfs-btrfs), which may run at the same time
+    _install__dir="${tmp}/install/${_install__name}"
     _install__start="$(date +%s)"
-    PHASES="${4}" LAYOUT="${5:-empty}" KEYBOARD="${6:-}" ZONE="${7:-}" FS="${8:-}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${tmp}/install" 20 > "${_install__log}" 2>&1
+    PHASES="${4}" LAYOUT="${5:-empty}" KEYBOARD="${6:-}" ZONE="${7:-}" FS="${8:-}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${_install__dir}" 20 > "${_install__log}" 2>&1
     _install__status="${?}"; _install__secs="$(($(date +%s) - _install__start))"
     mkdir -p "${logs}/install"
-    for _install__file in "${tmp}/install/${_install__name}".facts "${tmp}/install/${_install__name}".serial.log \
-                          "${tmp}/install/${_install__name}"-*.png; do
+    for _install__file in "${_install__dir}/${_install__name}".facts "${_install__dir}/${_install__name}".serial.log \
+                          "${_install__dir}/${_install__name}"-*.png; do
         [ ! -f "${_install__file}" ] || cp "${_install__file}" "${logs}/install/"
     done
     #the disk weighs gigabytes, and the next check needs the room
-    rm -f "${tmp}/install/${_install__name}".img "${tmp}/install/${_install__name}".vars.fd
+    rm -rf "${_install__dir}"
     if [ "${_install__status}" = 0 ]; then
         _line "${1}" "ok    ${_install__secs}s; $(grep '^dpkg --verify' "${logs}/install/${_install__name}.facts" | tail -n 1 | cut -c1-160)"
     else
@@ -85,11 +91,24 @@ _install() { #label firmware disk phases [layout [keyboard [zone [fs]]]] => LABE
     [ -z "${_install__fields}" ] || _line "installer fields" "${_install__fields}"
 }
 
+_lanes_fit() { #=> true when this machine holds two of the checks' machines at once: 2 processors each, and
+    #the memory of a live session and an install together (4096 + 3072 MiB, iso/live-check and
+    #iso/install-check), which a session fills with its page cache before it ends. Two live sessions never
+    #run together (the lanes below)
+    [ "$(nproc)" -ge 4 ] && awk '$1 == "MemTotal:" {exit !($2 >= (4096 + 3072) * 1024)}' /proc/meminfo
+}
+
 [ "$(id -u)" = 0 ] || { printf "%s\\n" "ci/iso runs as root: iso/build and iso/install-check need it" >&2; exit 2; }
+lanes="${ISO_LANES:-2}"
+case "${lanes}" in
+    1) ;;
+    2) _lanes_fit || { lanes=1; printf "%s\\n" "ci/iso: one lane: $(nproc) processors and $(awk '$1 == "MemTotal:" {print int($2 / 1024)}' /proc/meminfo) MiB hold one machine at a time" >&2; } ;;
+    *) printf "%s\\n" "ci/iso: ISO_LANES is 1 or 2" >&2; exit 2 ;;
+esac
 [ -c /dev/kvm ] || { printf "%s\\n" "no /dev/kvm on $(hostname): the ISO is checked with KVM only" >&2; exit 2; }
 release="${1:?usage: [SETUP=FILE|URL] ci/iso RELEASE}"
 name="minos-${release}-amd64"; iso="${out}/${name}.iso"; logs="${out}/logs/${name}"
-rm -rf "${out:?}/${name}".* "${logs}" "${tmp}/install"; mkdir -p "${cache}" "${logs}/live" "${tmp}/install"
+rm -rf "${out:?}/${name}".* "${logs}" "${tmp}/install" "${tmp}/sessions"; mkdir -p "${cache}" "${logs}/live" "${tmp}/install"
 printf "\\n=== %s ===\\n" "${name}.iso"
 began="$(date +%s)"
 
@@ -123,30 +142,76 @@ fi
 (cd "${out}" && sha256sum "${name}.iso" > "${name}.sha256")
 _line "sha256" "$(awk '{printf "%s %s  ", $2, $1}' "${out}/${name}.sha256")"
 
+#the sessions, numbered in the order their lines are said, each a machine of its own (or two, an install's)
+#that shares nothing it writes with another: its own directory under mktemp's (QEMU's monitor and the
+#firmware's variables), a disk and logs named by it, no port, no display, the ISO read only
 #the live session, as a person boots it
-_live "live bios cd" bios cd yes
-_live "live secureboot usb" secureboot usb yes
-_live "live uefi cd, no cable" uefi cd no
-
+_session_1() { _live "live bios cd" bios cd yes; }
+_session_2() { _live "live secureboot usb" secureboot usb yes; }
+_session_3() { _live "live uefi cd, no cable" uefi cd no; }
 #minos installed from the live session, with no network, then the disk alone
-_install "install uefi sata" uefi sata "install boot untrim"
+_session_4() { _install "install uefi sata" uefi sata "install boot untrim"; }
 #the keyboard changed in the installer before the password is typed, and the same keys at the disk's login;
 #a time zone chosen there, and the disk in it. The other two installs take the session's keyboard and the
 #zone an install starts on, minos' own, which the session's clock is in
-_install "install bios sata, keyboard, zone" bios sata "install boot" empty latam Asia/Tokyo
-#beside what a disk holds, the plan changed in the installer, on a disk the kernel names as NVMe ones
-_install "install uefi nvme, beside" uefi nvme "install boot" beside
+_session_5() { _install "install bios sata, keyboard, zone" bios sata "install boot" empty latam Asia/Tokyo; }
+#beside what a disk holds, the plan changed in the installer, on a disk the kernel names as NVMe ones; there
 #the plan opened line by line by its key, c, and not by p, which was its key before
-_line "plan, c and p" "$(sed -n 's/^plan keys: //p' "${logs}/install/uefi-nvme-beside.facts" 2>/dev/null | head -n 1)"
+_session_6() {
+    _install "install uefi nvme, beside" uefi nvme "install boot" beside
+    _line "plan, c and p" "$(sed -n 's/^plan keys: //p' "${logs}/install/uefi-nvme-beside.facts" 2>/dev/null | head -n 1)"
+}
 #the file systems the installer offers besides ext4, each installed once and booted, on the two firmwares:
 #btrfs for minos and /home in its subvolumes, by BIOS; by UEFI xfs for minos and a btrfs of its own for
 #/home, both chosen on the plan in one visit of its chooser (f), which the plan must then say
-_install "install bios sata, btrfs" bios sata "install boot" empty "" "" btrfs
-_line "file systems, bios btrfs" "$(sed -n 's/^file systems: //p' "${logs}/install/bios-sata-btrfs.facts" 2>/dev/null | tail -n 1)"
-_install "install uefi sata, xfs, home btrfs" uefi sata "install boot" home "" "" xfs:btrfs
-_line "file systems, uefi xfs, home btrfs" "$(sed -n 's/^file systems: //p' "${logs}/install/uefi-sata-home-xfs-btrfs.facts" 2>/dev/null | tail -n 1)"
-_line "plan, f" "$(sed -n 's/^plan file systems: //p' "${logs}/install/uefi-sata-home-xfs-btrfs.facts" 2>/dev/null | head -n 1)"
-rm -rf "${tmp}/install"
+_session_7() {
+    _install "install bios sata, btrfs" bios sata "install boot" empty "" "" btrfs
+    _line "file systems, bios btrfs" "$(sed -n 's/^file systems: //p' "${logs}/install/bios-sata-btrfs.facts" 2>/dev/null | tail -n 1)"
+}
+_session_8() {
+    _install "install uefi sata, xfs, home btrfs" uefi sata "install boot" home "" "" xfs:btrfs
+    _line "file systems, uefi xfs, home btrfs" "$(sed -n 's/^file systems: //p' "${logs}/install/uefi-sata-home-xfs-btrfs.facts" 2>/dev/null | tail -n 1)"
+    _line "plan, f" "$(sed -n 's/^plan file systems: //p' "${logs}/install/uefi-sata-home-xfs-btrfs.facts" 2>/dev/null | head -n 1)"
+}
+
+if [ "${lanes}" = 1 ]; then
+    for session in 1 2 3 4 5 6 7 8; do "_session_${session}"; done
+else
+    #two lanes, each its sessions one after another, their lines kept apart and said in the sessions' order
+    #once both lanes are through, whichever ends first. A failed session is a FAIL line, as with one lane,
+    #and its lane goes on. Balanced by what each session took alone on a 4-processor machine: the three
+    #longest installs (1845 s) in one, the live sessions and the other two (1733 s) in the other, which keeps
+    #two live sessions, the largest machines, from ever running together
+    _stop_lanes() { #status => the lanes and what they run stopped, then exit STATUS: a session run in the
+        #background ignores INT, and its check, told TERM, stops its machine on its way out. A lane is held
+        #still meanwhile, so that it starts no other check when its own ends
+        trap - INT TERM HUP
+        for _stop_lanes__lane in ${lane_pids}; do
+            kill -STOP "${_stop_lanes__lane}" 2>/dev/null
+            pkill -TERM -P "${_stop_lanes__lane}"
+            kill -TERM "${_stop_lanes__lane}" 2>/dev/null; kill -CONT "${_stop_lanes__lane}" 2>/dev/null
+        done
+        wait
+        exit "${1}"
+    }
+    mkdir -p "${tmp}/sessions"
+    trap '_stop_lanes 130' INT; trap '_stop_lanes 143' TERM; trap '_stop_lanes 129' HUP
+    lane_pids=""
+    for lane in "4 5 6" "1 2 3 7 8"; do
+        ( for session in ${lane}; do "_session_${session}" > "${tmp}/sessions/${session}"; done ) &
+        lane_pids="${lane_pids} ${!}"
+    done
+    wait
+    trap - INT TERM HUP
+    for session in 1 2 3 4 5 6 7 8; do
+        if [ -f "${tmp}/sessions/${session}" ]; then
+            cat "${tmp}/sessions/${session}"
+        else
+            _line "session ${session}" "FAIL  it said nothing: its lane stopped before it"
+        fi
+    done
+fi
+rm -rf "${tmp}/install" "${tmp}/sessions"
 printf "%s\\n" "--- ${name}.iso took $(($(date +%s) - began))s"
 
 # vim: set ts=8 sw=4 tw=0 ft=sh :
