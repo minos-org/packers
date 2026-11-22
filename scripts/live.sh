@@ -4,7 +4,8 @@
 #Ubuntu ISO), then scripts/live-vagrant.sh adds inside it what a Vagrant base box needs, as
 #autoinstall/vagrant.yaml does for the boxes Packer makes. ci/boxes boots the image once for scripts/box.sh
 #and packs it with scripts/export.sh, as Packer does.
-#usage: [STEPS="install vagrant"] [DISK_SIZE=10G] live.sh RELEASE FLAVOUR SETUP OUTPUT     (as root)
+#usage: [STEPS="install vagrant"] [DISK_SIZE=10G] live.sh RELEASE FLAVOUR SETUP OUTPUT     (as root, on a
+#       machine booted by BIOS)
 #       => OUTPUT/minos-FLAVOUR-RELEASE/minos-FLAVOUR-RELEASE.raw, and beside it install.log: setup's output,
 #          each line after the second it was printed at
 #       needs losetup, sfdisk, mkfs.ext4, chroot, perl and the network; setup fetches debootstrap when the
@@ -53,6 +54,14 @@ _since() { #$1 log, $2 $3 two patterns => seconds from the first line matching $
 
 _install() { #setup's live mode onto a new disk image: the disk Packer gives subiquity, GPT with a BIOS boot
              #partition and one ext4 partition for everything (autoinstall/user-data: storage direct)
+    #setup installs the boot loader of the firmware the machine it runs on booted with (/sys/firmware/efi), and
+    #a box boots by BIOS, as VirtualBox starts an imported machine: on a machine booted by UEFI setup asks for
+    #an EFI system partition the disk does not have, and would make a box that boots by UEFI alone
+    if [ -d /sys/firmware/efi ]; then
+        printf "%s\\n" "live: this machine booted by UEFI, and setup's live mode installs GRUB for the firmware it runs on: a box boots by BIOS" >&2
+        return 1
+    fi
+    printf "%s\\n" "live: this machine booted by BIOS, as the box does"
     rm -rf "${dir}"; mkdir -p "${dir}"
     truncate -s "${DISK_SIZE:-10G}" "${disk}"
     printf '%s\n' 'label: gpt' 'start=2048, size=2048, type=21686148-6449-6E6F-744E-656564454649' \
