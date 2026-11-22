@@ -38,13 +38,13 @@
 #              carry their module and their check, and their tools be installed. Without FS, ext4, the
 #              default, which is taken as proposed. NAME gets -FS, - for the colon
 #  KEYBOARD    latam: on the step of the user the keyboard is changed to it, before the password is
-#              typed: Tab to its field, Enter, its code typed into the list, Enter; F2, F3 and F4,
-#              pressed there first, must change nothing. The password is typed by its keys, the same
+#              typed: on its field, the first, Enter, its code typed into the list, Enter; F2, F3
+#              and F4, pressed there first, must change nothing. The password is typed by its keys, the same
 #              ones here and at the disk's login, whatever characters the layout makes of them; the disk
 #              must have that keyboard, and without KEYBOARD the live session's own (us). NAME gets
 #              -KEYBOARD
-#  ZONE        a time zone (Asia/Tokyo): chosen on the step of the user, Tab to its field, Enter, its
-#              city typed into the list, Enter. The disk must be in that zone, by its files and by what
+#  ZONE        a time zone (Asia/Tokyo): chosen on the step of the user, on its field, the second,
+#              Enter, its city typed into the list, Enter. The disk must be in that zone, by its files and by what
 #              it says once booted; without ZONE, in America/Mexico_City. NAME gets the city, in lower
 #              case
 #  INSTALLER   a directory with minos-installer and minos-installer-engine: they take the place of the
@@ -153,7 +153,7 @@ while :; do
         #a view of the plan: what its actions say, read by the engine from the plan the installer holds
         #(its directory of mktemp's), and then that they were said
         case "${title}" in "minos installer - plan"*)
-            plan="$(ls -t /tmp/tmp.*/plan 2>/dev/null | head -n 1)"
+            plan="$(ls -t /tmp/tmp.*/plan /tmp/tmp.*/ahead-*.plan 2>/dev/null | head -n 1)"
             [ -z "${plan}" ] || minos-installer-engine review "${plan}" 2>/dev/null | awk -F '\t' '$1 == "action" {print $3}' |
                 while IFS= read -r line; do _say "plan action: ${line}"; done
             _say "plan said" ;;
@@ -581,7 +581,11 @@ case " ${phases} " in *" install "*)
     _wait_screen "intro ready" 60
     _step "the installer, opened again: its intro"
     _press ret
-    _wait_screen "plan" 60
+    #the plan is made in the background: its screen says plan reading, and takes no key but Esc and q,
+    #until the plan fills it and its title says plan
+    _wait_serial "probe: screen: minos installer - plan[[:cntrl:]]*\$" 60 ||
+        { _screen timeout; _die "the installer did not show its plan: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
+    sleep 1
     if [ "${layout}" = "beside" ]; then
         #the plan proposed takes the free room and deletes nothing. Changed line by line (c); down to the
         #line of the free room (after the line of what is used and the lines of the partitions there);
@@ -615,15 +619,16 @@ case " ${phases} " in *" install "*)
         _press n
     fi
     _wait_screen "user" 60
-    #before anything is chosen, the step shows the zone an install starts on
-    grep '^probe: screen: minos installer - user' "${serial}" | head -n 1 | tr -d '\r' | grep -q " ${default_zone}\$" ||
-        { _screen timeout; _die "the installer does not start on ${default_zone}: $(grep '^probe: screen: minos installer - user' "${serial}" | head -n 1)"; }
-    #the keyboard and the time zone are fields of the step, after the name and the two passwords: Tab
-    #reaches them (a field not typed yet is passed over), Enter opens the field's list, what is typed
-    #narrows it until the window says the cursor is on the one wanted, and Enter takes it
+    #before anything is chosen, the step shows the zone an install starts on, and its cursor is on the
+    #keyboard, its first field (the window's title ends with the field under the cursor)
+    grep '^probe: screen: minos installer - user' "${serial}" | head -n 1 | tr -d '\r' | grep -q " ${default_zone} keyboard\$" ||
+        { _screen timeout; _die "the installer does not start on ${default_zone} with its cursor on the keyboard: $(grep '^probe: screen: minos installer - user' "${serial}" | head -n 1)"; }
+    #the fields in the order they are shown: the keyboard, the time zone, the name, the password and the
+    #same again. Tab goes from one to the next; Enter on the keyboard or the time zone opens its list, what
+    #is typed narrows it until the window says the cursor is on the one wanted, and Enter takes it and
+    #moves the cursor on to the next field
     _user__field=1
     if [ -n "${keyboard}" ]; then
-        _press tab tab tab; sleep 2; _user__field=4
         #the function keys that once changed the keyboard and the zone from the step change nothing
         #now: the window still says the step, the same keyboard and the same zone, and no list opened
         _user__title="$(grep '^probe: screen: ' "${serial}" | tail -n 1 | tr -d '\r')"
@@ -644,9 +649,10 @@ case " ${phases} " in *" install "*)
         _wait_serial "probe: screen: minos installer - user ${keyboard} " 30 ||
             { _screen timeout; _die "the installer did not take the keyboard ${keyboard}: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
         _step "fields: keyboard ${keyboard} from its list"
+        _user__field=2
     fi
     if [ -n "${zone}" ]; then
-        while [ "${_user__field}" -lt 5 ]; do _press tab; _user__field="$((_user__field + 1))"; done
+        while [ "${_user__field}" -lt 2 ]; do _press tab; _user__field="$((_user__field + 1))"; done
         sleep 2
         _press ret
         _wait_screen "zone " 30
@@ -658,9 +664,11 @@ case " ${phases} " in *" install "*)
         _wait_serial "probe: screen: minos installer - user [a-z]* ${zone}" 30 ||
             { _screen timeout; _die "the installer did not take the time zone ${zone}: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
         _step "fields: zone ${zone} from its list"
+        _user__field=3
     fi
-    #after a list the cursor stays on its field: Tab goes round to the name
-    [ "${_user__field}" = 1 ] || { _press tab; sleep 1; }
+    #on to the name
+    while [ "${_user__field}" -lt 3 ]; do _press tab; _user__field="$((_user__field + 1))"; done
+    sleep 1
     _type "${user}"; _press ret; sleep 2
     _type "${password_keys}"; _press ret; sleep 2
     _type "${password_keys}"; _press ret
