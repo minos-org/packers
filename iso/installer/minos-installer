@@ -1889,16 +1889,16 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
     #password with the keys it was typed with. And timezone, the time zone of the installed system: the
     #one the engine says an install starts on (minos' own), until another is chosen, shown with the time
     #it is there. Five fields, in the order they are shown: the keyboard, the time zone, the name, the
-    #password and the same again; the cursor starts on the name. Tab goes from one to the next of them
-    #all, round again after the last, and Shift-Tab back; the arrows move between them too, without
-    #going round. Enter on the keyboard or the time zone opens its list (_step_keyboards, _step_zones),
-    #and once one is taken there the cursor goes on to the next field; Enter on the three that are typed
-    #goes on to the next of those, and from the last one to the next step. Tab, the arrows, Enter, Esc
-    #and F5 say themselves the same whatever the keyboard, where a letter or a Ctrl with one does not
-    #once the keyboard is not a Latin one: nothing here needs a letter to be reached; Ctrl-P does what
-    #F5 does, for a terminal that keeps the function keys to itself.
+    #password and the same again; the cursor starts on the keyboard, the first. Tab goes from one to the
+    #next of them all, round again after the last, and Shift-Tab back; the arrows move between them too,
+    #without going round. Enter on the keyboard or the time zone opens its list (_step_keyboards,
+    #_step_zones), and once one is taken there the cursor goes on to the next field; Enter on the three
+    #that are typed goes on to the next of those, and from the last one to the next step. Tab, the
+    #arrows, Enter, Esc and F5 say themselves the same whatever the keyboard, where a letter or a Ctrl
+    #with one does not once the keyboard is not a Latin one: nothing here needs a letter to be reached;
+    #Ctrl-P does what F5 does, for a terminal that keeps the function keys to itself.
     #A name is taken as typed and judged by the engine, which says in words what a name is
-    _step_user__field="${user_field:-3}"; _step_user__problem=""; _step_user__draw="yes"; _step_user__told=""
+    _step_user__field="${user_field:-1}"; _step_user__problem=""; _step_user__draw="yes"; _step_user__told=""
     _keyboard_read; _keyboard_keys; _step_user_clock
     #a window that changes its size says so with a signal: the step draws again when it came, with no
     #process started each second to ask the terminal's size
