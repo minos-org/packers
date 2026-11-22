@@ -83,7 +83,7 @@ _term_take() { #=> the terminal as the screens need it: keys come one at a time 
     #from, also inside a loop that reads its lines from somewhere else
     exec 3<&0
     term_saved="$(stty -g <&3)" || _end "The installer cannot read this terminal's settings."
-    trap '_term_back' EXIT
+    trap '_ahead_drop; _term_back' EXIT
     trap 'exit 130' INT TERM HUP
     stty -icanon -echo min 0 time 10 susp undef quit undef <&3
     term_wait="10"
@@ -143,6 +143,8 @@ _key() { #[tenths] => key, the next key pressed, by its name: a character as its
     [ -z "${screen}" ] || { printf '%s' "${screen}"; screen=""; }
     #the disks are read once the first screen is out: the read would take half of a processor from it
     [ "${disks_reader}" != "soon" ] || _disks_read
+    #and so is the plan asked ahead, for the same reason
+    [ "${ahead_reader}" != "soon" ] || _ahead_start
     if [ -z "${keys_ahead}" ]; then
         key_fresh="yes"
         #a read never waits for ever: with no time said, a second at a time, again and again, so that a
@@ -491,8 +493,6 @@ _load() { #[fresh] => the plan choices make for disk, as the engine makes it: th
     #in the r_ variables, choices as the engine took them. The engine reads the disks again unless it
     #kept them as they are now, and always when FRESH is said; the screen says so before the wait. False
     #when the engine fails; what it said is in errors
-    r_problems=""; r_problem_count=0; r_now=""; r_after=""; r_actions=""; r_lines=""; r_line_count=0
-    r_options=""; r_sizes=""; r_fs=""; r_loss_kind="none"; r_loss=""; r_button_kind="plain"; r_button=""; r_disk=""
     if [ -n "${1:-}" ]; then
         _reading "Reading ${disk#/dev/} again, as it is now: the confirmation says what it holds..."
     elif ! _map_kept; then
@@ -500,30 +500,37 @@ _load() { #[fresh] => the plan choices make for disk, as the engine makes it: th
     fi
     # shellcheck disable=SC2086 # the choices, a word each
     _load__rows="$(_engine edit ${1:+--fresh} "${disk}" "${plan}" ${choices} 2>"${errors}")" || return 1
-    while IFS="${c_tab}" read -r _load__tag _load__rest; do
-        case "${_load__tag}" in
-            choices) choices="${_load__rest}" ;;
-            disk) r_disk="${_load__rest}" ;;
-            line) r_lines="${r_lines}${_load__rest}${c_nl}"; r_line_count="$((r_line_count + 1))" ;;
-            option) r_options="${r_options}${_load__rest}${c_nl}" ;;
-            size) r_sizes="${r_sizes}${_load__rest}${c_nl}" ;;
-            fs) r_fs="${r_fs}${_load__rest}${c_nl}" ;;
-            problem) r_problems="${r_problems}${_load__rest}${c_nl}"; r_problem_count="$((r_problem_count + 1))" ;;
-            now) r_now="${r_now}${_load__rest}${c_nl}" ;;
-            after) r_after="${r_after}${_load__rest}${c_nl}" ;;
-            action) r_actions="${r_actions}${_load__rest}${c_nl}" ;;
-            loss) r_loss_kind="${_load__rest%%"${c_tab}"*}"; r_loss="${_load__rest#*"${c_tab}"}" ;;
-            button) r_button_kind="${_load__rest%%"${c_tab}"*}"; r_button="${_load__rest#*"${c_tab}"}" ;;
+    _load_rows "${_load__rows}"
+}
+
+_load_rows() { #rows => the ROWS of a plan the engine made (edit's) in the r_ variables, choices as the
+    #engine took them, and the disk in a line
+    r_problems=""; r_problem_count=0; r_now=""; r_after=""; r_actions=""; r_lines=""; r_line_count=0
+    r_options=""; r_sizes=""; r_fs=""; r_loss_kind="none"; r_loss=""; r_button_kind="plain"; r_button=""; r_disk=""
+    while IFS="${c_tab}" read -r _load_rows__tag _load_rows__rest; do
+        case "${_load_rows__tag}" in
+            choices) choices="${_load_rows__rest}" ;;
+            disk) r_disk="${_load_rows__rest}" ;;
+            line) r_lines="${r_lines}${_load_rows__rest}${c_nl}"; r_line_count="$((r_line_count + 1))" ;;
+            option) r_options="${r_options}${_load_rows__rest}${c_nl}" ;;
+            size) r_sizes="${r_sizes}${_load_rows__rest}${c_nl}" ;;
+            fs) r_fs="${r_fs}${_load_rows__rest}${c_nl}" ;;
+            problem) r_problems="${r_problems}${_load_rows__rest}${c_nl}"; r_problem_count="$((r_problem_count + 1))" ;;
+            now) r_now="${r_now}${_load_rows__rest}${c_nl}" ;;
+            after) r_after="${r_after}${_load_rows__rest}${c_nl}" ;;
+            action) r_actions="${r_actions}${_load_rows__rest}${c_nl}" ;;
+            loss) r_loss_kind="${_load_rows__rest%%"${c_tab}"*}"; r_loss="${_load_rows__rest#*"${c_tab}"}" ;;
+            button) r_button_kind="${_load_rows__rest%%"${c_tab}"*}"; r_button="${_load_rows__rest#*"${c_tab}"}" ;;
         esac
     done << E=O=F
-${_load__rows}
+${1}
 E=O=F
     #the disk in a line: its model, its size, what it holds, its name
-    IFS="${c_tab}" read -r _load__device _load__size _load__model _load__holds << E=O=F
+    IFS="${c_tab}" read -r _load_rows__device _load_rows__size _load_rows__model _load_rows__holds << E=O=F
 ${r_disk}
 E=O=F
-    disk_model="${_load__model}"; [ "${disk_model}" != "-" ] || disk_model="disk"
-    disk_size="${_load__size}"; disk_holds="${_load__holds}"
+    disk_model="${_load_rows__model}"; [ "${disk_model}" != "-" ] || disk_model="disk"
+    disk_size="${_load_rows__size}"; disk_holds="${_load_rows__holds}"
     loaded="${disk} ${choices}"
 }
 
@@ -590,7 +597,9 @@ _disks_read() { #=> the disks read by the engine again, in the background: disks
     #reads makes what it keeps count for nothing. The engine is told this script's process, and stops
     #reading once that is gone: sudo runs in a session of its own (_as_root), which the terminal's hangup
     #does not reach when the window closes, and a signal sent on the way out would not reach what the
-    #engine runs (sudo-rs passes it to its one command), nor be sent at all when this script is killed
+    #engine runs (sudo-rs passes it to its one command), nor be sent at all when this script is killed.
+    #A plan asked ahead was asked of the disks as they were: it is dropped
+    _ahead_drop
     _disks_key; disks_reader_key="${disks_key}"
     if [ "${uid}" = 0 ]; then
         # shellcheck disable=SC2086 # the engine's options, a word each
@@ -608,15 +617,7 @@ _disks_take() { #=> true once the disks are known; false while the engine reads 
     #disk). A read that failed ends the installer with what the engine said
     [ -n "${disks_reader}" ] || return 0
     [ "${disks_reader}" != "soon" ] || return 1
-    if [ -d "/proc/${disks_reader}" ]; then
-        #there, and ended all the same when it is a zombie this shell has not waited for yet. Its state
-        #is the word after the name, which is in parentheses; a process that ends while it is read has
-        #no file to read, and is looked at again the next time
-        _disks_take__stat=""
-        { read -r _disks_take__stat < "/proc/${disks_reader}/stat"; } 2>/dev/null
-        _disks_take__stat="${_disks_take__stat##*) }"
-        [ "${_disks_take__stat%% *}" = "Z" ] || return 1
-    fi
+    _ended "${disks_reader}" || return 1
     wait "${disks_reader}"; _disks_take__status="${?}"; disks_reader=""
     if [ "${_disks_take__status}" != 0 ]; then
         _term_back
@@ -649,6 +650,91 @@ _disks_count() { #=> disks_usable, the disks minos can go to, a line each, and d
 
 _disks_forget() { #=> what was kept emptied: this installer is about to write to a disk
     [ -z "${disks_file}" ] || : > "${disks_file}"
+}
+
+_ended() { #process => true when PROCESS has ended: gone, or a zombie this shell has not waited for yet.
+    #Its state is the word after the name, which is in parentheses; a process that ends while it is read
+    #has no file to read, and is looked at again the next time
+    [ -d "/proc/${1}" ] || return 0
+    _ended__stat=""
+    { read -r _ended__stat < "/proc/${1}/stat"; } 2>/dev/null
+    _ended__stat="${_ended__stat##*) }"
+    [ "${_ended__stat%% *}" = "Z" ]
+}
+
+################################################################################
+# The plan: asked of the engine ahead, in the background, as soon as the disk is
+# known, so that its screen is drawn at once and fills in when it comes
+################################################################################
+
+_ahead_ask() { #=> the plan for disk asked of the engine ahead, with the choices the plan step would ask it
+    #with: the same while it is the disk the last plan was for, none for another. Asked once: the same
+    #disk and choices, with the same engine options, are the request there is already, running or ended;
+    #anything else drops it first. Nothing is asked while the disks are read, nor once the plan is known.
+    #The engine starts once the screen is out (ahead_reader is soon, _key): it would take half of a
+    #processor from it
+    { [ -z "${disks_reader}" ] && [ -n "${disk}" ]; } || return 0
+    _ahead_ask__choices="${choices}"; [ "${loaded%% *}" = "${disk}" ] || _ahead_ask__choices=""
+    [ "${loaded}" != "${disk} ${_ahead_ask__choices}" ] || return 0
+    _ahead_ask__key="${engine_options}|${disk}|${_ahead_ask__choices}"
+    [ "${_ahead_ask__key}" != "${ahead_key}" ] || return 0
+    _ahead_drop
+    ahead_count="$((ahead_count + 1))"; ahead_file="${work}/ahead-${ahead_count}"
+    ahead_key="${_ahead_ask__key}"; ahead_disk="${disk}"; ahead_choices="${_ahead_ask__choices}"
+    ahead_reader="soon"; ahead_status=""
+}
+
+_ahead_start() { #=> the engine started on the plan asked ahead: ahead_reader is its process until
+    #_ahead_take finds it ended. Its rows go to ahead_file, what it says to ahead_file.errors, the plan
+    #to ahead_file.plan: a file of its own for each request, which one dropped and still ending does
+    #not write over. Started the way the disks are read (_disks_read), so that ahead_reader is the
+    #process a signal stops
+    if [ "${uid}" = 0 ]; then
+        # shellcheck disable=SC2086 # the engine's options and the choices, a word each
+        sh "${engine}" ${engine_options} edit "${ahead_disk}" "${ahead_file}.plan" ${ahead_choices} \
+            > "${ahead_file}" 2> "${ahead_file}.errors" < /dev/null &
+    else
+        # shellcheck disable=SC2086 # the engine's options and the choices, a word each
+        setsid sudo sh "${engine}" ${engine_options} edit "${ahead_disk}" "${ahead_file}.plan" ${ahead_choices} \
+            > "${ahead_file}" 2> "${ahead_file}.errors" < /dev/null &
+    fi
+    ahead_reader="${!}"
+}
+
+_ahead_take() { #=> 0 once the plan asked ahead is known: its rows in the r_ variables and plan its file,
+    #as _load leaves them; 1 while the engine makes it, or is about to; 2 when it failed, and errors is
+    #what the engine said. Taken, it is no longer a request: the next one is another plan
+    [ -n "${ahead_key}" ] || return 1
+    [ "${ahead_reader}" != "soon" ] || return 1
+    if [ -n "${ahead_reader}" ]; then
+        _ended "${ahead_reader}" || return 1
+        wait "${ahead_reader}"; ahead_status="${?}"; ahead_reader=""
+    fi
+    if [ "${ahead_status}" != 0 ]; then
+        errors="${ahead_file}.errors"
+        return 2
+    fi
+    _ahead_take__rows=""
+    while IFS= read -r _ahead_take__line; do
+        _ahead_take__rows="${_ahead_take__rows}${_ahead_take__line}${c_nl}"
+    done < "${ahead_file}"
+    disk="${ahead_disk}"; choices="${ahead_choices}"; plan="${ahead_file}.plan"
+    _load_rows "${_ahead_take__rows}"
+    ahead_key=""
+}
+
+_ahead_drop() { #=> the plan asked ahead, dropped: its engine stopped, and its files removed. The signal
+    #goes to sudo, which passes it on to the engine; the engine ends once what it runs now has, and edit
+    #writes nothing to a disk, so it may stop anywhere. A plan taken is no request, and its file is the plan
+    [ -n "${ahead_key}" ] || return 0
+    if [ -n "${ahead_reader}" ] && [ "${ahead_reader}" != "soon" ]; then
+        #ended already, it is no process to stop: that is not said
+        kill "${ahead_reader}" 2>/dev/null
+        rm -f "${ahead_file}" "${ahead_file}.errors" "${ahead_file}.plan"
+    elif [ -z "${ahead_reader}" ]; then
+        rm -f "${ahead_file}" "${ahead_file}.errors" "${ahead_file}.plan"
+    fi
+    ahead_key=""; ahead_reader=""; ahead_status=""
 }
 
 ################################################################################
@@ -723,6 +809,7 @@ _intro_cipher() { #=> the intro out of noise: every line starts as signs drawn b
         #the disks, read meanwhile: their line settles into them from here on, and Enter goes on
         if [ -n "${disks_reader}" ] && _disks_take; then
             _intro_lines; _intro_frame; _title "intro"
+            [ "${disks_usable_count}" != 1 ] || _ahead_ask
         fi
         while IFS="${c_tab}" read -r _intro_cipher__at _intro_cipher__column _intro_cipher__style _intro_cipher__text; do
             [ -n "${_intro_cipher__at}" ] || continue
@@ -779,8 +866,10 @@ _step_intro() { #=> the first screen: what is about to happen. Enter goes on, on
     [ -n "${intro_played}" ] || _step_intro__play="yes"
     intro_played="yes"
     while :; do
-        #the disks, when the engine has read them since the last look: false says only that it reads on
+        #the disks, when the engine has read them since the last look: false says only that it reads on.
+        #With one disk minos can go to, its plan is asked for from here
         _disks_take || :
+        [ -n "${disks_reader}" ] || [ "${disks_usable_count}" != 1 ] || _ahead_ask
         _intro_lines
         _intro_frame
         if [ -n "${_step_intro__play}" ] && [ "${effects}" = "on" ]; then
@@ -903,7 +992,7 @@ E=O=F
                     *) [ -z "${_step_disk__before}" ] || disk="${_step_disk__before}" ;;
                 esac ;;
             r) _step_disk_again ;;
-            enter|n|right) return 0 ;;
+            enter|n|right) _ahead_ask; return 0 ;;
             esc|b|left) return 1 ;;
             q) ! _ask_quit || exit 0 ;;
         esac
@@ -1033,6 +1122,25 @@ E=O=F
         _rows "${row}" "${_draw_plan__style}" 4 2 "${r_loss}"
     fi
     _rest "${row}"
+}
+
+_draw_wait() { #=> the plan's screen while the engine makes it: the disk in a line, as the disks read has it,
+    #and that the plan is being made
+    _row 1 "" ""; _row 2 "" ""
+    _put 2 3 "${s_bold}" "Where minos goes"
+    _put 2 39 "${s_dim}" "Nothing is written until you confirm."
+    _row 3 "" ""
+    while IFS="${c_tab}" read -r _draw_wait__device _draw_wait__size _draw_wait__model _ _draw_wait__holds; do
+        [ "${_draw_wait__device}" = "${disk}" ] || continue
+        disk_model="${_draw_wait__model}"; [ "${disk_model}" != "-" ] || disk_model="disk"
+        disk_size="${_draw_wait__size}"; disk_holds="${_draw_wait__holds}"
+    done << E=O=F
+${disks}
+E=O=F
+    _draw_disk_line 4
+    _row 5 "" ""
+    _row 6 "${s_dim}" "    making the plan..."
+    _rest 7
 }
 
 _line_at() { #n => line_id, what the engine calls line N of the plan
@@ -1229,9 +1337,24 @@ _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Ent
     #(c), with its partition table one key away (t) and its file systems another (f). The window's title
     #says the view: plan, plan edit for the plan line by line, plan filesystems for the chooser of them
     [ "${loaded}" = "${disk} ${choices}" ] || {
-        #another disk, or the first time: the plan the engine suggests
+        #another disk, or the first time: the plan the engine suggests, asked for ahead (_ahead_ask) and
+        #waited for with the screen drawn, what the disks read says of the disk on it. It fills in when
+        #the plan comes; meanwhile the keys that need the plan are dimmed, and Esc and q answer at once
         [ "${loaded%% *}" = "${disk}" ] || { choices=""; proposed=""; plan_view="plan"; edit_line=1; }
-        _load || _failed "The installer could not read ${disk}:"
+        while :; do
+            _ahead_ask
+            _ahead_take; _step_plan__ahead="${?}"
+            [ "${_step_plan__ahead}" = 1 ] || break
+            _title "plan reading"
+            _frame plan "~Enter" "use this plan" "~c" "change it" "~f" "file system" "~t" "table" "Esc" "back" "q" "quit"
+            _draw_wait
+            _key 2
+            case "${key}" in
+                esc|b|left) return 1 ;;
+                q) ! _ask_quit || exit 0 ;;
+            esac
+        done
+        [ "${_step_plan__ahead}" = 0 ] || _failed "The installer could not read ${disk}:"
         #a plan that deletes something, or that lacks something, is not proposed: it is chosen
         if [ -z "${proposed}" ]; then
             { [ "${r_loss_kind}" = "some" ] || [ "${r_problem_count}" -gt 0 ]; } || proposed="yes"
@@ -2294,6 +2417,8 @@ plan="${work}/plan"; errors="${work}/errors"
 #from the moment the first screen is out
 disks_form="minos-installer disks 1"; disks_file=""; disks=""; disks_reader=""; disks_reader_key=""
 disks_usable=""; disks_usable_count=0; steps="plan user confirm install"
+#the plan asked of the engine ahead (_ahead_ask): none yet
+ahead_key=""; ahead_reader=""; ahead_status=""; ahead_disk=""; ahead_choices=""; ahead_file=""; ahead_count=0
 [ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ] || disks_file="${XDG_RUNTIME_DIR}/minos-installer-disks"
 _disks_kept || disks_reader="soon"
 
