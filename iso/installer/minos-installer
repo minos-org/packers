@@ -660,7 +660,6 @@ _intro_lines() { #=> intro, the lines of the intro screen, "row column style tex
     done
     intro="${intro}15${c_tab}5${c_tab}bold${c_tab}${_intro_lines__steps}${c_nl}"
     intro="${intro}17${c_tab}5${c_tab}plain${c_tab}Every step goes back and forward, and keeps what you answered.${c_nl}"
-    intro="${intro}18${c_tab}5${c_tab}plain${c_tab}The plan for the disk is proposed: accept it, or change any line of it.${c_nl}"
 }
 
 _intro_style() { #name => style, the escape sequence of a style of the intro's lines
