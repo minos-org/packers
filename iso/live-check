@@ -354,7 +354,12 @@ _wait_serial "watch: installer" 30 || { _screen installer; _die "Win+i opened no
 sleep 5
 _screen installer
 #the disks, which the installer reads while it draws. The facts are what its window's title said, in order
-#(the probe's titles, with this machine's times), and what it kept, as the watcher saw it written
+#(the probe's titles, with this machine's times), and what it kept, as the watcher saw it written. The
+#titles are the ones the probe saw: it follows a window's title from when the window takes the focus, and
+#xprop reads the title before it asks to be told of the next, so a title given before that, or in between,
+#is never seen. A title the installer keeps a while (that the disks are known, until a key) is seen; one
+#it keeps for as long as a read lasts may not be, when the read is fast. What it kept tells a read: it
+#keeps the disks once it has read them, and only then
 _titles() { #n => the titles the Nth window of the installer took, "MS TITLE" a line: the Nth to show
     tr -d '\r' < "${serial}" | awk -v n="${1}" '$1 == "titles:" && $2 == n {ms = $3; $1 = $2 = $3 = ""; sub(/^ +/, ""); print ms, $0}'
 }
@@ -364,17 +369,33 @@ _title_first() { #n => title_at and title, the first title the installer itself 
     set -- $(_titles "${1}" | awk '$2 == "minos" && $3 == "installer" && $4 == "-" {$2 = $3 = $4 = ""; print; exit}')
     title_at="${1:-}"; [ "${#}" = 0 ] || shift; title="${*}"
 }
+_title_listed() { #n => listed_at, when the Nth window's title first said the disks were known ("intro",
+    #then "intro ready" once the intro is drawn, a second later: one of the two is seen), none when it
+    #never did
+    listed_at="$(_titles "${1}" | awk '$2 == "minos" && $4 == "-" && $5 == "intro" && ($6 == "" || $6 == "ready") {print $1; exit}')"
+}
 _kept_last() { #=> the last thing the watcher said of the disks the installer keeps: WHEN DIGEST ROWS
     sed -n 's/^kept: //p' "${serial}" | tr -d '\r' | tail -n 1
+}
+_kept_at() { #n => kept_at, when the disks the watcher's Nth line says were kept were written, in
+    #milliseconds of this machine's clock (the titles' clock); none when that line is not there, or says
+    #there is nothing kept
+    # shellcheck disable=SC2046 # when, the digest, the rows
+    set -- $(sed -n 's/^kept: //p' "${serial}" | tr -d '\r' | sed -n "${1}p")
+    kept_at=""
+    case "${1:-none}" in
+        none) ;;
+        *) kept_at="$(date -d "$(printf "%s" "${1}" | tr '_' ' ')" +%s%3N 2>/dev/null)" ;;
+    esac
 }
 #the first opening, with nothing kept: its first screen drawn while it read the disks, which its title
 #says (it is given as the screen is drawn) until they are known
 _title_first 1
 [ "${title}" = "intro reading" ] ||
     _die "the installer, with nothing kept, did not draw its first screen while it read the disks: its first title was \"${title}\""
-_listed__at="$(_titles 1 | awk '$2 == "minos" && $4 == "-" && $5 == "intro" && ($6 == "" || $6 == "ready") {print $1; exit}')"
-[ -n "${_listed__at}" ] || _die "the installer never listed the disks: its titles were $(_titles 1 | tr '\n' ',')"
-disks_listed="$((_listed__at - title_at))"
+_title_listed 1
+[ -n "${listed_at}" ] || _die "the installer never listed the disks: its titles were $(_titles 1 | tr '\n' ',')"
+disks_listed="$((listed_at - title_at))"
 _kept__first="$(_kept_last)"
 [ -n "${_kept__first}" ] || _die "the installer read the disks and kept nothing"
 _step "the installer's first screen drawn while it read the disks, listed ${disks_listed} ms after it; kept: ${_kept__first}"
@@ -443,9 +464,11 @@ _wait_serial_count "^watch: installer" "$((_menu__installers + 1))" 30 ||
 sleep 3
 _screen menu-enter
 _step "a row by Enter: Install minos, the installer's window"
-#its second opening: the disks listed from what was kept, with no read
-_title_first 2
-[ "${title}" = "intro" ] || _die "the installer, opened again, did not list the disks it kept: its first title was \"${title}\""
+#its second opening: the disks listed from what was kept, with no read. Its title says them known, and never
+#that it reads them; and nothing new is kept, which a read would be once it ended
+_title_listed 2
+{ [ -n "${listed_at}" ] && ! _titles 2 | grep -q ' minos installer - intro reading$'; } ||
+    _die "the installer, opened again, did not list the disks it kept: its titles were $(_titles 2 | tr '\n' ',')"
 _installer_leave
 [ "$(_count_serial '^kept: ')" = "$((_read__kept + 1))" ] || _die "the installer, opened again, read the disks again: $(_kept_last)"
 _bare || { _screen menu-enter; _die "the installer, left, did not leave the wallpaper bare"; }
@@ -513,8 +536,13 @@ _screen installer-added
 set -- $(_kept_last)
 [ "${3}" = "$((_added__rows + 1))" ] || _die "the installer, a disk added, lists ${3} disks, ${_added__rows} before"
 added_rows="${3}"
-_title_first 4
-[ "${title}" = "intro reading" ] || _die "the installer, a disk added, did not read the disks again: its first title was \"${title}\""
+#and it read them at this opening, before it listed them: what it kept first since the key was written before
+#its title said the disks known. Its title says the read too ("intro reading"), for as long as it lasts: a
+#tenth to a third of a second, which may be over before the probe follows the title, or begin as it does
+_title_listed 4
+_kept_at "$((_added__kept + 1))"
+{ [ -n "${listed_at}" ] && [ -n "${kept_at}" ] && [ "${kept_at}" -le "${listed_at}" ]; } ||
+    _die "the installer, a disk added, did not read the disks again: kept at ${kept_at:-none}, listed at ${listed_at:-none} (ms); its titles were $(_titles 4 | tr '\n' ',')"
 _installer_leave
 _step "a disk added: listed at the next opening, ${added_rows} disks ($(($(date +%s) - _added__start)) s)"
 _monitor quit >/dev/null
