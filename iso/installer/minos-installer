@@ -547,7 +547,7 @@ _choose() { #word... => choices with each WORD (KEY=VALUE) in the place of the o
 _failed() { #what => a screen for what the engine could not do: what it said, and the way out
     _frame none "Enter" "close"
     _row 1 "" ""; _row 2 "${s_bold}" "  ${1}"; _row 3 "" ""
-    _rows 4 "${s_warn}" 4 12 "$(tr '\n' ' ' < "${errors}" 2>/dev/null)"
+    _rows 4 "${s_warn}" 4 12 "$({ tr '\n' ' ' < "${errors}"; } 2>/dev/null)"
     _rest "${row}"
     _key
     exit 1
@@ -2162,7 +2162,7 @@ _step_install() { #=> the plan applied, and seen as it happens: how far it is, w
         #once a second, in one pass over what was said so far: how many steps were said (the engine's and
         #setup's), how many of them since the copy began, the one being done, and the last ten lines.
         #One pass and one second: the copy has the processor, not this screen
-        _step_install__said="$(tr '\r' '\n' < "${log}" 2>/dev/null | awk '
+        _step_install__said="$({ tr '\r' '\n' < "${log}"; } 2>/dev/null | awk '
             {   gsub(/\033\[[0-9;]*[a-zA-Z]/, ""); gsub(/\010/, ""); gsub(/[^ -~]/, "?")
                 if ($0 !~ /[^ ]/) next
                 if ($0 ~ /^\[\+\] / || $0 ~ /^\[minos installer\] /) {
@@ -2233,7 +2233,7 @@ _step_end() { #=> how it ended: minos is installed, and the computer restarts or
         _frame install "Enter" "close"
         _row 1 "" ""; _row 2 "" ""; _put 2 3 "${s_danger}" "The install stopped: minos is not installed"
         _row 3 "" ""; row=4
-        _rows 4 "${s_warn}" 4 4 "$(tr '\n' ' ' < "${errors}" 2>/dev/null)"
+        _rows 4 "${s_warn}" 4 4 "$({ tr '\n' ' ' < "${errors}"; } 2>/dev/null)"
         _row "${row}" "" "    The last that was said:"; row="$((row + 1))"
         _log_lines 9 > "${errors}.log" 2>/dev/null
         while IFS= read -r _step_end__line; do
