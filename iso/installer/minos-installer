@@ -1949,9 +1949,7 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
             else
                 row=12
             fi
-            while [ "${row}" -le 18 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
-            _row 19 "${s_dim}" "    This user runs commands as root, with sudo. The installed system keeps"
-            _row 20 "${s_dim}" "    the keyboard above, and asks for the password with it."
+            while [ "${row}" -le 20 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
             #the cursor, where the next character goes, in a field that is typed
             case "${_step_user__field}" in
                 3) _step_user__column="${#user}"; _step_user__row=7 ;;
