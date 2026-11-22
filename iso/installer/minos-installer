@@ -1409,16 +1409,15 @@ _keyboard_read() { #=> keyboard, the one that is active now (layout, or layout:v
 
 _keyboard_change() { #layout => LAYOUT made the keyboard, when the session lets the installer change it; what
     #was typed as a password goes with the old one, since its keys now say other characters. said is
-    #left with what to tell the person
+    #left with what to tell the person; false when the session did not take it
     _keyboard_change__was="${keyboard}"
-    if said="$(sh "${engine}" keyboard set "${1}" 2>&1)"; then
-        _keyboard_read
-        if [ "${keyboard}" != "${_keyboard_change__was}" ]; then
-            said="The keyboard is now ${keyboard%%:*}."
-            if [ -n "${pass}${pass_again}" ]; then
-                pass=""; pass_again=""; pass_units=""; pass_again_units=""
-                said="The keyboard is now ${keyboard%%:*}: type the password again, with it."
-            fi
+    said="$(sh "${engine}" keyboard set "${1}" 2>&1)" || return 1
+    _keyboard_read
+    if [ "${keyboard}" != "${_keyboard_change__was}" ]; then
+        said="The keyboard is now ${keyboard%%:*}."
+        if [ -n "${pass}${pass_again}" ]; then
+            pass=""; pass_again=""; pass_units=""; pass_again_units=""
+            said="The keyboard is now ${keyboard%%:*}: type the password again, with it."
         fi
     fi
 }
@@ -1426,8 +1425,8 @@ _keyboard_change() { #layout => LAYOUT made the keyboard, when the session lets 
 _step_keyboards() { #=> any keyboard xkb knows, chosen from a list, minos' own first and marked. What is typed
     #narrows the list to the keyboards with it in their code or their name, whatever the case (latam,
     #spanish). Enter takes the one under the cursor, through _keyboard_change; Esc leaves the one there
-    #is. said is left with what to tell the person
-    said=""
+    #is. said is left with what to tell the person, list_taken says whether one was taken
+    said=""; list_taken=""
     if [ -z "${keyboards}" ]; then
         said="This system's list of keyboards (/usr/share/X11/xkb/rules/base.lst) is not here: the keyboard stays ${keyboard}."
         return 0
@@ -1498,7 +1497,7 @@ E=O=F
             end) _step_keyboards__at="${_step_keyboards__count}" ;;
             backspace) _step_keyboards__typed="${_step_keyboards__typed%?}"; _step_keyboards__at=0 ;;
             clear) _step_keyboards__typed=""; _step_keyboards__at=0 ;;
-            enter) [ "${_step_keyboards__count}" -lt 1 ] || { _keyboard_change "${_step_keyboards__chosen}"; return 0; } ;;
+            enter) [ "${_step_keyboards__count}" -lt 1 ] || { ! _keyboard_change "${_step_keyboards__chosen}" || list_taken="yes"; return 0; } ;;
             esc) return 0 ;;
             [a-zA-Z0-9_\(\)-]|" ")
                 #a character of a code or a name: the list is narrowed again from its top
@@ -1516,8 +1515,9 @@ _step_zones() { #=> timezone, chosen among the zones this system's tzdata has, w
     #is typed narrows the list to the zones with it in their name, whatever the case, a space standing
     #for the _ of a name (mexico city). The zone under the cursor says what time it is there now, which
     #is how a person sees it is theirs. Enter takes it, Esc leaves the zone as it was. It is an answer
-    #like the others: nothing of this system changes. said is left with what could not be done
-    said=""
+    #like the others: nothing of this system changes. said is left with what could not be done,
+    #list_taken says whether one was taken
+    said=""; list_taken=""
     [ -n "${zones}" ] || zones="$(sh "${engine}" timezones 2>/dev/null)"
     if [ -z "${zones}" ]; then
         said="This system's index of time zones (/usr/share/zoneinfo/tzdata.zi) is not here: the time zone stays ${timezone}."
@@ -1606,7 +1606,7 @@ E=O=F
             end) _step_zones__at="${_step_zones__count}" ;;
             backspace) _step_zones__typed="${_step_zones__typed%?}"; _step_zones__at=0 ;;
             clear) _step_zones__typed=""; _step_zones__at=0 ;;
-            enter) [ "${_step_zones__count}" -lt 1 ] || { timezone="${_step_zones__zone}"; return 0; } ;;
+            enter) [ "${_step_zones__count}" -lt 1 ] || { timezone="${_step_zones__zone}"; list_taken="yes"; return 0; } ;;
             esc) return 0 ;;
             [a-zA-Z0-9_+/-]|" ")
                 #a character of a name: the list is narrowed again from its top
@@ -1644,32 +1644,35 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
     #as the session has it and changed from here, and the installed system takes it, so it asks for the
     #password with the keys it was typed with. And timezone, the time zone of the installed system: the
     #one the engine says an install starts on (minos' own), until another is chosen, shown with the time
-    #it is there. Five fields, in the order they are shown: the name, the password, the same again,
-    #the keyboard and the time zone. Tab goes from one to the next of them all, round again after the
-    #last; Enter on the three that are typed goes on to the next of those, and from the last one to the
-    #next step; Enter on the keyboard or the time zone opens its list (_step_keyboards, _step_zones),
-    #and the field shows what was taken there. Tab, the arrows, Enter, Esc and F5 say themselves the
-    #same whatever the keyboard, where a letter or a Ctrl with one does not once the keyboard is not a
-    #Latin one: nothing here needs a letter to be reached; Ctrl-P does what F5 does, for a terminal that
-    #keeps the function keys to itself.
+    #it is there. Five fields, in the order they are shown: the keyboard, the time zone, the name, the
+    #password and the same again; the cursor starts on the name. Tab goes from one to the next of them
+    #all, round again after the last, and Shift-Tab back; the arrows move between them too, without
+    #going round. Enter on the keyboard or the time zone opens its list (_step_keyboards, _step_zones),
+    #and once one is taken there the cursor goes on to the next field; Enter on the three that are typed
+    #goes on to the next of those, and from the last one to the next step. Tab, the arrows, Enter, Esc
+    #and F5 say themselves the same whatever the keyboard, where a letter or a Ctrl with one does not
+    #once the keyboard is not a Latin one: nothing here needs a letter to be reached; Ctrl-P does what
+    #F5 does, for a terminal that keeps the function keys to itself.
     #A name is taken as typed and judged by the engine, which says in words what a name is
-    _step_user__field="${user_field:-1}"; _step_user__problem=""; _step_user__draw="yes"; _step_user__told=""
+    _step_user__field="${user_field:-3}"; _step_user__problem=""; _step_user__draw="yes"; _step_user__told=""
     _keyboard_read; _zone_time "${timezone}"
-    _title "user ${keyboard%%:*} ${timezone}"
     while :; do
-        #the last field that is typed: the second password is not asked while the first is seen
-        _step_user__last=3; [ -z "${pass_seen}" ] || _step_user__last=2
-        [ "${_step_user__field}" != 3 ] || [ "${_step_user__last}" = 3 ] || _step_user__field=2
+        #the last field: the second password is not asked while the first is seen
+        _step_user__last=5; [ -z "${pass_seen}" ] || _step_user__last=4
+        [ "${_step_user__field}" -le "${_step_user__last}" ] || _step_user__field="${_step_user__last}"
         if [ -n "${_step_user__draw}" ]; then
+            #the window's title says the keyboard, the zone and the field under the cursor
+            set -- keyboard zone name password again; shift "$((_step_user__field - 1))"
+            _title "user ${keyboard%%:*} ${timezone} ${1}"
             #what was said and is not said now would leave specks behind (see _step_zones): the terminal
             #is emptied when the words change
             [ "${_step_user__problem}" = "${_step_user__told}" ] || view=""
             _step_user__told="${_step_user__problem}"
             #what Enter does on the field under the cursor: on the console the keyboard is not changed here
             _step_user__enter="Enter"; _step_user__does="next"
-            if [ "${_step_user__field}" -ge 4 ]; then
+            if [ "${_step_user__field}" -le 2 ]; then
                 _step_user__does="change"
-                [ "${_step_user__field}" != 4 ] || [ "${keyboard_where}" = "x" ] || _step_user__enter="~Enter"
+                [ "${_step_user__field}" != 1 ] || [ "${keyboard_where}" = "x" ] || _step_user__enter="~Enter"
             fi
             if [ -n "${pass_seen}" ]; then
                 _frame user "${_step_user__enter}" "${_step_user__does}" "Tab" "field" "Esc" "back" "F5" "hide password"
@@ -1680,18 +1683,18 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
             _put 2 3 "${s_bold}" "Who it is for"
             _put 2 39 "${s_dim}" "Nothing is written until you confirm."
             _row 3 "" ""
-            _draw_field 4 "User name" "${user}" "$([ "${_step_user__field}" != 1 ] || printf yes)" ""
-            _row 5 "" ""
-            _draw_field 6 "Password" "" "$([ "${_step_user__field}" != 2 ] || printf yes)" pass
-            if [ -n "${pass_seen}" ]; then
-                _row 7 "" ""
-            else
-                _draw_field 7 "The same again" "" "$([ "${_step_user__field}" != 3 ] || printf yes)" pass_again
-            fi
+            _draw_field 4 "Keyboard" "${keyboard}  ${keyboard_name}" "$([ "${_step_user__field}" != 1 ] || printf yes)" ""
+            _draw_field 5 "Time zone" "${timezone}" "$([ "${_step_user__field}" != 2 ] || printf yes)" ""
+            _put 5 55 "" "${g_dot} ${zone_time}"
+            _row 6 "" ""
+            _draw_field 7 "User name" "${user}" "$([ "${_step_user__field}" != 3 ] || printf yes)" ""
             _row 8 "" ""
-            _draw_field 9 "Keyboard" "${keyboard}  ${keyboard_name}" "$([ "${_step_user__field}" != 4 ] || printf yes)" ""
-            _draw_field 10 "Time zone" "${timezone}" "$([ "${_step_user__field}" != 5 ] || printf yes)" ""
-            _put 10 55 "" "${g_dot} ${zone_time}"
+            _draw_field 9 "Password" "" "$([ "${_step_user__field}" != 4 ] || printf yes)" pass
+            if [ -n "${pass_seen}" ]; then
+                _row 10 "" ""
+            else
+                _draw_field 10 "The same again" "" "$([ "${_step_user__field}" != 5 ] || printf yes)" pass_again
+            fi
             _row 11 "" ""
             if [ -n "${_step_user__problem}" ]; then
                 _rows 12 "${s_warn}" 4 3 "${_step_user__problem}"
@@ -1703,9 +1706,9 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
             _row 20 "${s_dim}" "    the keyboard above, and asks for the password with it."
             #the cursor, where the next character goes, in a field that is typed
             case "${_step_user__field}" in
-                1) _step_user__column="${#user}"; _step_user__row=4 ;;
-                2) _secret_count pass; _step_user__column="${count}"; _step_user__row=6 ;;
-                3) _secret_count pass_again; _step_user__column="${count}"; _step_user__row=7 ;;
+                3) _step_user__column="${#user}"; _step_user__row=7 ;;
+                4) _secret_count pass; _step_user__column="${count}"; _step_user__row=9 ;;
+                5) _secret_count pass_again; _step_user__column="${count}"; _step_user__row=10 ;;
                 *) _step_user__row="" ;;
             esac
             if [ -n "${_step_user__row}" ]; then
@@ -1726,7 +1729,6 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
                     pass=""; pass_again=""; pass_units=""; pass_again_units=""
                     _step_user__problem="The keyboard is now ${keyboard%%:*}: type the password again, with it."
                 fi
-                _title "user ${keyboard%%:*} ${timezone}"
             elif [ "${zone_time}" = "${_step_user__time}" ] && [ "$(stty size <&3 2>/dev/null)" = "${term_size}" ]; then
                 _step_user__draw=""
             fi
@@ -1736,27 +1738,32 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
         _step_user__problem=""
         case "${key}" in
             enter)
-                if [ "${_step_user__field}" = 4 ]; then
+                if [ "${_step_user__field}" = 1 ]; then
                     if [ "${keyboard_where}" = "x" ]; then
-                        #the list; a keyboard taken there empties a password typed with the old one, which
-                        #is then typed again
+                        #the list; a keyboard taken there that empties the password has it typed again,
+                        #else the cursor goes on to the time zone
                         _step_user__typed="${pass}${pass_again}"
                         _step_keyboards; _step_user__problem="${said}"
-                        [ -z "${_step_user__typed}" ] || [ -n "${pass}${pass_again}" ] || _step_user__field=2
-                        _title "user ${keyboard%%:*} ${timezone}"
+                        if [ -n "${list_taken}" ]; then
+                            if [ -n "${_step_user__typed}" ] && [ -z "${pass}${pass_again}" ]; then
+                                _step_user__field=4
+                            else
+                                _step_user__field=2
+                            fi
+                        fi
                     else
                         _step_user__problem="The console's keyboard is not changed from the installer: the installed system takes the one this system was set to."
                     fi
-                elif [ "${_step_user__field}" = 5 ]; then
+                elif [ "${_step_user__field}" = 2 ]; then
                     _step_zones; _step_user__problem="${said}"; _zone_time "${timezone}"
-                    _title "user ${keyboard%%:*} ${timezone}"
+                    [ -z "${list_taken}" ] || _step_user__field=3
                 elif [ "${_step_user__field}" -lt "${_step_user__last}" ]; then
                     case "${_step_user__field}" in
-                        1) if _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=2; fi ;;
-                        *) if _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=3; fi ;;
+                        3) if _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=4; fi ;;
+                        *) if _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=5; fi ;;
                     esac
-                elif ! _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=1
-                elif ! _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=2
+                elif ! _step_user__problem="$(_engine user "${user}" 2>&1)"; then _step_user__field=3
+                elif ! _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)"; then _step_user__field=4
                 elif [ -z "${pass_seen}" ] && [ "${pass}" != "${pass_again}" ]; then
                     _step_user__problem="The two passwords differ: type the second one again, or see the first with F5."
                     pass_again=""; pass_again_units=""
@@ -1770,33 +1777,31 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
                 fi ;;
             tab|down)
                 #the next field; a name or a password typed there is judged on the way, as Enter judges
-                #it, and one not typed yet is passed over, so the keyboard is reached before it is typed
+                #it, and one not typed yet is passed over
                 _step_user__next="$((_step_user__field + 1))"
-                [ "${_step_user__next}" != 3 ] || [ "${_step_user__last}" = 3 ] || _step_user__next=4
                 case "${_step_user__field}" in
-                    1) [ -z "${user}" ] || _step_user__problem="$(_engine user "${user}" 2>&1)" || _step_user__next="" ;;
-                    2) [ -z "${pass}" ] || _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)" || _step_user__next="" ;;
+                    3) [ -z "${user}" ] || _step_user__problem="$(_engine user "${user}" 2>&1)" || _step_user__next="" ;;
+                    4) [ -z "${pass}" ] || _step_user__problem="$(printf "%s\n" "${pass}" | _engine password 2>&1)" || _step_user__next="" ;;
                 esac
-                if [ "${_step_user__next}" = 6 ]; then
+                if [ -n "${_step_user__next}" ] && [ "${_step_user__next}" -gt "${_step_user__last}" ]; then
                     #round again after the last: Tab, not the arrow
                     if [ "${key}" = "tab" ]; then _step_user__next=1; else _step_user__next=""; fi
                 fi
                 [ -z "${_step_user__next}" ] || _step_user__field="${_step_user__next}" ;;
             backtab|up)
                 _step_user__next="$((_step_user__field - 1))"
-                [ "${_step_user__next}" != 3 ] || [ "${_step_user__last}" = 3 ] || _step_user__next=2
                 if [ "${_step_user__next}" = 0 ]; then
-                    if [ "${key}" = "backtab" ]; then _step_user__next=5; else _step_user__next=1; fi
+                    if [ "${key}" = "backtab" ]; then _step_user__next="${_step_user__last}"; else _step_user__next=1; fi
                 fi
                 _step_user__field="${_step_user__next}" ;;
             esc) user_field="${_step_user__field}"; return 1 ;;
             backspace)
                 case "${_step_user__field}" in
-                    1) user="${user%?}" ;; 2) _secret_back pass ;; 3) _secret_back pass_again ;;
+                    3) user="${user%?}" ;; 4) _secret_back pass ;; 5) _secret_back pass_again ;;
                 esac ;;
             clear)
                 case "${_step_user__field}" in
-                    1) user="" ;; 2) pass=""; pass_units="" ;; 3) pass_again=""; pass_again_units="" ;;
+                    3) user="" ;; 4) pass=""; pass_units="" ;; 5) pass_again=""; pass_again_units="" ;;
                 esac ;;
             f5|ctrl-p)
                 if [ -n "${pass_seen}" ]; then pass_seen=""; else pass_seen="yes"; fi ;;
@@ -1805,7 +1810,7 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
                 #given; of a password, any; of the keyboard and the time zone, none: their lists are
                 #narrowed by what is typed
                 case "${_step_user__field}" in
-                    1)  case "${key}" in
+                    3)  case "${key}" in
                             [\ -~])
                                 if [ "${#user}" -ge 32 ]; then
                                     _step_user__problem="A user name has 32 characters at most."
@@ -1814,8 +1819,8 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
                                 fi ;;
                             *) _step_user__problem="A user name is lower case letters, digits, \"-\" and \"_\", a letter first: that key types none of them." ;;
                         esac ;;
-                    2) _secret_type pass ;;
-                    3) _secret_type pass_again ;;
+                    4) _secret_type pass ;;
+                    5) _secret_type pass_again ;;
                 esac ;;
         esac
     done
@@ -2145,7 +2150,7 @@ disk=""; choices=""; loaded=""; proposed=""; plan_view="plan"; edit_line=1; edit
 # shellcheck disable=SC2034 # the units of a secret are read by its name, through eval
 { pass_units=""; pass_again_units=""; }
 user=""; pass=""; pass_again=""; pass_seen=""; secret_wide=""; key_fresh=""; user_field=""; keys_ahead=""; install_status=1; watch=""
-keyboard="us"; keyboard_where="system"; keyboard_name=""; keyboards=""; said=""; zones=""; zone_time=""
+keyboard="us"; keyboard_where="system"; keyboard_name=""; keyboards=""; said=""; list_taken=""; zones=""; zone_time=""
 intro_played=""; effect_began=0; effect_frames=0
 #the plan the engine writes, and what it says when it fails, in a directory of this user's own: in /tmp
 #itself root may not write into another user's file (fs.protected_regular)
