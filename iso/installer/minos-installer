@@ -2109,7 +2109,7 @@ _step_confirm() { #=> the one confirmation: what will be done, and two buttons. 
         _put "${row}" 13 "${s_bold}" "${user}"; _put "${row}" "$((24 + ${#user}))" "${s_bold}" "${keyboard}"; row="$((row + 1))"
         _row "${row}" "" "    Zone    ${timezone}"; _put "${row}" 13 "${s_bold}" "${timezone}"; row="$((row + 1))"
         _step_confirm__firmware="UEFI"; [ "${firmware_now}" = "uefi" ] || _step_confirm__firmware="BIOS"
-        _row "${row}" "" "    Starts  by ${_step_confirm__firmware}, on its own, once the installation medium is out"
+        _row "${row}" "" "    Starts  by ${_step_confirm__firmware}"
         _put "${row}" 16 "${s_bold}" "${_step_confirm__firmware}"; row="$((row + 1))"
         while [ "${row}" -le 16 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
         _row 17 "" "    This is the last step you can go back from."
