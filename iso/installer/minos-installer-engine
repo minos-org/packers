@@ -13,8 +13,10 @@
 #                           said), progress (where it keeps how far it is), applying (the process of an
 #                           apply that is running, or -), timezone (the one the installed system
 #                           takes unless another is chosen: the timezone verb's)
-#  disks                    the machine's disks, a line each, tab-separated: device, size, model, why
-#                           minos cannot go to it (- when it can), what it holds (empty, or its partitions)
+#  disks [PID]              the machine's disks, a line each, tab-separated: device, size, model, why
+#                           minos cannot go to it (- when it can), what it holds (empty, or its partitions);
+#                           with PID, read only while that process lives: once it is gone, exit 1, the rest
+#                           unread (an interface that reads them in the background, and is closed)
 #  partitions [DISK]        the partitions of DISK, or of every disk minos can go to, a line each,
 #                           tab-separated: device, size, what it can be for minos (root, esp, small: too
 #                           small for it, or -), what it holds, its type
@@ -126,7 +128,7 @@ _die() { #message => on stderr, exit 1
 }
 
 _usage() { #=> the usage, on stderr, exit 2
-    sed -n '8,102s/^#//p' "${0}" >&2
+    sed -n '8,104s/^#//p' "${0}" >&2
     exit 2
 }
 
@@ -159,6 +161,12 @@ _row() { #field... => a row: the fields, tab-separated
 ################################################################################
 # The machine: its disks and what they hold
 ################################################################################
+
+_watched() { #=> nothing while the process the disks are read for lives (or none was named); once it is
+    #gone, the engine exits. Looked at before each disk and each partition: what reads one is the most
+    #that runs on after it
+    [ -z "${watched}" ] || [ -d "/proc/${watched}" ] || exit 1
+}
 
 _mib() { #device => its size in MiB, as the kernel has it
     { read -r _mib__sectors < "/sys/class/block/${1#/dev/}/size"; } 2>/dev/null || _mib__sectors=0
@@ -236,10 +244,13 @@ _scan() { #=> map, a file: every partition of the machine's disks, a line each, 
     #extended partition, or data), 8 its file system and 9 its label, both read from the device (- for
     #none), 10 its type's name. Read once: every question about a partition is answered from it
     : > "${map}"
+    _watched
     for _scan__disk in $(_whole_disks); do
+        _watched
         _scan__names="$(lsblk -lnpo NAME,PARTTYPENAME "${_scan__disk}" 2>/dev/null)"
         for _scan__file in "/sys/block/${_scan__disk#/dev/}"/*/partition; do
             [ -f "${_scan__file}" ] || continue
+            _watched
             _scan__dir="${_scan__file%/partition}"; _scan__part="/dev/${_scan__dir##*/}"
             read -r _scan__number < "${_scan__file}"
             read -r _scan__start < "${_scan__dir}/start"
@@ -342,6 +353,7 @@ _free() { #disk => its free rooms a partition can be made in, of 2M or more, "st
 
 _list_disks() { #=> the disks verb
     for _list_disks__disk in $(_whole_disks); do
+        _watched
         _row "${_list_disks__disk}" "$(lsblk -dno SIZE "${_list_disks__disk}" | tr -d ' ')" \
             "$(_model "${_list_disks__disk}")" "$(_disk_refusal "${_list_disks__disk}")" \
             "$(_holds_summary "${_list_disks__disk}")"
@@ -1591,7 +1603,7 @@ if [ -n "${medium}" ]; then
     _medium__disk="$(lsblk -dno PKNAME "${medium}" 2>/dev/null | tr -d ' ')"
     medium="${_medium__disk:-${medium#/dev/}}"
 fi
-plan=""; user=""; password=""; choices=""; free=""
+plan=""; user=""; password=""; choices=""; free=""; watched=""
 map="$(mktemp)" || _die "no temporary file"
 trap 'rm -f "${map}"' EXIT
 trap 'exit 130' INT TERM HUP
@@ -1602,7 +1614,11 @@ case "${verb}" in
         printf "%s\n" "firmware ${firmware}" "root-mib ${root_mib}" "esp-mib ${esp_mib}" "system-mib ${system_mib}" \
             "medium ${medium:--}" "try ${try:-no}" "log ${log}" "progress ${progress}" "applying ${applying:--}" \
             "timezone $(_timezone_default)" ;;
-    disks) _scan; _list_disks ;;
+    disks)
+        [ "${#}" -le 1 ] || _usage
+        case "${1:-0}" in *[!0-9]*) _usage ;; esac
+        watched="${1:-}"
+        _scan; _list_disks ;;
     partitions)
         [ "${#}" -le 1 ] || _usage
         [ "${#}" = 0 ] || _is_disk "${1}" || _die "${1} is not a disk"

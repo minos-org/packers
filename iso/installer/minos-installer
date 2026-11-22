@@ -60,7 +60,7 @@ _as_root() { #command... => COMMAND run as root: through sudo when this is anoth
     #command runs (sudo's use_pty), and they would be lost to the screens. setsid, run from a script,
     #is no leader of a process group and so becomes the command itself: its end is waited for, and its
     #exit status is the command's (util-linux's -w is not asked for, which busybox's setsid lacks)
-    if [ "$(id -u)" = 0 ]; then
+    if [ "${uid}" = 0 ]; then
         "${@}"
     else
         setsid sudo "${@}"
@@ -127,8 +127,10 @@ _term_back() { #=> the terminal as it was: its settings, its cursor and what it 
 }
 
 _title() { #step => the window's title says the step, in the installer's own window alone: another
-    #terminal's title is not this script's to change
-    [ -z "${MINOS_INSTALLER_WINDOW:-}" ] || printf '\033]2;minos installer - %s\007' "${1}"
+    #terminal's title is not this script's to change. Said again only when it changes
+    { [ -n "${MINOS_INSTALLER_WINDOW:-}" ] && [ "${1}" != "${title_now:-}" ]; } || return 0
+    title_now="${1}"
+    printf '\033]2;minos installer - %s\007' "${1}"
 }
 
 _key() { #[tenths] => key, the next key pressed, by its name: a character as itself; enter, esc, tab,
@@ -139,6 +141,8 @@ _key() { #[tenths] => key, the next key pressed, by its name: a character as its
     key_fresh=""
     #what was drawn since the last key, written at once: a screen changes whole, never line by line
     [ -z "${screen}" ] || { printf '%s' "${screen}"; screen=""; }
+    #the disks are read once the first screen is out: the read would take half of a processor from it
+    [ "${disks_reader}" != "soon" ] || _disks_read
     if [ -z "${keys_ahead}" ]; then
         key_fresh="yes"
         #a read never waits for ever: with no time said, a second at a time, again and again, so that a
@@ -495,6 +499,111 @@ _failed() { #what => a screen for what the engine could not do: what it said, an
 }
 
 ################################################################################
+# The disks: read by the engine in the background while the screens are drawn,
+# and kept for the next opening
+################################################################################
+
+_disks_key() { #=> disks_key, what the engine's list of the disks depends on that the kernel tells with no
+    #process started: the partitions it knows (/proc/partitions: a disk or a partition added, removed or
+    #resized) and the devices mounted (a disk in use is one minos cannot go to)
+    disks_key=""
+    while IFS= read -r _disks_key__line; do
+        disks_key="${disks_key}${_disks_key__line}${c_nl}"
+    done < /proc/partitions
+    while IFS= read -r _disks_key__line; do
+        case "${_disks_key__line}" in /dev/*) disks_key="${disks_key}${_disks_key__line}${c_nl}" ;; esac
+    done < /proc/self/mounts
+}
+
+_disks_kept() { #=> true when the disks were kept for the partitions and the mounts there are now, and
+    #disks holds them as the engine listed them then. The file: its form, the key, "rows", the engine's
+    #lines, "end"; one cut short (its write did not end) has no end, and counts for nothing
+    { [ -n "${disks_file}" ] && [ -f "${disks_file}" ]; } || return 1
+    _disks_kept__part="form"; _disks_kept__key=""; _disks_kept__rows=""
+    while IFS= read -r _disks_kept__line; do
+        case "${_disks_kept__part}" in
+            form) [ "${_disks_kept__line}" = "${disks_form}" ] || return 1; _disks_kept__part="key" ;;
+            key) if [ "${_disks_kept__line}" = "rows" ]; then _disks_kept__part="rows"
+                 else _disks_kept__key="${_disks_kept__key}${_disks_kept__line}${c_nl}"; fi ;;
+            rows) if [ "${_disks_kept__line}" = "end" ]; then _disks_kept__part="end"
+                  else _disks_kept__rows="${_disks_kept__rows}${_disks_kept__line}${c_nl}"; fi ;;
+            *) return 1 ;;
+        esac
+    done < "${disks_file}"
+    [ "${_disks_kept__part}" = "end" ] || return 1
+    _disks_key
+    [ "${_disks_kept__key}" = "${disks_key}" ] || return 1
+    disks="${_disks_kept__rows%"${c_nl}"}"
+    _disks_count
+}
+
+_disks_read() { #=> the disks read by the engine again, in the background: disks_reader is its process
+    #until _disks_take finds it ended. The key is taken before it starts: a disk that changes while it
+    #reads makes what it keeps count for nothing. The engine is told this script's process, and stops
+    #reading once that is gone: sudo runs in a session of its own (_as_root), which the terminal's hangup
+    #does not reach when the window closes, and a signal sent on the way out would not reach what the
+    #engine runs (sudo-rs passes it to its one command), nor be sent at all when this script is killed
+    _disks_key; disks_reader_key="${disks_key}"
+    if [ "${uid}" = 0 ]; then
+        # shellcheck disable=SC2086 # the engine's options, a word each
+        sh "${engine}" ${engine_options} disks "${$}" > "${work}/disks" 2> "${work}/disks-errors" < /dev/null &
+    else
+        # shellcheck disable=SC2086 # the engine's options, a word each
+        setsid sudo sh "${engine}" ${engine_options} disks "${$}" > "${work}/disks" 2> "${work}/disks-errors" < /dev/null &
+    fi
+    disks_reader="${!}"
+}
+
+_disks_take() { #=> true once the disks are known; false while the engine reads them, or is about to
+    #(disks_reader is soon: the read begins as the first screen is written out, _key). A read that ended is
+    #taken: its rows in disks, and kept for the next opening, unless an install runs (it is changing a
+    #disk). A read that failed ends the installer with what the engine said
+    [ -n "${disks_reader}" ] || return 0
+    [ "${disks_reader}" != "soon" ] || return 1
+    if [ -d "/proc/${disks_reader}" ]; then
+        #there, and ended all the same when it is a zombie this shell has not waited for yet. Its state
+        #is the word after the name, which is in parentheses; a process that ends while it is read has
+        #no file to read, and is looked at again the next time
+        _disks_take__stat=""
+        { read -r _disks_take__stat < "/proc/${disks_reader}/stat"; } 2>/dev/null
+        _disks_take__stat="${_disks_take__stat##*) }"
+        [ "${_disks_take__stat%% *}" = "Z" ] || return 1
+    fi
+    wait "${disks_reader}"; _disks_take__status="${?}"; disks_reader=""
+    if [ "${_disks_take__status}" != 0 ]; then
+        _term_back
+        _end "$(cat "${work}/disks-errors")"
+    fi
+    _disks_take__rows=""
+    while IFS= read -r _disks_take__line; do
+        _disks_take__rows="${_disks_take__rows}${_disks_take__line}${c_nl}"
+    done < "${work}/disks"
+    disks="${_disks_take__rows%"${c_nl}"}"
+    if [ -n "${disks_file}" ] && [ -z "${applying}" ]; then
+        printf "%s\n%srows\n%send\n" "${disks_form}" "${disks_reader_key}" "${_disks_take__rows}" > "${disks_file}"
+    fi
+    _disks_count
+}
+
+_disks_count() { #=> disks_usable, the disks minos can go to, a line each, and disks_usable_count; the steps
+    #there are: the disk is asked for when there are several; disk, when it is none of them, the first
+    disks_usable="$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-" {print $1}')"
+    # shellcheck disable=SC2086 # the disks, a word each
+    set -- ${disks_usable}
+    disks_usable_count="${#}"
+    steps="plan user confirm install"
+    [ "${#}" -le 1 ] || steps="disk plan user confirm install"
+    case "${c_nl}${disks_usable}${c_nl}" in
+        *"${c_nl}${disk}${c_nl}"*) [ -n "${disk}" ] || disk="${1:-}" ;;
+        *) disk="${1:-}" ;;
+    esac
+}
+
+_disks_forget() { #=> what was kept emptied: this installer is about to write to a disk
+    [ -z "${disks_file}" ] || : > "${disks_file}"
+}
+
+################################################################################
 # The intro: one screen, which comes out of noise when the installer opens
 ################################################################################
 
@@ -516,8 +625,12 @@ _intro_lines() { #=> intro, the lines of the intro screen, "row column style tex
         intro="${intro}${_intro_lines__row}${c_tab}12${c_tab}logo${c_tab}${_intro_lines__text}${c_nl}"
         _intro_lines__row="$((_intro_lines__row + 1))"
     done
-    _intro_lines__disks="$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-" {n++; if (n <= 2) list = list (n > 1 ? ", " : "") substr($1, 6) " " $2 ($3 == "-" ? "" : " " $3)}
-        END {if (!n) print "none minos can go to"; else print substr(list (n > 2 ? ", " n - 2 " more" : ""), 1, 56)}')"
+    if [ -n "${disks_reader}" ]; then
+        _intro_lines__disks="reading..."
+    else
+        _intro_lines__disks="$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-" {n++; if (n <= 2) list = list (n > 1 ? ", " : "") substr($1, 6) " " $2 ($3 == "-" ? "" : " " $3)}
+            END {if (!n) print "none minos can go to"; else print substr(list (n > 2 ? ", " n - 2 " more" : ""), 1, 56)}')"
+    fi
     _intro_lines__firmware="UEFI"; [ "${firmware_now}" = "uefi" ] || _intro_lines__firmware="BIOS"
     intro="${intro}10${c_tab}5${c_tab}plain${c_tab}> firmware     ${_intro_lines__firmware}${c_nl}"
     intro="${intro}11${c_tab}5${c_tab}plain${c_tab}> disks        ${_intro_lines__disks}${c_nl}"
@@ -560,6 +673,10 @@ _intro_cipher() { #=> the intro out of noise: every line starts as signs drawn b
     _rest 1
     _intro_cipher__seed="${$}"; _intro_cipher__frame=1
     while [ "${_intro_cipher__frame}" -le 11 ]; do
+        #the disks, read meanwhile: their line settles into them from here on, and Enter goes on
+        if [ -n "${disks_reader}" ] && _disks_take; then
+            _intro_lines; _intro_frame; _title "intro"
+        fi
         while IFS="${c_tab}" read -r _intro_cipher__at _intro_cipher__column _intro_cipher__style _intro_cipher__text; do
             [ -n "${_intro_cipher__at}" ] || continue
             if [ "${_intro_cipher__style}" = "logo" ]; then
@@ -597,30 +714,45 @@ E=O=F
     done
 }
 
-_step_intro() { #=> the first screen: what is about to happen. Enter goes on
-    _title "intro"
+_intro_frame() { #=> the intro's frame: Enter goes on once the disks are known, and is dimmed until then
+    _intro_frame__go="Enter"; [ -z "${disks_reader}" ] || _intro_frame__go="~Enter"
+    if [ -n "${try}" ]; then
+        _frame none "${_intro_frame__go}" "begin" "f" "firmware" "q" "quit"
+    else
+        _frame none "${_intro_frame__go}" "begin" "q" "quit"
+    fi
+}
+
+_step_intro() { #=> the first screen: what is about to happen. Enter goes on, once the disks are read: it
+    #is drawn while the engine reads them, and their line says so until they are known
+    if [ -n "${disks_reader}" ]; then _title "intro reading"; else _title "intro"; fi
     #it comes out of noise once, when the installer opens: coming back to this screen from a step, it is
     #there at once
     _step_intro__play=""
     [ -n "${intro_played}" ] || _step_intro__play="yes"
     intro_played="yes"
     while :; do
+        #the disks, when the engine has read them since the last look: false says only that it reads on
+        _disks_take || :
         _intro_lines
-        if [ -n "${try}" ]; then
-            _frame none "Enter" "begin" "f" "firmware" "q" "quit"
-        else
-            _frame none "Enter" "begin" "q" "quit"
-        fi
+        _intro_frame
         if [ -n "${_step_intro__play}" ] && [ "${effects}" = "on" ]; then
             effect_began="$(date +%s)"; effect_frames=0
             _intro_cipher
         fi
         _step_intro__play=""
         _intro_draw
-        _title "intro ready"
-        _key
+        #while the disks are read, a key is waited for a fifth of a second at a time, and they are
+        #looked for between
+        if [ -n "${disks_reader}" ]; then
+            _title "intro reading"
+            _key 2
+        else
+            _title "intro ready"
+            _key
+        fi
         case "${key}" in
-            enter|n|right) return 0 ;;
+            enter|n|right) [ -n "${disks_reader}" ] || return 0 ;;
             f)  [ -z "${try}" ] || {
                     if [ "${firmware_now}" = "uefi" ]; then firmware_now="bios"; else firmware_now="uefi"; fi
                     engine_options="--try --firmware ${firmware_now}"; loaded=""
@@ -636,17 +768,49 @@ _step_intro() { #=> the first screen: what is about to happen. Enter goes on
 # to the plan
 ################################################################################
 
-_step_disk() { #=> disk, the one minos goes to: asked when the machine has several it can go to
-    _step_disk__usable="$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-" {print $1}')"
-    _step_disk__count="$(printf "%s\n" "${_step_disk__usable}" | grep -c .)"
-    if [ "${_step_disk__count}" = 1 ]; then
-        disk="${_step_disk__usable}"
-        return 3
-    fi
-    _title "disk"
-    [ -n "${disk}" ] || disk="$(printf "%s\n" "${_step_disk__usable}" | head -n 1)"
+_step_disk() { #=> disk, the one minos goes to: asked when the machine has several it can go to; when it has
+    #none, said so, with why each one is left out. r reads the disks again (one may have been freed, or
+    #changed by another program), and the list says it is being read until they are known
     while :; do
-        _frame disk "j k" "move" "Enter" "next" "Esc" "back" "q" "quit"
+        _step_disk__reading=""; _disks_take || _step_disk__reading="yes"
+        if [ -n "${_step_disk__reading}" ]; then
+            _title "disk reading"
+            _frame none "~Enter" "next" "~r" "read again" "Esc" "back" "q" "quit"
+            _rest 1
+            _row 4 "${s_dim}" "    reading the disks..."
+            _key 2
+            case "${key}" in
+                esc|b|left) return 1 ;;
+                q) ! _ask_quit || exit 0 ;;
+            esac
+            continue
+        fi
+        if [ "${disks_usable_count}" = 1 ]; then
+            return 3
+        fi
+        _title "disk"
+        if [ "${disks_usable_count}" = 0 ]; then
+            #no disk minos can go to: said, with why each one is left out. Drawn again after every key and
+            #every change of the terminal's size, as each screen is
+            _frame none "Enter" "close" "r" "read again"
+            _row 1 "" ""; _row 2 "${s_bold}" "  There is no disk minos can go to"; _row 3 "" ""; row=4
+            while IFS="${c_tab}" read -r _step_disk__device _step_disk__size _ _step_disk__refusal _; do
+                [ -n "${_step_disk__device}" ] || continue
+                _row "${row}" "" "    ${_step_disk__device#/dev/} (${_step_disk__size}): ${_step_disk__refusal}"; row="$((row + 1))"
+            done << E=O=F
+${disks}
+E=O=F
+            _row "${row}" "" ""; row="$((row + 1))"
+            _row "${row}" "" "    Attach a disk, or free one of these, and open the installer again."; row="$((row + 1))"
+            _rest "${row}"
+            _key
+            case "${key}" in
+                enter|q|esc) exit 1 ;;
+                r) _step_disk_again ;;
+            esac
+            continue
+        fi
+        _frame disk "j k" "move" "Enter" "next" "r" "read again" "Esc" "back" "q" "quit"
         _row 1 "" ""; _row 2 "" ""
         _put 2 3 "${s_bold}" "Which disk does minos go to?"
         _put 2 39 "${s_dim}" "Nothing is written until you confirm."
@@ -680,7 +844,7 @@ E=O=F
         case "${key}" in
             j|down|k|up)
                 # shellcheck disable=SC2086 # the disks, a word each
-                set -- ${_step_disk__usable}
+                set -- ${disks_usable}
                 _step_disk__before=""; _step_disk__after=""; _step_disk__seen=""
                 for _step_disk__device; do
                     if [ "${_step_disk__device}" = "${disk}" ]; then _step_disk__seen="yes"
@@ -691,11 +855,18 @@ E=O=F
                     j|down) [ -z "${_step_disk__after}" ] || disk="${_step_disk__after}" ;;
                     *) [ -z "${_step_disk__before}" ] || disk="${_step_disk__before}" ;;
                 esac ;;
+            r) _step_disk_again ;;
             enter|n|right) return 0 ;;
             esc|b|left) return 1 ;;
             q) ! _ask_quit || exit 0 ;;
         esac
     done
+}
+
+_step_disk_again() { #=> the disks read again, by the person's key: what was kept is not looked at, and the
+    #plan, made from what the disk held, is made again for the same disk the next time it is shown
+    _disks_read
+    loaded="${loaded%% *}"
 }
 
 _draw_table() { #=> the partition table of the disk now and after, as the engine's rows have it: the same
@@ -1516,7 +1687,8 @@ _step_install() { #=> the plan applied, and seen as it happens: how far it is, w
     _title "install"
     _frame install "~" "the install runs: a few minutes. Do not turn the computer off."
     if [ -z "${watch}" ]; then
-        if [ "$(id -u)" = 0 ]; then
+        _disks_forget
+        if [ "${uid}" = 0 ]; then
             # shellcheck disable=SC2086 # the engine's options, a word each
             printf "%s\n" "${pass}" | setsid sh "${engine}" ${engine_options} apply "${plan}" "${user}" >/dev/null 2>"${errors}" &
         else
@@ -1657,7 +1829,7 @@ _step_end() { #=> how it ended: minos is installed, and the computer restarts or
                 if [ "${_step_end__focus}" = "left" ]; then _step_end__focus="right"; else _step_end__focus="left"; fi ;;
             enter)
                 if [ -n "${try}" ]; then
-                    [ "${_step_end__focus}" != "left" ] || _engine empty "${disk}" >/dev/null 2>&1
+                    [ "${_step_end__focus}" != "left" ] || { _disks_forget; _engine empty "${disk}" >/dev/null 2>&1; }
                 elif [ "${_step_end__focus}" = "left" ]; then
                     _term_back
                     _as_root reboot
@@ -1697,8 +1869,9 @@ case "${TERM:-dumb}" in
 esac
 #in the installer's own window the size is the window's, read once it is drawn on (_fit): i3 gives the
 #window its size after it opens. Anywhere else a terminal too small is said before anything is drawn
-# shellcheck disable=SC2046 # the rows and the columns, two words
-set -- $(stty size 2>/dev/null || printf "%s" "0 0")
+size_first="$(stty size 2>/dev/null)"
+# shellcheck disable=SC2086 # the rows and the columns, two words
+set -- ${size_first:-0 0}
 if [ -z "${MINOS_INSTALLER_WINDOW:-}" ]; then
     if [ "${1:-0}" -lt "${canvas_rows}" ] || [ "${2:-0}" -lt "${canvas_columns}" ]; then
         _end "The installer needs a terminal of ${canvas_columns} columns by ${canvas_rows} rows: this one has ${2:-0} by ${1:-0}."
@@ -1706,19 +1879,32 @@ if [ -z "${MINOS_INSTALLER_WINDOW:-}" ]; then
 fi
 origin_row=0; origin_column=0
 
-engine="$(dirname "$(readlink -f "${0}")")/minos-installer-engine"
+engine="$(readlink -f "${0}")"; engine="${engine%/*}/minos-installer-engine"
 [ -f "${engine}" ] || _end "The installer is not whole: there is no ${engine}."
-_as_root true 2>/dev/null < /dev/null || _end "The installer needs sudo without a password for $(id -un), or root."
+uid="$(id -u)"
 engine_options=""
 [ -z "${try}" ] || engine_options="--try"
 [ -z "${firmware}" ] || engine_options="--try --firmware ${firmware}"
-#what the engine cannot do here, it says
-facts="$(_engine facts 2>&1)" || _end "${facts}"
-_fact() { printf "%s\n" "${facts}" | awk -v name="${1}" '$1 == name {print $2}'; }
-log="$(_fact log)"; progress_file="$(_fact progress)"; status_file="${log%.log}.status"
-firmware_now="$(_fact firmware)"
-system_size="$(_fact system-mib)M"
-timezone="$(_fact timezone)"
+#what the engine cannot do here, it says; when it cannot even be asked, sudo is what fails, and that is
+#said instead
+if ! facts="$(_engine facts 2>&1)"; then
+    _as_root true 2>/dev/null < /dev/null || _end "The installer needs sudo without a password for $(id -un), or root."
+    _end "${facts}"
+fi
+log=""; progress_file=""; firmware_now=""; system_size=""; timezone=""; applying=""
+while read -r _main__name _main__value; do
+    case "${_main__name}" in
+        log) log="${_main__value}" ;;
+        progress) progress_file="${_main__value}" ;;
+        firmware) firmware_now="${_main__value}" ;;
+        system-mib) system_size="${_main__value}M" ;;
+        timezone) timezone="${_main__value}" ;;
+        applying) [ "${_main__value}" = "-" ] || applying="${_main__value}" ;;
+    esac
+done << E=O=F
+${facts}
+E=O=F
+status_file="${log%.log}.status"
 #try mode asks as UEFI would unless told: the box it runs in starts by BIOS, and the questions that need
 #seeing are the other firmware's
 if [ -n "${try}" ] && [ -z "${firmware}" ]; then
@@ -1771,14 +1957,21 @@ intro_played=""; effect_began=0; effect_frames=0
 work="$(mktemp -d)" || _end "No temporary directory for the plan."
 trap 'rm -rf "${work}"' EXIT
 plan="${work}/plan"; errors="${work}/errors"
-disks="$(_engine disks 2>"${errors}")" || _end "$(cat "${errors}")"
-steps="plan user confirm install"
-[ "$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-"' | grep -c .)" -le 1 ] || steps="disk plan user confirm install"
+#the disks: the ones read at an opening before are kept for the next ones, in this user's own directory
+#of the session, a tmpfs (gone at reboot), and read back from there with no process started (the
+#engine's own, as root, would need sudo for it). They count while the partitions and the mounts the
+#kernel has are the ones they were read with; otherwise the engine reads them again, in the background,
+#from the moment the first screen is out
+disks_form="minos-installer disks 1"; disks_file=""; disks=""; disks_reader=""; disks_reader_key=""
+disks_usable=""; disks_usable_count=0; steps="plan user confirm install"
+[ -z "${XDG_RUNTIME_DIR:-}" ] || [ ! -d "${XDG_RUNTIME_DIR}" ] || disks_file="${XDG_RUNTIME_DIR}/minos-installer-disks"
+_disks_kept || disks_reader="soon"
 
 if [ -n "${MINOS_INSTALLER_WINDOW:-}" ]; then
     #the installer's own window is given its place and size by i3 once it is open: the first screen waits
-    #until the size holds still, a second at most
-    _main__size=""; _main__tries=0
+    #until the size holds still, a second at most. The size read as the script began is the first look:
+    #the engine's facts took their time since
+    _main__size="${size_first}"; _main__tries=0
     while [ "${_main__tries}" -lt 10 ]; do
         _main__now="$(stty size 2>/dev/null)"
         [ "${_main__now}" != "${_main__size}" ] || break
@@ -1787,30 +1980,13 @@ if [ -n "${MINOS_INSTALLER_WINDOW:-}" ]; then
     done
 fi
 _term_take
-if [ -z "$(printf "%s\n" "${disks}" | awk -F '\t' '$4 == "-"')" ]; then
-    #no disk minos can go to: said, with why each one is left out. Drawn again after every key and every
-    #change of the terminal's size, as each screen is: i3 gives the installer's own window its place and
-    #size a moment after it opens, and a screen drawn once, before that, stayed black
-    while :; do
-        _frame none "Enter" "close"
-        _row 1 "" ""; _row 2 "${s_bold}" "  There is no disk minos can go to"; _row 3 "" ""; row=4
-        while IFS="${c_tab}" read -r _main__device _main__size _ _main__refusal _; do
-            [ -n "${_main__device}" ] || continue
-            _row "${row}" "" "    ${_main__device#/dev/} (${_main__size}): ${_main__refusal}"; row="$((row + 1))"
-        done << E=O=F
-${disks}
-E=O=F
-        _row "${row}" "" ""; row="$((row + 1))"
-        _row "${row}" "" "    Attach a disk, or free one of these, and open the installer again."; row="$((row + 1))"
-        _rest "${row}"
-        _key
-        case "${key}" in enter|q|esc) exit 1 ;; esac
-    done
-fi
 
-#an install that is running already (this window was closed and opened again) is the one to show
-watch="$(_fact applying)"; [ "${watch}" != "-" ] || watch=""
+#an install that is running already (this window was closed and opened again) is the one to show, once
+#the disks are known (the steps along its top are counted from them)
+watch="${applying}"
 if [ -n "${watch}" ]; then
+    [ "${disks_reader}" != "soon" ] || _disks_read
+    until _disks_take; do sleep 0.1; done
     _step_install
     _step_end
 fi
