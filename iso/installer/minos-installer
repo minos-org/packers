@@ -1731,6 +1731,33 @@ _draw_field() { #row label text here secret => a field on row ROW of the body: T
     fi
 }
 
+_keyboard_peek() { #=> true when the session's keyboard may not be the one there was: setxkbmap, asked by
+    #this script with one process (as the engine's keyboard verb asks it, the first layout and variant of
+    #a list), says another, or cannot say. On the console, false: its keyboard is not changed from here
+    [ "${keyboard_where}" = "x" ] || return 1
+    _keyboard_peek__query="$(setxkbmap -query 2>/dev/null)" || return 0
+    _keyboard_peek__layout=""; _keyboard_peek__variant=""
+    while read -r _keyboard_peek__key _keyboard_peek__value _; do
+        case "${_keyboard_peek__key}" in
+            layout:) _keyboard_peek__layout="${_keyboard_peek__value%%,*}" ;;
+            variant:) _keyboard_peek__variant="${_keyboard_peek__value%%,*}" ;;
+        esac
+    done << E=O=F
+${_keyboard_peek__query}
+E=O=F
+    [ "${_keyboard_peek__layout:-us}${_keyboard_peek__variant:+:${_keyboard_peek__variant}}" != "${keyboard}" ]
+}
+
+_step_user_clock() { #=> zone_time, the time it is in timezone now, and step_user_minute, the second of the
+    #machine's uptime its minute turns at: until then the clock is not asked again
+    _step_user_clock__now="$(TZ="${timezone}" date +%H:%M:%S 2>/dev/null)"
+    zone_time="${_step_user_clock__now%:*}"
+    _step_user_clock__seconds="${_step_user_clock__now##*:}"
+    case "${_step_user_clock__seconds}" in [0-5][0-9]) ;; *) _step_user_clock__seconds=59 ;; esac
+    { read -r _step_user_clock__uptime _ < /proc/uptime; } 2>/dev/null || _step_user_clock__uptime=0
+    step_user_minute="$(( ${_step_user_clock__uptime%.*} + 60 - ${_step_user_clock__seconds#0} ))"
+}
+
 _step_user() { #=> user and pass, the account minos is installed for, and what answers one worry, whether
     #what was typed is what was meant: the password is asked twice while it is typed blind, a star a
     #character, and once while it is seen as typed (F5: pass_seen; a function key is no character of a
@@ -1749,7 +1776,11 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
     #F5 does, for a terminal that keeps the function keys to itself.
     #A name is taken as typed and judged by the engine, which says in words what a name is
     _step_user__field="${user_field:-3}"; _step_user__problem=""; _step_user__draw="yes"; _step_user__told=""
-    _keyboard_read; _keyboard_keys; _zone_time "${timezone}"
+    _keyboard_read; _keyboard_keys; _step_user_clock
+    #a window that changes its size says so with a signal: the step draws again when it came, with no
+    #process started each second to ask the terminal's size
+    step_user_resized=""
+    trap 'step_user_resized="yes"' WINCH
     while :; do
         #the last field: the second password is not asked while the first is seen
         _step_user__last=5; [ -z "${pass_seen}" ] || _step_user__last=4
@@ -1814,15 +1845,20 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
         _key 10
         if [ "${key}" = "none" ]; then
             #a second with no key: the keyboard may have been changed by a key of the desktop (Alt and the
-            #right Shift), the window by the person, and the minute by the clock. Nothing else is drawn again
+            #right Shift), the window by the person, and the minute by the clock. Each is asked as little
+            #as it can be: the session's keyboard with one process (none on the console, where it is not
+            #changed from here), the time once a minute. Nothing else is drawn again
             _step_user__was="${keyboard}"; _step_user__time="${zone_time}"
-            _keyboard_read; _zone_time "${timezone}"
+            ! _keyboard_peek || _keyboard_read
+            { read -r _step_user__uptime _ < /proc/uptime; } 2>/dev/null || _step_user__uptime=0
+            [ "${_step_user__uptime%.*}" -lt "${step_user_minute}" ] || _step_user_clock
             if [ "${keyboard}" != "${_step_user__was}" ]; then
                 #judged as a keyboard taken in the list is
                 _keyboard_judge; _step_user__problem="${said}"
-            elif [ "${zone_time}" = "${_step_user__time}" ] && [ "$(stty size <&3 2>/dev/null)" = "${term_size}" ]; then
+            elif [ "${zone_time}" = "${_step_user__time}" ] && [ -z "${step_user_resized}" ]; then
                 _step_user__draw=""
             fi
+            step_user_resized=""
             continue
         fi
         screen="${screen}${c_esc}[?25l"
@@ -1846,7 +1882,7 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
                         _step_user__problem="The console's keyboard is not changed from the installer: the installed system takes the one this system was set to."
                     fi
                 elif [ "${_step_user__field}" = 2 ]; then
-                    _step_zones; _step_user__problem="${said}"; _zone_time "${timezone}"
+                    _step_zones; _step_user__problem="${said}"; _step_user_clock
                     [ -z "${list_taken}" ] || _step_user__field=3
                 elif [ "${_step_user__field}" -lt "${_step_user__last}" ]; then
                     case "${_step_user__field}" in
@@ -1864,6 +1900,7 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
                     _keyboard_read
                     _choose "keyboard=${keyboard}" "timezone=${timezone}"
                     user_field="${_step_user__field}"
+                    trap - WINCH
                     return 0
                 fi ;;
             tab|down)
@@ -1885,7 +1922,7 @@ _step_user() { #=> user and pass, the account minos is installed for, and what a
                     if [ "${key}" = "backtab" ]; then _step_user__next="${_step_user__last}"; else _step_user__next=1; fi
                 fi
                 _step_user__field="${_step_user__next}" ;;
-            esc) user_field="${_step_user__field}"; return 1 ;;
+            esc) user_field="${_step_user__field}"; trap - WINCH; return 1 ;;
             backspace)
                 case "${_step_user__field}" in
                     3) user="${user%?}" ;; 4) _secret_back pass ;; 5) _secret_back pass_again ;;
@@ -2242,6 +2279,7 @@ disk=""; choices=""; loaded=""; proposed=""; plan_view="plan"; edit_line=1; edit
 # shellcheck disable=SC2034 # the units of a secret are read by its name, through eval
 { pass_units=""; pass_again_units=""; }
 user=""; pass=""; pass_again=""; pass_seen=""; secret_wide=""; key_fresh=""; user_field=""; keys_ahead=""; install_status=1; watch=""
+step_user_minute=0; step_user_resized=""
 keyboard="us"; keyboard_where="system"; keyboard_name=""; keyboards=""; keyboard_keys=""; said=""; list_taken=""; zones=""; zone_time=""
 intro_played=""; effect_began=0; effect_frames=0
 #the plan the engine writes, and what it says when it fails, in a directory of this user's own: in /tmp
