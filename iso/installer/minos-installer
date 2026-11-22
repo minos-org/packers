@@ -951,7 +951,7 @@ _draw_plan() { #=> the plan: the disk as a bar now and after, and what is done i
         _row 8 "" ""
         _rows 9 "${s_bold}" 2 2 "No plan is proposed: ${disk#/dev/} holds something, and what is deleted is yours to choose."
         _row "${row}" "" ""; row="$((row + 1))"
-        _row "${row}" "" ""; _put "${row}" 5 "${s_bold}" "p"; _put "${row}" 8 "" "Choose what to keep and what to replace, partition by partition"
+        _row "${row}" "" ""; _put "${row}" 5 "${s_bold}" "c"; _put "${row}" 8 "" "Choose what to keep and what to replace, partition by partition"
         row="$((row + 1))"
         _row "${row}" "${s_dim}" "       nothing is erased that you do not mark, and free room can be used"; row="$((row + 1))"
         _row "${row}" "" ""; row="$((row + 1))"
@@ -1090,7 +1090,8 @@ E=O=F
 }
 
 _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Enter or changed line by line
-    #(p), with its partition table one key away (t)
+    #(c), with its partition table one key away (t). The window's title says the view: plan, or plan edit
+    #for the plan line by line
     [ "${loaded}" = "${disk} ${choices}" ] || {
         #another disk, or the first time: the plan the engine suggests
         [ "${loaded%% *}" = "${disk}" ] || { choices=""; proposed=""; plan_view="plan"; edit_line=1; }
@@ -1100,9 +1101,9 @@ _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Ent
             { [ "${r_loss_kind}" = "some" ] || [ "${r_problem_count}" -gt 0 ]; } || proposed="yes"
         fi
     }
-    _title "plan"
     edit_open=""; _step_plan__table=""
     while :; do
+        if [ "${plan_view}" = "edit" ] && [ -z "${_step_plan__table}" ]; then _title "plan edit"; else _title "plan"; fi
         if [ -n "${_step_plan__table}" ]; then
             _frame plan "t" "back to the plan" "Esc" "back to the plan" "q" "quit"
             _draw_table
@@ -1118,13 +1119,13 @@ _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Ent
             fi
             _draw_edit
         elif [ -z "${proposed}" ]; then
-            _frame plan "p" "choose partitions" "e" "erase the disk" "t" "table" "Esc" "back" "q" "quit"
+            _frame plan "c" "choose partitions" "e" "erase the disk" "t" "table" "Esc" "back" "q" "quit"
             _draw_plan
         elif [ "${r_problem_count}" -gt 0 ]; then
-            _frame plan "~Enter" "use this plan" "p" "change it" "r" "reset" "t" "table" "Esc" "back" "q" "quit"
+            _frame plan "~Enter" "use this plan" "c" "change it" "r" "reset" "t" "table" "Esc" "back" "q" "quit"
             _draw_plan
         else
-            _frame plan "Enter" "use this plan" "p" "change it" "t" "table" "Esc" "back" "q" "quit"
+            _frame plan "Enter" "use this plan" "c" "change it" "t" "table" "Esc" "back" "q" "quit"
             _draw_plan
         fi
         _key
@@ -1191,7 +1192,7 @@ _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Ent
         fi
         case "${key}" in
             enter|n|right) if [ -n "${proposed}" ] && [ "${r_problem_count}" = 0 ]; then return 0; fi ;;
-            p)  plan_view="edit"
+            c)  plan_view="edit"
                 if [ -z "${proposed}" ]; then
                     #the way in that deletes nothing unasked: the disk's partitions, each one to choose
                     choices="use=parts root=none"

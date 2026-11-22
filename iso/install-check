@@ -4,12 +4,13 @@
 #The installer's key (Win+i) must open its window, which is kept as a screen and closed; then the
 #installer is opened again with nothing moving on its own, and answered by its keys as a person answers
 #it, each screen waited for by the name its window's title gives it: the intro, the plan the engine
-#proposes (changed line by line when LAYOUT says so), the user and a password that starts with "-", the
-#one confirmation, the install as it happens, and "Restart now", after which the live session must
-#restart on its own. The password is typed by its keys with the keyboard the installer shows (changed
-#there when KEYBOARD says so), and by the same keys at the disk's login: the disk has that keyboard, and
-#the time zone the installer showed: minos' own, America/Mexico_City, which the live session's clock is
-#in and the installer starts on, or the one chosen there when ZONE says so. Then
+#proposes (changed line by line when LAYOUT says so: by c, after p has been pressed and left it as it
+#was), the user and a password that starts with "-", the one confirmation, the install as it happens, and
+#"Restart now", after which the live session must restart on its own. The password is typed by its keys
+#with the keyboard the installer shows (changed there when KEYBOARD says so), and by the same keys at the
+#disk's login: the disk has that keyboard, and the time zone the installer showed: minos' own,
+#America/Mexico_City, which the live session's clock is in and the installer starts on, or the one chosen
+#there when ZONE says so. Then
 #the disk boots alone, still with no network, to slim, where the user logs in, and to i3, where it is
 #asked its time zone (timedatectl and date, in a terminal), and stays up until minos-untrim has had its
 #try, which must fail and leave the unit enabled.
@@ -54,7 +55,7 @@
 set -eu
 iso="${1:-}"; firmware="${2:-}"; disk="${3:-}"; out="${4:-}"; minutes="${5:-15}"
 phases="${PHASES:-install boot}"; layout="${LAYOUT:-empty}"
-if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '18,50s/^#//p' "${0}" >&2; exit 2; fi
+if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '19,51s/^#//p' "${0}" >&2; exit 2; fi
 name="${firmware}-${disk}"; [ "${layout}" = "empty" ] || name="${name}-${layout}"
 [ -z "${KEYBOARD:-}" ] || name="${name}-${KEYBOARD}"
 zone="${ZONE:-}"; city="$(printf "%s" "${zone##*/}" | tr '[:upper:]_' '[:lower:] ')"
@@ -189,6 +190,16 @@ _wait_screen() { #name seconds => true when the installer's window says it shows
     _wait_serial "probe: screen: minos installer - ${1}" "${2}" || { _screen timeout; _die "the installer did not get to its screen \"${1}\": $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
     #drawn, and its engine through
     sleep 1
+}
+
+_open_edit() { #=> the plan shown, opened line by line as a person opens it: p, which is no key of the plan,
+    #leaves it as it was; c opens it, and the window's title says so. NAME.facts gets a line that says both
+    _press p; sleep 3
+    ! grep -q '^probe: screen: minos installer - plan edit' "${serial}" ||
+        { _screen timeout; _die "p opened the plan line by line: c is its key"; }
+    _press c
+    _wait_screen "plan edit" 30
+    printf "%s\n" "plan keys: p left the plan as it was; c opened it line by line" >> "${facts}"
 }
 
 _boot() { #network => the machine booted, KVM, 2 CPUs, 3 GiB, its firmware, the target disk and what
@@ -464,10 +475,10 @@ case " ${phases} " in *" install "*)
     _press ret
     _wait_screen "plan" 60
     if [ "${layout}" = "beside" ]; then
-        #the plan proposed takes the free room and deletes nothing. Changed line by line: p; down to the
+        #the plan proposed takes the free room and deletes nothing. Changed line by line (c); down to the
         #line of the free room (after the line of what is used and the lines of the partitions there);
         #Enter opens its choices; the next one, a partition for minos of a size of its own; twice smaller
-        _press p; sleep 1
+        _open_edit
         if [ "${firmware}" = "bios" ]; then _press j j; else _press j j j; fi
         _press ret; sleep 1
         _press j ret; sleep 3
@@ -476,10 +487,10 @@ case " ${phases} " in *" install "*)
         _screen plan
         _press n
     elif [ "${layout}" = "home" ]; then
-        #the plan proposed, the whole disk, changed line by line: p; down to the line of /home (after what
+        #the plan proposed, the whole disk, changed line by line (c); down to the line of /home (after what
         #is used, what the firmware starts from and the partition of minos); Enter opens its choices; the
         #next one, a partition of its own
-        _press p; sleep 1
+        _open_edit
         _press j j j
         _press ret; sleep 1
         _press j ret; sleep 3

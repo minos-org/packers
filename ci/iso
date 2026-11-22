@@ -134,6 +134,8 @@ _install "install uefi sata" uefi sata "install boot untrim"
 _install "install bios sata, keyboard, zone" bios sata "install boot" empty latam Asia/Tokyo
 #beside what a disk holds, the plan changed in the installer, on a disk the kernel names as NVMe ones
 _install "install uefi nvme, beside" uefi nvme "install boot" beside
+#the plan opened line by line by its key, c, and not by p, which was its key before
+_line "plan, c and p" "$(sed -n 's/^plan keys: //p' "${logs}/install/uefi-nvme-beside.facts" 2>/dev/null | head -n 1)"
 rm -rf "${tmp}/install"
 printf "%s\\n" "--- ${name}.iso took $(($(date +%s) - began))s"
 

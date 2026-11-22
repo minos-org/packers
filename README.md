@@ -167,7 +167,7 @@ in `/tmp/minos-installer.status`.
 and every step going back and forward. An intro; the disk, asked when there are several; the plan the
 engine proposes, the disk as a bar now and after and what is done in words, with the partition table one
 key away (`t`); the user and its password; one confirmation, two buttons, the one that goes back holding
-the cursor and the other naming what it erases; the install as it happens; the end. `p` changes the plan
+the cursor and the other naming what it erases; the install as it happens; the end. `c` changes the plan
 line by line without leaving the installer: another disk, the whole disk or its partitions and free room,
 a partition to replace or to keep, a size for minos, a partition for `/home`, each change made a new plan
 by the engine (`edit DISK FILE CHOICE...`) and checked by it before it is shown; `r` goes back to the one
