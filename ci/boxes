@@ -5,16 +5,23 @@
 #an e1000 card), the keys Vagrant uses log in, minos is checked inside (ci/box-check, which runs
 #ci/probe-common), the same disk boots
 #on virtio, and Vagrant adds the box through a catalog. One line per check; ci/verdict reads them.
-#usage: [FLAVOURS="core desktop"] [ORIGIN=bench BENCH=DIR SETUP=FILE] [MIRROR=URI] ci/boxes RELEASE...
+#BUILD=live makes the box from minos' own installer instead: setup's live mode onto a loop disk
+#(scripts/live.sh, as root), its first boot with box.sh as Packer runs it, export.sh; no Packer, no subiquity,
+#no Ubuntu ISO. BUILD=given checks the box BOX_DIR already holds (NAME.box and NAME.sha256).
+#usage: [FLAVOURS="core desktop"] [BUILD=packer|live|given] [ORIGIN=bench BENCH=DIR] [SETUP=FILE]
+#       [MIRROR=URI] [BOX_DIR=DIR] ci/boxes RELEASE...
 #       MIRROR, the Ubuntu archive the installer fetches from (minos.pkr.hcl's mirror): by default the one
 #       this machine's apt reads (ci/mirror), on a GitHub-hosted runner its cloud's; the box keeps
-#       archive.ubuntu.com and security.ubuntu.com in its sources (scripts/box.sh)
+#       archive.ubuntu.com and security.ubuntu.com in its sources (scripts/box.sh). BUILD=live leaves it
+#       out: setup's live mode fetches from archive.ubuntu.com
 #       ORIGIN=bench, for test builds: minos from the packages in DIR/SERIES (minos' bench leaves them in
 #       out/SERIES) and the setup script FILE, instead of the minos archive and minos.io/s (minos.pkr.hcl,
 #       origin bench); it needs dpkg-scanpackages (dpkg-dev). ci/verdict passes only boxes of the archive
+#       BUILD=live, from the minos archive only: SETUP names the installer it runs (minos-org.github.com/setup)
 #       needs packer's and the boxes' tools on the PATH: qemu-system-x86, qemu-utils, xorriso, curl, unzip,
 #       file, libxml2-utils, openssh-client, zerofree, e2fsprogs, xz-utils, and sudo for installing
-#       Vagrant's package and for the qemu-nbd of scripts/export.sh
+#       Vagrant's package and for the qemu-nbd of scripts/export.sh; BUILD=live needs sudo for losetup,
+#       mount and chroot too, perl, and no Packer, xorriso or ISO
 #       ISOs, Packer, its plugin, Vagrant and the OVF schemas stay in $BOXES_CACHE (~/minos-boxes-cache);
 #       the artifacts and their logs go to $BOXES_OUT (~/minos-boxes-out)
 
@@ -24,6 +31,7 @@ tmp="${TMPDIR:-/tmp}/minos-boxes"
 #the Ubuntu archive the installer fetches from: $MIRROR, else the one this machine's apt reads (ci/mirror)
 mirror="$(sh "${w}/ci/mirror")"
 packer_version="1.16.2"; vagrant_version="2.4.9"
+build="${BUILD:-packer}"
 
 _line() { printf "%-34s %s\\n" "${1}" "${2}"; }
 
@@ -43,7 +51,7 @@ _fetch_checked() { #$1 url, $2 the url of its SHA256SUMS, $3 file => the file, w
 
 _tools() { #packer, vagrant, Vagrant's insecure private keys, the OVF schemas
     mkdir -p "${cache}/bin" "${cache}/keys" "${cache}/ovf"
-    if [ ! -x "${cache}/bin/packer" ]; then
+    if [ "${build}" = "packer" ] && [ ! -x "${cache}/bin/packer" ]; then
         base="https://releases.hashicorp.com/packer/${packer_version}"
         _fetch_checked "${base}/packer_${packer_version}_linux_amd64.zip" \
             "${base}/packer_${packer_version}_SHA256SUMS" "${cache}/packer.zip" || return 1
@@ -103,14 +111,7 @@ _manifest() { #$1 release => $cache/manifest/RELEASE.list, the packages of the i
     return 1
 }
 
-_box() { #build, check and add one box
-    release="${1}"; flavour="${2}"
-    name="minos-${flavour}-${release}"
-    logs="${out}/logs/${name}"
-    rm -rf "${out:?}/${name}" "${out}/${name}".* "${logs}" "${tmp}"; mkdir -p "${logs}" "${tmp}"
-    _tools > "${logs}/tools.log" 2>&1 || { _line "tools" "FAIL  $(tail -2 "${logs}/tools.log" | tr '\n' ' ')"; return 1; }
-    export PATH="${cache}/bin:${PATH}" PACKER_CACHE_DIR="${cache}/packer" PACKER_PLUGIN_PATH="${cache}/plugins" CHECKPOINT_DISABLE=1
-
+_build_packer() { #Packer installs Ubuntu's live-server ISO with minos' recipe (minos.pkr.hcl)
     vars="-var release=${release} -var flavour=${flavour} -var origin=${origin} -var output=${out}"
     vars="${vars} -var ssh_key=${cache}/keys/vagrant.key.ed25519 -var mirror=${mirror}"
     if [ "${origin}" = "bench" ]; then
@@ -151,6 +152,76 @@ _box() { #build, check and add one box
     _line "slimming steps (MB used)" "$(grep -ho 'slim: .*' "${logs}/packer.log" | sed 's/^slim: //' | tr '\n' ',' | sed 's/,$//; s/,/, /g' | cut -c1-300)"
     #what export.sh made zeros of before the disk became the VMDK
     _line "zeros at export" "$(grep -ho 'zeros: .*' "${logs}/packer.log" | sed 's/^zeros: //' | awk '{printf "%s%s", (NR > 1 ? "; " : ""), $0}' | cut -c1-300)"
+}
+
+_build_live() { #setup's live mode onto a loop disk and the vagrant step inside it (scripts/live.sh, as root),
+                #then what Packer does after an install: the first boot with box.sh, a clean poweroff, export.sh
+    start="$(date +%s)"
+    # shellcheck disable=SC2024 # the log is this user's: only live.sh needs root
+    sudo sh "${w}/scripts/live.sh" "${release}" "${flavour}" "${setup}" "${out}" > "${logs}/live.log" 2>&1; status="${?}"
+    sudo chown -R "$(id -u):$(id -g)" "${out}/${name}"
+    if [ -f "${out}/${name}/install.log" ]; then sed 's/^[0-9]* //' "${out}/${name}/install.log" > "${logs}/install.log"; fi
+    installed="$(date +%s)"
+    _line "live install" "$(grep -h '^live: ' "${logs}/live.log" | sed 's/^live: //' | tr '\n' ';' | cut -c1-400)"
+    if [ "${status}" != "0" ]; then
+        _line "live build (${origin})" "FAIL  (${status}) $(tail -3 "${logs}/live.log" | tr '\n' ' ' | cut -c1-220)"
+        return 1
+    fi
+    #the first boot, as Packer's: KVM, virtio, the disk's freed blocks handed back to the image file, Vagrant's key
+    disk="${out}/${name}/${name}.raw"; key="${cache}/keys/vagrant.key.ed25519"
+    qemu-system-x86_64 -enable-kvm -machine pc -cpu host -smp 2 -m 2048 \
+        -drive file="${disk}",format=raw,if=virtio,discard=unmap,detect-zeroes=unmap \
+        -netdev user,id=nat,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=nat \
+        -display none -serial file:"${logs}/first-boot-serial.log" -daemonize -pidfile "${tmp}/box.pid" ||
+        { _line "live build (${origin})" "FAIL  qemu did not start for the first boot"; return 1; }
+    qemu="$(cat "${tmp}/box.pid")"
+    until _ssh "${key}" true 2>/dev/null; do
+        [ "$(($(date +%s) - installed))" -gt 300 ] && break
+        sleep 3
+    done
+    #the provisioner: box.sh as root, uploaded where Packer puts its scripts; no MIRROR, setup's live mode
+    #fetched from archive.ubuntu.com itself
+    _ssh "${key}" 'cat > /tmp/box.sh' < "${w}/scripts/box.sh" &&
+        _ssh "${key}" 'sudo sh /tmp/box.sh' >> "${logs}/live.log" 2>&1; status="${?}"
+    _ssh "${key}" 'sudo shutdown -P now' >/dev/null 2>&1
+    while kill -0 "${qemu}" 2>/dev/null; do
+        [ "$(($(date +%s) - installed))" -gt 900 ] && { _line "live build (${origin})" "FAIL  the first boot is still up"; kill "${qemu}"; }
+        sleep 1
+    done
+    booted="$(date +%s)"
+    if [ "${status}" != "0" ]; then
+        _line "live build (${origin})" "FAIL  box.sh (${status}) $(tail -3 "${logs}/live.log" | tr '\n' ' ' | cut -c1-220)"
+        return 1
+    fi
+    #export.sh reads the qcow2 Packer leaves: the raw disk becomes one, its zeros left out
+    qcow2="${out}/${name}/${name}.qcow2"
+    qemu-img convert -O qcow2 "${disk}" "${qcow2}" >> "${logs}/live.log" 2>&1 ||
+        { _line "live build (${origin})" "FAIL  qemu-img convert $(tail -2 "${logs}/live.log" | tr '\n' ' ')"; return 1; }
+    rm -f "${disk}"
+    sh "${w}/scripts/export.sh" "${qcow2}" "${out}" "${name}" >> "${logs}/live.log" 2>&1 ||
+        { _line "live build (${origin})" "FAIL  export $(tail -2 "${logs}/live.log" | tr '\n' ' ')"; return 1; }
+    rm -f "${qcow2}"
+    _line "live build (${origin})" "ok    $(($(date +%s) - start))s: install and vagrant step $((installed - start))s, first boot with box.sh $((booted - installed))s, export $(($(date +%s) - booted))s; $(grep -o 'export: .*' "${logs}/live.log" | tail -1)"
+    _line "slimming steps (MB used)" "$(grep -ho 'slim: .*' "${logs}/live.log" | sed 's/^slim: //' | tr '\n' ',' | sed 's/,$//; s/,/, /g' | cut -c1-300)"
+    _line "zeros at export" "$(grep -ho 'zeros: .*' "${logs}/live.log" | sed 's/^zeros: //' | awk '{printf "%s%s", (NR > 1 ? "; " : ""), $0}' | cut -c1-300)"
+}
+
+_box() { #build, check and add one box
+    release="${1}"; flavour="${2}"
+    name="minos-${flavour}-${release}"
+    logs="${out}/logs/${name}"
+    rm -rf "${out:?}/${name}" "${out}/${name}".* "${logs}" "${tmp}"; mkdir -p "${logs}" "${tmp}"
+    _tools > "${logs}/tools.log" 2>&1 || { _line "tools" "FAIL  $(tail -2 "${logs}/tools.log" | tr '\n' ' ')"; return 1; }
+    export PATH="${cache}/bin:${PATH}" PACKER_CACHE_DIR="${cache}/packer" PACKER_PLUGIN_PATH="${cache}/plugins" CHECKPOINT_DISABLE=1
+
+    case "${build}" in
+        packer) _build_packer || return 1 ;;
+        live) _build_live || return 1 ;;
+        given)
+            cp "${BOX_DIR:?BUILD=given needs BOX_DIR}/${name}.box" "${BOX_DIR}/${name}.sha256" "${out}/" ||
+                { _line "given box" "FAIL  no ${BOX_DIR}/${name}.box"; return 1; }
+            _line "given box" "${BOX_DIR}/${name}.box $(stat -c %s "${out}/${name}.box") B" ;;
+    esac
     _line "sha256" "$(awk '{printf "%s %s  ", $2, $1}' "${out}/${name}.sha256")"
 
     #the box as the one package of a release: its .sha256 true of it, and, unpacked, what Vagrant imports and
@@ -291,6 +362,15 @@ case "${origin}" in
         #packer runs from the repository: the paths it is given are absolute
         bench="$(cd "${BENCH}" && pwd)"; setup="$(cd "$(dirname "${SETUP}")" && pwd)/$(basename "${SETUP}")" ;;
     *) printf "%s\\n" "ORIGIN=${origin}: the origin is ppa or bench" >&2; exit 2 ;;
+esac
+case "${build}" in
+    packer|given) : ;;
+    live)
+        #setup's live mode installs minos from the minos archive; the bench's packages reach only Packer's
+        [ "${origin}" = "ppa" ] || { printf "%s\\n" "BUILD=live installs from the minos archive: ORIGIN=ppa" >&2; exit 2; }
+        [ -f "${SETUP:-}" ] || { printf "%s\\n" "BUILD=live: SETUP names the setup script it runs" >&2; exit 2; }
+        setup="$(cd "$(dirname "${SETUP}")" && pwd)/$(basename "${SETUP}")" ;;
+    *) printf "%s\\n" "BUILD=${build}: the build is packer, live or given" >&2; exit 2 ;;
 esac
 mkdir -p "${cache}" "${out}"
 

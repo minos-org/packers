@@ -128,7 +128,8 @@ awk -v flavour="${flavour}" -v release="${release}" -v cases="${cases}" '
             }
         } else {
             common(flavour, "vagrant")
-            must("^packer build \\(ppa\\)$", "^ok ")
+            #built by Packer from the Ubuntu installer, or by the live mode of the minos installer (ci/boxes, BUILD)
+            must("^(packer|live) build \\(ppa\\)$", "^ok ")
             #export.sh made zeros of what the root filesystem does not hold, and the filesystem is whole after it
             must("^zeros at export$", "^partition [0-9]+ \\(ext4\\), [0-9]+ of [0-9]+ free blocks were not zero; journal [0-9]+M made again, empty; e2fsck -fn clean;")
             #the box is the one file a release carries: its .sha256 lists it alone, and is true of it

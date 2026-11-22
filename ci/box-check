@@ -20,6 +20,8 @@ _line "modules missing a symbol" "$([ -f "${map}" ] || printf "%s" "no ${map}: "
 #leave connman's wait out of it (packers/scripts/box.sh)
 state="$(systemctl is-enabled connman-wait-online.service 2>/dev/null)"
 _line "network-online.target" "connman-wait-online ${state:-not installed}; waits for: $(systemctl list-dependencies --plain --no-pager network-online.target 2>/dev/null | sed 1d | awk '{printf "%s ", $1}' | grep . || echo nothing)"
+#the disk grub-pc installs itself to again on its upgrades: the box's, not the one of the machine that built it
+_line "grub-pc install devices" "$(debconf-show grub-pc 2>/dev/null | sed -n 's/^[* ] grub-pc\/install_devices: //p' | grep . || echo none)"
 _line "/tmp" "$(findmnt -n -o FSTYPE,OPTIONS /tmp)"
 
 #learn's commands, through shundle, in the user's interactive shell
