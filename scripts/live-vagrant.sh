@@ -35,22 +35,42 @@ find /usr/share/locale -path '*/LC_MESSAGES/*.mo' -delete
 
 #the kernel of a virtual machine, the release's own (GA): linux-image-virtual is the same name on every release,
 #and it is the kernel the boxes Packer makes carry. setup installed the generic kernel of the newest hardware
-#(HWE) with its firmware and headers; they go now, before the first boot, or GRUB would start the newest
+#(HWE) with its firmware and headers; they go now, before the first boot, or GRUB would start the newest. A
+#desktop keeps the release's generic kernel beside it, as the desktop boxes Packer makes do: minos-desktop
+#depends on linux-image-generic (or an HWE one), and its modules-extra carry the sound drivers; box.sh keeps
+#that group, which the metapackage asks for, and empties the firmware it brings
+meta="minos-core"; ga="linux-image-virtual"
+if [ -n "$(_installed minos-desktop)" ]; then meta="minos-desktop"; ga="linux-image-virtual linux-image-generic"; fi
+[ -n "$(_installed "${meta}")" ] || { printf "%s\\n" "live-vagrant: ${meta} is not installed" >&2; exit 1; }
 apt-get update -q
-apt-get install -y -q --no-install-recommends linux-image-virtual
+# shellcheck disable=SC2086 # a list of packages
+apt-get install -y -q --no-install-recommends ${ga}
 kernel="$(dpkg-query -W -f='${Depends}' linux-image-virtual | tr ',|' '\n\n' | sed -n 's/^ *linux-image-\([0-9][^ ]*\).*/\1/p' | head -1)"
 [ -n "${kernel}" ] || { printf "%s\\n" "live-vagrant: no kernel under linux-image-virtual" >&2; exit 1; }
-generic="$( { _installed 'linux-generic*' 'linux-image-generic*' 'linux-headers-*' 'linux-hwe-*' 'linux-tools-*' \
-        'linux-modules-extra-*' 'linux-main-modules-*' 'linux-firmware*' intel-microcode amd64-microcode thermald
-    _installed 'linux-image-[0-9]*' 'linux-modules-[0-9]*' | grep -vx -e "linux-image-${kernel}" -e "linux-modules-${kernel}"
-} | sort -u)" || :
+#what the GA kernel's metapackages need stays; every other kernel package goes, with its headers, tools and
+#firmware (apt never removes a kernel image or linux-firmware on its own)
+# shellcheck disable=SC2086 # a list of packages
+stays="$(apt-cache depends --recurse --installed --no-recommends --no-suggests --no-conflicts --no-breaks \
+    --no-replaces --no-enhances ${ga} | grep -v '^[ <]' | sort -u)"
+generic="$(_installed 'linux-generic*' 'linux-image-generic*' 'linux-headers-*' 'linux-hwe-*' 'linux-tools-*' \
+        'linux-modules-extra-*' 'linux-main-modules-*' 'linux-firmware*' intel-microcode amd64-microcode thermald \
+        'linux-image-[0-9]*' 'linux-modules-[0-9]*' | sort -u | grep -vxF "${stays}")" || :
 if [ -n "${generic}" ]; then
-    printf "live-vagrant: kernel %s; purging %s\\n" "${kernel}" "$(printf "%s " ${generic})"
+    # shellcheck disable=SC2086 # a list of packages
+    gone="$(apt-get -s purge ${generic} | awk '/^Purg / {print $2}')"
+    if printf "%s\\n" "${gone}" | grep -qx -e "${meta}" -e 'linux-image-virtual' -e 'linux-image-generic'; then
+        printf "%s\\n" "live-vagrant: purging the other kernels would take $(printf "%s\\n" "${gone}" | grep -x -e "${meta}" -e 'linux-image-virtual' -e 'linux-image-generic' | tr '\n' ' ')" >&2
+        exit 1
+    fi
+    printf "live-vagrant: kernel %s (%s); purging %s\\n" "${kernel}" "${ga}" "$(printf "%s " ${generic})"
     # shellcheck disable=SC2086 # a list of packages
     apt-get purge -y -q ${generic}
     apt-get autoremove -y -q --purge
 fi
-dpkg-query -W -f='${Status}' linux-image-virtual | grep -qx 'install ok installed'
+for package in ${meta} ${ga}; do
+    dpkg-query -W -f='${Status}' "${package}" | grep -qx 'install ok installed' ||
+        { printf "%s\\n" "live-vagrant: ${package} is gone after the kernel step" >&2; exit 1; }
+done
 
 #the user and the password every base box has, plus Vagrant's insecure public keys (RSA for Vagrant before
 #2.3.8, ED25519 after), which Vagrant replaces with a key of its own on the first `vagrant up`. Over ssh only the
