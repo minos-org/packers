@@ -180,19 +180,24 @@ it until that is chosen. The password goes to `setup` on its standard input (`li
 The step of the user answers one worry, whether what was typed is what was meant. A name is taken as typed and
 judged by the engine (`user NAME`), which refuses it in a sentence that says what a name is: lower case
 letters, digits, `-` and `_`, a letter first, 32 at most, and no user or group the copied system has. The
-password is asked twice while it is typed blind and once while it is seen (`F5`). The keyboard shown is the
-one that is active, as the X session has it (`setxkbmap -query`, so also after minos' own key, Alt and the
-right Shift), and is changed there: `F2` moves to the next layout of minos' list (`minos-config
-keyboard-layouts`), `F3` lists every layout xkb knows; what was typed as a password goes with the old
-keyboard. On the console the keyboard is the one the system was set to and is not changed from the installer.
-The same step shows the time zone, with the time it is there: minos' own, America/Mexico_City, until another
-is chosen. `F4` lists every zone the session's tzdata has (its `tzdata.zi`), minos' three first (Mexico City,
-Caracas, New York: the engine names them, in one place, and the first is the one an install starts on),
-narrowed by what is typed, in a window and on the console alike. The ISO's live session has its clock in that
-first zone, so the bar and the installer tell the same hour. `Ctrl-K`, `Ctrl-O`, `Ctrl-T` and `Ctrl-P` do what
-`F2` to `F5` do, where a terminal keeps the function keys. The installed system takes that keyboard and that
-zone (`setup ... --keyboard LAYOUT[:VARIANT] --timezone ZONE`), so it asks for the password with the keys it
-was typed with.
+password is asked twice while it is typed blind and once while it is seen (`F5`, or `Ctrl-P` where a
+terminal keeps the function keys). The step has five fields, in this order: the name, the password, the same
+again, the keyboard and the time zone. `Tab` goes through all five and round again; `Enter` on the three that
+are typed goes on to the next of them, and from the last to the next step; `Enter` on the keyboard or the
+time zone opens its list, where the arrows and the page keys move, what is typed narrows it by name, `Enter`
+takes the one under the cursor and `Esc` leaves it as it was. The step needs no letter to be worked: `Tab`,
+the arrows, `Enter` and `Esc` say the same whatever the keyboard. The keyboard shown is the one that is
+active, as the X session has it (`setxkbmap -query`, so also after minos' own key, Alt and the right Shift);
+its list has every layout xkb knows, minos' own first (`minos-config keyboard-layouts`), narrowed by the
+layout's code or its name, and what was typed as a password goes with the old keyboard. On the console the
+keyboard is the one the system was set to and is not changed from the installer. The time zone is shown with
+the time it is there: minos' own, America/Mexico_City, until another is chosen. Its list has every zone the
+session's tzdata has (its `tzdata.zi`), minos' three first (Mexico City, Caracas, New York: the engine names
+them, in one place, and the first is the one an install starts on), the zone under the cursor with the time
+it is there, in a window and on the console alike. The ISO's live session has its clock in that first zone,
+so the bar and the installer tell the same hour. The installed system takes that keyboard and that zone
+(`setup ... --keyboard LAYOUT[:VARIANT] --timezone ZONE`), so it asks for the password with the keys it was
+typed with.
 
 The installer runs as the session's user and asks sudo for the engine alone; another interface can take
 its place without touching the engine.
