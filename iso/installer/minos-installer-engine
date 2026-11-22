@@ -59,6 +59,10 @@
 #  timezones                the time zones to choose from, a line each, tab-separated: zone, own or
 #                           other: minos' own first, in their order, then every other zone this system's
 #                           tzdata knows and has a file for, as its own index says them. Needs no root
+#  filesystems              the file systems a partition for minos or for /home is made with, a line
+#                           each, tab-separated: name, default or -, the package of its tools, here or
+#                           missing (its mkfs on this system: a missing one is not offered), and what it
+#                           is good at, for people. Needs no root
 #  --try        on a machine that is not the live session: apply writes the disk for real, then says
 #               the setup command it would run, and does not run it
 #  --firmware   with --try, the firmware plans are for, whatever this machine started by
@@ -68,7 +72,8 @@
 #                                PART made: SIZE in MiB, or rest (the last one of a new table); TYPE esp,
 #                                linux or bios-boot. On a disk that got a table, after the ones before
 #                                it; on a disk that keeps its table, in free room, START MiB into the disk
-#  format PART fat32|ext4        a new file system on PART: what it holds goes
+#  format PART fat32|FS          a new file system on PART: what it holds goes. FS is one of the
+#                                filesystems verb's: ext4, btrfs, xfs
 #  esp PART                      the EFI system partition the boot loader goes to (UEFI)
 #  root PART                     the partition minos is copied to
 #  home PART                     the partition that is /home (none: /home is in the one of minos)
@@ -83,7 +88,9 @@
 #                                (parts) minos goes to a partition that exists, or to a new one in the
 #                                free room that starts START MiB into the disk, all of it or MIB
 #  rootfs=format|keep            a partition that exists is formatted, or keeps its ext4 and its files
-#  home=none|new:MIB|PART|free:START[:MIB]    homefs=format|keep     the same for /home
+#  roottype=FS                   the file system the partition for minos is made with, when it is made
+#                                or formatted: one the filesystems verb offers (the default when not)
+#  home=none|new:MIB|PART|free:START[:MIB]    homefs=format|keep    hometype=FS    the same for /home
 #  esp=auto|PART  espfs=auto|format           the EFI system partition: the one found, formatted only
 #                                when it is not FAT; or PART, or formatted whatever it holds
 #  keyboard=LAYOUT[:VARIANT]     the keyboard of the installed system
@@ -94,6 +101,9 @@
 #  line ID LABEL VALUE NOTE TONE             a line of the plan: TONE plain, new, erase or off
 #  option ID WORDS TEXT current|-            what line ID can be instead: WORDS are the choices to add
 #  size ID KEY MIB LEAST MOST STEP           line ID has a size: KEY followed by a number of MiB, a choice
+#  fs ID HEADING                             line ID (roottype, hometype) is the file system of a
+#                                            partition: HEADING says which, for people. Its options are
+#                                            the file systems offered, none when it is kept with its files
 #  problem TEXT                              what stops the plan
 #  now|after DEVICE MIB SIZE KIND HOLDS NAME FATE MOUNT
 #                                            a partition or a free room (DEVICE free) of the disk, in
@@ -103,7 +113,8 @@
 #  loss none|some TEXT                       what is lost
 #  button plain|danger TEXT                  the name of the deed, for the one confirmation
 #runs as root; needs lsblk, findmnt, blkid, wipefs, blockdev and swapoff (util-linux), sfdisk (fdisk),
-#mkfs.ext4 (e2fsprogs), udevadm, and mkfs.vfat (dosfstools) or busybox's mkdosfs
+#mkfs.ext4 (e2fsprogs), udevadm, and mkfs.vfat (dosfstools) or busybox's mkdosfs; mkfs.btrfs
+#(btrfs-progs) and mkfs.xfs (xfsprogs) for those two to be offered
 
 set -u
 LC_ALL=C; export LC_ALL
@@ -113,6 +124,16 @@ progress="/tmp/minos-installer.progress"; pidfile="/tmp/minos-installer.pid"
 esp_mib=512
 #the least a partition of its own for /home is worth
 home_mib=256
+#the file systems a partition for minos or for /home is made with, a line each, tab-separated: its name,
+#the package of its tools, the mkfs that makes one (the label follows it, then the partition), and what
+#it is good at, for people; the first is the default. Nothing else names them: the ISO's build installs
+#their tools (the filesystems verb), and setup's live mode writes the fstab line of each one it knows
+filesystems="ext4	e2fsprogs	mkfs.ext4 -q -F -L	mature, quick to check, what Ubuntu installs
+btrfs	btrfs-progs	mkfs.btrfs -q -f -L	snapshots, checksums; slower with databases and VM disks
+xfs	xfsprogs	mkfs.xfs -q -f -L	large files, parallel writes; it grows but never shrinks"
+#the one a partition that exists keeps with its files, minos copied over them: setup's live mode copies
+#onto what it mounts, and a btrfs or an xfs kept would need a decision of its own (which subvolume)
+kept_fs="ext4"
 #minos' own time zones, in their order: an install starts on the first, and the three head the list of
 #zones. Nothing else names them: the ISO's build asks for the first one here (the timezone verb)
 timezones_own="America/Mexico_City America/Caracas America/New_York"
@@ -128,7 +149,7 @@ _die() { #message => on stderr, exit 1
 }
 
 _usage() { #=> the usage, on stderr, exit 2
-    sed -n '8,104s/^#//p' "${0}" >&2
+    sed -n '8,114s/^#//p' "${0}" >&2
     exit 2
 }
 
@@ -139,6 +160,37 @@ _say() { #message => a line of the engine's own among what the tools say
 _applying() { #=> the process of an apply that is running; nothing when none is
     _applying__pid="$(cat "${pidfile}" 2>/dev/null)"
     [ -z "${_applying__pid}" ] || [ ! -d "/proc/${_applying__pid}" ] || printf "%s" "${_applying__pid}"
+}
+
+_fs_default() { #=> the name of the file system a partition is made with unless another is chosen
+    printf "%s" "${filesystems%%"${tab}"*}"
+}
+
+_fs_field() { #name number => field NUMBER of the line of the file system NAME; nothing when it is none
+    printf "%s\n" "${filesystems}" | awk -F '\t' -v name="${1}" -v n="${2}" '$1 == name {print $n; exit}'
+}
+
+_fs_offered() { #=> the names of the file systems this system can make, a line each, in their order: the
+    #ones whose mkfs is here
+    printf "%s\n" "${filesystems}" | while IFS="${tab}" read -r _fs_offered__name _ _fs_offered__mkfs _; do
+        ! command -v "${_fs_offered__mkfs%% *}" >/dev/null 2>&1 || printf "%s\n" "${_fs_offered__name}"
+    done
+}
+
+_is_offered() { #name => true when NAME is a file system this system can make
+    _fs_offered | grep -qxF -e "${1}"
+}
+
+_fs_words() { #=> the names of the file systems, for people: ext4, btrfs or xfs
+    printf "%s\n" "${filesystems}" | awk -F '\t' '{name[NR] = $1}
+        END {for (i = 1; i <= NR; i++) printf "%s%s", name[i], (i == NR ? "" : (i == NR - 1 ? " or " : ", "))}'
+}
+
+_fs_list() { #=> the filesystems verb
+    printf "%s\n" "${filesystems}" | while IFS="${tab}" read -r _fs_list__name _fs_list__package _ _fs_list__text; do
+        _row "${_fs_list__name}" "$([ "${_fs_list__name}" != "$(_fs_default)" ] || printf default)" "${_fs_list__package}" \
+            "$(_is_offered "${_fs_list__name}" && printf here || printf missing)" "${_fs_list__text}"
+    done
 }
 
 _or_dash() { #text => TEXT, or - when there is none: no field of a line is ever empty
@@ -516,10 +568,11 @@ _whole_table() { #disk => the table a whole disk gets for this firmware: UEFI re
     fi
 }
 
-_plan_whole() { #disk [root-mib [home-mib]] => a plan for the whole of DISK and this firmware: what the
-    #firmware starts from (an EFI system partition; on a GPT that BIOS starts, the partition GRUB needs
-    #for itself), the partition for minos, of ROOT-MIB or (-) the room there is, and with HOME-MIB one
-    #for /home, which then takes what minos leaves
+_plan_whole() { #disk [root-mib [home-mib [root-fs [home-fs]]]] => a plan for the whole of DISK and this
+    #firmware: what the firmware starts from (an EFI system partition; on a GPT that BIOS starts, the
+    #partition GRUB needs for itself), the partition for minos, of ROOT-MIB or (-) the room there is, and
+    #with HOME-MIB one for /home, which then takes what minos leaves; each made ROOT-FS and HOME-FS, the
+    #default file system when not said
     _is_disk "${1}" || _die "${1} is not a disk"
     _plan_whole__table="$(_whole_table "${1}")"; _plan_whole__n=0; _plan_whole__fixed=0; _plan_whole__esp=""
     printf "%s\n" "table ${1} ${_plan_whole__table}"
@@ -546,8 +599,8 @@ _plan_whole() { #disk [root-mib [home-mib]] => a plan for the whole of DISK and 
         printf "%s\n" "partition ${_plan_whole__root} ${_plan_whole__size} linux"
     fi
     [ -z "${_plan_whole__esp}" ] || printf "%s\n" "format ${_plan_whole__esp} fat32"
-    printf "%s\n" "format ${_plan_whole__root} ext4"
-    [ -z "${_plan_whole__home}" ] || printf "%s\n" "format ${_plan_whole__home} ext4"
+    printf "%s\n" "format ${_plan_whole__root} ${4:-$(_fs_default)}"
+    [ -z "${_plan_whole__home}" ] || printf "%s\n" "format ${_plan_whole__home} ${5:-$(_fs_default)}"
     [ -z "${_plan_whole__esp}" ] || printf "%s\n" "esp ${_plan_whole__esp}"
     printf "%s\n" "root ${_plan_whole__root}"
     [ -z "${_plan_whole__home}" ] || printf "%s\n" "home ${_plan_whole__home}"
@@ -562,8 +615,8 @@ _plan_partitions() { #root [esp] [keep] => a plan for partitions that exist
             *) _plan_partitions__esp="${_plan_partitions__word}" ;;
         esac
     done
-    if [ -z "${_plan_partitions__keep}" ] || [ "$(_file_system "${_plan_partitions__root}")" != "ext4" ]; then
-        printf "%s\n" "format ${_plan_partitions__root} ext4"
+    if [ -z "${_plan_partitions__keep}" ] || [ "$(_file_system "${_plan_partitions__root}")" != "${kept_fs}" ]; then
+        printf "%s\n" "format ${_plan_partitions__root} $(_fs_default)"
     fi
     if [ -n "${_plan_partitions__esp}" ]; then
         [ "$(_file_system "${_plan_partitions__esp}")" = "vfat" ] || printf "%s\n" "format ${_plan_partitions__esp} fat32"
@@ -603,10 +656,11 @@ _kind_in_plan() { #partition => what it is to the firmware once plan is applied:
     esac
 }
 
-_holds_in_plan() { #partition => the file system on it once plan is applied: fat32, ext4, another, or none
-    case "$(_plan format "${1}" | cut -d' ' -f2)" in
-        fat32) printf "%s" fat32 ;;
-        ext4) printf "%s" ext4 ;;
+_holds_in_plan() { #partition => the file system on it once plan is applied: fat32, ext4, btrfs, another,
+    #or none
+    _holds_in_plan__as="$(_plan format "${1}" | cut -d' ' -f2)"
+    case "${_holds_in_plan__as}" in
+        ?*) printf "%s" "${_holds_in_plan__as}" ;;
         *) if [ -n "$(_plan partition "${1}")" ]; then
                printf "%s" none
            else
@@ -652,17 +706,33 @@ _plan_disks() { #=> the disks plan touches, a line each
     } | sort -u
 }
 
+_check_holds() { #partition what => what stops PARTITION from holding WHAT (minos, /home): formatted, one of
+    #the file systems; kept with its files, the one kept so
+    _check_holds__fs="$(_holds_in_plan "${1}")"
+    if [ -n "$(_plan format "${1}")" ]; then
+        [ -n "$(_fs_field "${_check_holds__fs}" 1)" ] ||
+            printf "%s\n" "${1#/dev/} is formatted as ${_check_holds__fs}: ${2} goes on $(_fs_words)."
+    else
+        [ "${_check_holds__fs}" = "${kept_fs}" ] ||
+            printf "%s\n" "${1#/dev/} has to be formatted: ${2} keeps the files of an ${kept_fs} alone."
+    fi
+}
+
 _check() { #=> the check verb: what stops plan, a line each
-    awk '/^[ \t]*(#|$)/ {next}
+    awk -v kinds=" fat32 $(printf "%s\n" "${filesystems}" | cut -f1 | tr '\n' ' ')" '/^[ \t]*(#|$)/ {next}
         $1 == "table" && NF == 3 && $3 ~ /^(gpt|dos)$/ {next}
         $1 == "partition" && (NF == 4 || NF == 5 && $5 ~ /^[0-9]+$/) && $3 ~ /^([1-9][0-9]*|rest)$/ && $4 ~ /^(esp|linux|bios-boot)$/ {next}
-        $1 == "format" && NF == 3 && $3 ~ /^(fat32|ext4)$/ {next}
+        $1 == "format" && NF == 3 && index(kinds, " " $3 " ") {next}
         ($1 == "esp" || $1 == "root" || $1 == "home") && NF == 2 {next}
         $1 == "keyboard" && (NF == 2 || NF == 3) && $2 ~ /^[a-z0-9_]+$/ && $3 ~ /^[a-zA-Z0-9_-]*$/ {next}
         $1 == "timezone" && NF == 2 {next}
         {print "line " NR " is no action of a plan: " $0}' "${plan}"
     for _check__zone in $(_plan timezone); do
         _is_timezone "${_check__zone}" || printf "%s\n" "${_check__zone} is no time zone this system has."
+    done
+    _plan format | while read -r _check__part _check__as; do
+        [ "${_check__as}" = "fat32" ] || [ -z "$(_fs_field "${_check__as}" 1)" ] || _is_offered "${_check__as}" ||
+            printf "%s\n" "${_check__part#/dev/} cannot be made ${_check__as} here: there is no $(_fs_field "${_check__as}" 3 | cut -d' ' -f1) (package $(_fs_field "${_check__as}" 2))."
     done
 
     #the disks: each one touched must be free, and a new table holds what is made on it
@@ -730,8 +800,7 @@ _check() { #=> the check verb: what stops plan, a line each
     if [ -n "${_check__root}" ] && _in_plan "${_check__root}"; then
         [ "$(_kind_in_plan "${_check__root}")" = "data" ] ||
             printf "%s\n" "${_check__root#/dev/} is the firmware's own partition, not one for minos."
-        [ "$(_holds_in_plan "${_check__root}")" = "ext4" ] ||
-            printf "%s\n" "${_check__root#/dev/} has to be formatted: minos goes on ext4."
+        _check_holds "${_check__root}" minos
         [ "$(_mib_in_plan "${_check__root}")" -ge "${root_mib}" ] ||
             printf "%s\n" "${_check__root#/dev/} is too small: it has $(_human "$(_mib_in_plan "${_check__root}")"), and minos needs $(_human "${root_mib}")."
     fi
@@ -747,8 +816,7 @@ _check() { #=> the check verb: what stops plan, a line each
             printf "%s\n" "${_check__home#/dev/} is the partition of minos: /home is in it without being named."
         [ "$(_kind_in_plan "${_check__home}")" = "data" ] ||
             printf "%s\n" "${_check__home#/dev/} is the firmware's own partition, not one for /home."
-        [ "$(_holds_in_plan "${_check__home}")" = "ext4" ] ||
-            printf "%s\n" "${_check__home#/dev/} has to be formatted: /home goes on ext4."
+        _check_holds "${_check__home}" /home
         [ "$(_mib_in_plan "${_check__home}")" -ge "${home_mib}" ] ||
             printf "%s\n" "${_check__home#/dev/} is too small for /home: it has $(_human "$(_mib_in_plan "${_check__home}")")."
     fi
@@ -886,8 +954,8 @@ _actions() { #=> the action rows of plan, the loss row and the button row: what 
             esp) _actions__what="a boot partition (${_actions__part#/dev/}, ${_actions__size}, EFI)" ;;
             bios-boot) _actions__what="a partition for GRUB (${_actions__part#/dev/}, ${_actions__size})" ;;
             *) case "${_actions__part}" in
-                   "${_actions__root}") _actions__what="a partition for minos (${_actions__part#/dev/}, ${_actions__size})" ;;
-                   "${_actions__home}") _actions__what="a partition for /home (${_actions__part#/dev/}, ${_actions__size})" ;;
+                   "${_actions__root}") _actions__what="a partition for minos (${_actions__part#/dev/}, ${_actions__size}, $(_holds_in_plan "${_actions__part}"))" ;;
+                   "${_actions__home}") _actions__what="a partition for /home (${_actions__part#/dev/}, ${_actions__size}, $(_holds_in_plan "${_actions__part}"))" ;;
                    *) _actions__what="a partition (${_actions__part#/dev/}, ${_actions__size})" ;;
                esac ;;
         esac
@@ -1008,13 +1076,18 @@ _plan_custom() { #disk => on stdout the plan choices make for DISK; choices is l
     _plan_custom__use="$(_choice use)"
     #a disk with no partition table can only be taken whole
     [ -n "$(_table_now "${1}")" ] || _plan_custom__use="whole"
+    #the file systems chosen, kept from one plan to the next: the default for one this system cannot make
+    _plan_custom__roottype="$(_choice roottype)"; _plan_custom__hometype="$(_choice hometype)"
+    _is_offered "${_plan_custom__roottype:-none}" || _plan_custom__roottype="$(_fs_default)"
+    _is_offered "${_plan_custom__hometype:-none}" || _plan_custom__hometype="$(_fs_default)"
+    _plan_custom__types="roottype=${_plan_custom__roottype} hometype=${_plan_custom__hometype}"
     if [ "${_plan_custom__use}" != "parts" ]; then
         _plan_custom__root="$(_choice root)"; _plan_custom__home="$(_choice home)"
         _plan_custom__size="-"; _plan_custom__hsize="-"
         case "${_plan_custom__root}" in new:[1-9]*) _plan_custom__size="${_plan_custom__root#new:}" ;; *) _plan_custom__root="new" ;; esac
         case "${_plan_custom__home}" in new:[1-9]*) _plan_custom__hsize="${_plan_custom__home#new:}" ;; *) _plan_custom__home="none" ;; esac
-        choices="use=whole root=${_plan_custom__root} home=${_plan_custom__home}"
-        _plan_whole "${1}" "${_plan_custom__size}" "${_plan_custom__hsize}"
+        choices="use=whole root=${_plan_custom__root} home=${_plan_custom__home} ${_plan_custom__types}"
+        _plan_whole "${1}" "${_plan_custom__size}" "${_plan_custom__hsize}" "${_plan_custom__roottype}" "${_plan_custom__hometype}"
         return 0
     fi
 
@@ -1037,8 +1110,8 @@ _plan_custom() { #disk => on stdout the plan choices make for DISK; choices is l
                     [ "${_plan_custom__home}" != "${_plan_custom__root}" ] || _plan_custom__home="none" ;;
         *) _plan_custom__home="none" ;;
     esac
-    [ "${_plan_custom__rootfs}" = "keep" ] && [ "$(_file_system "${_plan_custom__root}")" = "ext4" ] || _plan_custom__rootfs="format"
-    [ "${_plan_custom__homefs}" = "keep" ] && [ "$(_file_system "${_plan_custom__home}")" = "ext4" ] || _plan_custom__homefs="format"
+    [ "${_plan_custom__rootfs}" = "keep" ] && [ "$(_file_system "${_plan_custom__root}")" = "${kept_fs}" ] || _plan_custom__rootfs="format"
+    [ "${_plan_custom__homefs}" = "keep" ] && [ "$(_file_system "${_plan_custom__home}")" = "${kept_fs}" ] || _plan_custom__homefs="format"
 
     #what the firmware starts from, which is the installer's to see to. UEFI: the EFI system partition
     #chosen; or this disk's; or a new one, where this disk has the room; or another disk's. BIOS on a
@@ -1127,22 +1200,47 @@ _plan_custom() { #disk => on stdout the plan choices make for DISK; choices is l
     fi
     case "${_plan_custom__root}" in
         none) ;;
-        free:*) printf "%s\n" "format ${_plan_custom__rootpart} ext4" ;;
-        *) [ "${_plan_custom__rootfs}" = "keep" ] || printf "%s\n" "format ${_plan_custom__rootpart} ext4" ;;
+        free:*) printf "%s\n" "format ${_plan_custom__rootpart} ${_plan_custom__roottype}" ;;
+        *) [ "${_plan_custom__rootfs}" = "keep" ] || printf "%s\n" "format ${_plan_custom__rootpart} ${_plan_custom__roottype}" ;;
     esac
     case "${_plan_custom__home}" in
         none) ;;
-        free:*) printf "%s\n" "format ${_plan_custom__homepart} ext4" ;;
-        *) [ "${_plan_custom__homefs}" = "keep" ] || printf "%s\n" "format ${_plan_custom__homepart} ext4" ;;
+        free:*) printf "%s\n" "format ${_plan_custom__homepart} ${_plan_custom__hometype}" ;;
+        *) [ "${_plan_custom__homefs}" = "keep" ] || printf "%s\n" "format ${_plan_custom__homepart} ${_plan_custom__hometype}" ;;
     esac
     [ -z "${_plan_custom__boot}" ] || printf "%s\n" "esp ${_plan_custom__boot}"
     [ "${_plan_custom__root}" = "none" ] || printf "%s\n" "root ${_plan_custom__rootpart}"
     [ "${_plan_custom__home}" = "none" ] || printf "%s\n" "home ${_plan_custom__homepart}"
-    choices="use=parts root=${_plan_custom__root} rootfs=${_plan_custom__rootfs} home=${_plan_custom__home} homefs=${_plan_custom__homefs} esp=${_plan_custom__esp} espfs=${_plan_custom__espfs}"
+    choices="use=parts root=${_plan_custom__root} rootfs=${_plan_custom__rootfs} home=${_plan_custom__home} homefs=${_plan_custom__homefs} esp=${_plan_custom__esp} espfs=${_plan_custom__espfs} ${_plan_custom__types}"
 }
 
 _step_mib() { #mib => what + and - change a size of MIB by: a quarter, a half or a whole GiB
     if [ "${1}" -lt 8192 ]; then printf "%s" 256; elif [ "${1}" -lt 65536 ]; then printf "%s" 512; else printf "%s" 1024; fi
+}
+
+_fs_says() { #name => the file system NAME for people, in the width of an option: its name, and what it
+    #is good at
+    printf "%-6s %s%s" "${1}" "$([ "${1}" != "$(_fs_default)" ] || printf "the default; ")" "$(_fs_field "${1}" 4)"
+}
+
+_fs_line() { #id partition what => the fs row and the line ID of the file system PARTITION gets for WHAT
+    #(minos, /home), and its options: each file system offered; none when it is kept with its files,
+    #which keeps its own
+    if [ -n "$(_plan partition "${2}")" ]; then
+        _row fs "${1}" "${3}: ${2#/dev/}, a new partition of $(_human "$(_mib_in_plan "${2}")")"
+    else
+        _row fs "${1}" "${3}: $(_part_words "${2}")"
+    fi
+    _fs_line__fs="$(_holds_in_plan "${2}")"
+    if [ -z "$(_plan format "${2}")" ]; then
+        _row line "${1}" "Filesystem" "${_fs_line__fs}, kept with its files" "its file system stays with them" off
+        return 0
+    fi
+    _row line "${1}" "Filesystem" "${_fs_line__fs}$([ "${_fs_line__fs}" != "$(_fs_default)" ] || printf ", the default")" \
+        "$(_fs_field "${_fs_line__fs}" 4)" new
+    for _fs_line__name in $(_fs_offered); do
+        _row option "${1}" "${1}=${_fs_line__name}" "$(_fs_says "${_fs_line__name}")" "$([ "${_fs_line__name}" != "${_fs_line__fs}" ] || printf current)"
+    done
 }
 
 _lines() { #disk => the line, option and size rows: the plan as lines a person changes, from choices
@@ -1189,7 +1287,7 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
         _lines__homemib=0; [ -z "${_lines__home}" ] || _lines__homemib="$(_mib_in_plan "${_lines__home}")"
         _lines__room="$((_lines__total - 2 - _lines__fixed))"
         _lines__sized="$(_choice root)"
-        _row line root "minos" "a new partition, $(_human "${_lines__rootmib}"), ext4" \
+        _row line root "minos" "a new partition, $(_human "${_lines__rootmib}"), $(_holds_in_plan "${_lines__root}")" \
             "$([ "${_lines__sized}" = "new" ] && printf "all the room there is" || printf "a size of its own: + and - change it")" new
         _row option root "root=new" "all the room there is" "$([ "${_lines__sized}" != "new" ] || printf current)"
         _lines__step="$(_step_mib "${_lines__room}")"
@@ -1200,13 +1298,15 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
             "$([ "${_lines__sized}" = "new" ] || printf current)"
         [ "${_lines__sized}" = "new" ] ||
             _row size root "root=new:" "${_lines__rootmib}" "${root_mib}" "$((_lines__room - _lines__homemib))" "${_lines__step}"
+        _fs_line roottype "${_lines__root}" minos
         if [ -z "${_lines__home}" ]; then
             _row line home "Home" "inside the partition of minos" "your files share its room" plain
         else
-            _row line home "Home" "a partition of its own, $(_human "${_lines__homemib}"), ext4" "+ and - change its size" new
+            _row line home "Home" "a partition of its own, $(_human "${_lines__homemib}"), $(_holds_in_plan "${_lines__home}")" "+ and - change its size" new
             _lines__most="$((_lines__room - root_mib))"
             [ "${_lines__sized}" = "new" ] || _lines__most="$((_lines__room - _lines__rootmib))"
             _row size home "home=new:" "${_lines__homemib}" "${home_mib}" "${_lines__most}" "${_lines__step}"
+            _fs_line hometype "${_lines__home}" /home
         fi
         _row option home "home=none" "inside the partition of minos" "$([ -n "${_lines__home}" ] || printf current)"
         _lines__own="${_lines__homemib}"
@@ -1230,8 +1330,8 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
             _lines__is="left free"; _lines__tone="off"
             for _lines__new in ${_lines__made}; do
                 case "$(_role "${_lines__new}")" in
-                    root) _lines__is="a new one for minos, $(_human "$(_mib_in_plan "${_lines__new}")")"; _lines__tone="new" ;;
-                    home) _lines__is="a new one for /home, $(_human "$(_mib_in_plan "${_lines__new}")")"; _lines__tone="new" ;;
+                    root) _lines__is="new for minos, $(_human "$(_mib_in_plan "${_lines__new}")"), $(_holds_in_plan "${_lines__new}")"; _lines__tone="new" ;;
+                    home) _lines__is="new for /home, $(_human "$(_mib_in_plan "${_lines__new}")"), $(_holds_in_plan "${_lines__new}")"; _lines__tone="new" ;;
                 esac
             done
             _row line "${_lines__id}" "free" "$(printf "%7s  %-20s  %s" "$(_human "${_lines__mib}")" "free room" "${_lines__is}")" - "${_lines__tone}"
@@ -1257,6 +1357,12 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
             [ "${_lines__mib}" -lt "${home_mib}" ] ||
                 _row option "${_lines__id}" "home=free:${_lines__start}$([ "${_lines__rootin}" != "${_lines__start}" ] || printf " root=none")" \
                     "a new partition for /home: all of this room" "$([ "${_lines__homein}" != "${_lines__start}" ] || printf current)"
+            for _lines__new in ${_lines__made}; do
+                case "$(_role "${_lines__new}")" in
+                    root) _fs_line roottype "${_lines__new}" minos ;;
+                    home) _fs_line hometype "${_lines__new}" /home ;;
+                esac
+            done
             continue
         fi
         _lines__kind="$(_kind_now "${_lines__part}")"; _lines__fs="$(_file_system "${_lines__part}")"
@@ -1267,11 +1373,11 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
                 _lines__is="stays as it is"; _lines__tone="plain"; _lines__clear=""
                 if [ "${_lines__part}" = "${_lines__root}" ]; then
                     _lines__clear="root=none"
-                    if [ -n "$(_plan format "${_lines__part}")" ]; then _lines__is="erased, for minos"; _lines__tone="erase"
+                    if [ -n "$(_plan format "${_lines__part}")" ]; then _lines__is="erased, for minos, $(_holds_in_plan "${_lines__part}")"; _lines__tone="erase"
                     else _lines__is="minos, over its files"; _lines__tone="new"; fi
                 elif [ "${_lines__part}" = "${_lines__home}" ]; then
                     _lines__clear="home=none"
-                    if [ -n "$(_plan format "${_lines__part}")" ]; then _lines__is="erased, for /home"; _lines__tone="erase"
+                    if [ -n "$(_plan format "${_lines__part}")" ]; then _lines__is="erased, for /home, $(_holds_in_plan "${_lines__part}")"; _lines__tone="erase"
                     else _lines__is="/home, its files kept"; _lines__tone="new"; fi
                 fi
                 _lines__note="-"
@@ -1283,17 +1389,19 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
                 if [ "${_lines__mib}" -ge "${root_mib}" ]; then
                     _row option "${_lines__part}" "root=${_lines__part} rootfs=format${_lines__unhome}" "erase it, use it for minos" \
                         "$([ "${_lines__part}" = "${_lines__root}" ] && [ -n "$(_plan format "${_lines__part}")" ] && printf current)"
-                    [ "${_lines__fs}" != "ext4" ] ||
+                    [ "${_lines__fs}" != "${kept_fs}" ] ||
                         _row option "${_lines__part}" "root=${_lines__part} rootfs=keep${_lines__unhome}" "copy minos over its files, not formatted" \
                             "$([ "${_lines__part}" = "${_lines__root}" ] && [ -z "$(_plan format "${_lines__part}")" ] && printf current)"
                 fi
                 if [ "${_lines__mib}" -ge "${home_mib}" ]; then
                     _row option "${_lines__part}" "home=${_lines__part} homefs=format${_lines__unroot}" "erase it, use it for /home" \
                         "$([ "${_lines__part}" = "${_lines__home}" ] && [ -n "$(_plan format "${_lines__part}")" ] && printf current)"
-                    [ "${_lines__fs}" != "ext4" ] ||
+                    [ "${_lines__fs}" != "${kept_fs}" ] ||
                         _row option "${_lines__part}" "home=${_lines__part} homefs=keep${_lines__unroot}" "use it as /home, its files kept" \
                             "$([ "${_lines__part}" = "${_lines__home}" ] && [ -z "$(_plan format "${_lines__part}")" ] && printf current)"
-                fi ;;
+                fi
+                if [ "${_lines__part}" = "${_lines__root}" ]; then _fs_line roottype "${_lines__part}" minos
+                elif [ "${_lines__part}" = "${_lines__home}" ]; then _fs_line hometype "${_lines__part}" /home; fi ;;
             esp)
                 if [ "${firmware}" != "uefi" ]; then
                     _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  stays as it is" "an EFI system partition: not used, this computer starts by BIOS" off
@@ -1343,7 +1451,9 @@ _edit() { #disk file => the edit verb: choices made a plan in FILE, and its rows
     scratch="$(mktemp)" || _die "no temporary file"
     free="$(_free "${1}")"
     _edit__keyboard="$(_choice keyboard)"; _edit__timezone="$(_choice timezone)"
-    [ -n "$(printf "%s" "${choices}" | sed 's/keyboard=[^ ]*//; s/timezone=[^ ]*//; s/ //g')" ] || choices="$(_choices_default "${1}")"
+    #with nothing chosen of the disk, the choices the engine suggests; the file systems chosen go with them
+    [ -n "$(printf "%s" "${choices}" | sed 's/keyboard=[^ ]*//; s/timezone=[^ ]*//; s/roottype=[^ ]*//; s/hometype=[^ ]*//; s/ //g')" ] ||
+        choices="$(_choices_default "${1}") ${choices}"
     _plan_custom "${1}" > "${scratch}"
     #the keyboard the password was typed with, which is no matter of disks: said as it was chosen
     case "${_edit__keyboard}" in
@@ -1402,15 +1512,18 @@ _password_refusal() { #password => why minos does not take it; nothing when it d
 # The plan applied
 ################################################################################
 
-_format() { #partition fat32|ext4 label => a new file system on it; FAT with dosfstools or, where a system
-    #goes without them, with busybox
+_format() { #partition fat32|FS label => a new file system on it: FAT with dosfstools or, where a system
+    #goes without them, with busybox; another with the mkfs of its line in filesystems, its own defaults
     case "${2}" in
-        ext4) mkfs.ext4 -q -F -L "${3}" "${1}" ;;
         fat32) if command -v mkfs.vfat >/dev/null 2>&1; then
                    mkfs.vfat -F 32 -n EFI "${1}"
                else
                    busybox mkdosfs -F 32 -n EFI "${1}"
                fi ;;
+        *) _format__mkfs="$(_fs_field "${2}" 3)"
+           [ -n "${_format__mkfs}" ] || { printf "%s\n" "${2} is no file system the engine makes" >&2; return 1; }
+           # shellcheck disable=SC2086 # the command and its options, a word each
+           ${_format__mkfs} "${3}" "${1}" ;;
     esac
 }
 
@@ -1553,8 +1666,8 @@ done
 [ "${#}" -ge 1 ] || _usage
 verb="${1}"; shift
 case "${firmware}" in ""|uefi|bios) ;; *) _usage ;; esac
-#the keyboard is the session's, not a disk's: asked and set by whoever the session is; and the list of
-#time zones is anybody's to read
+#the keyboard is the session's, not a disk's: asked and set by whoever the session is; and the lists of
+#time zones and of file systems are anybody's to read
 case "${verb}" in
     keyboard)
         case "${1:-}" in
@@ -1566,6 +1679,7 @@ case "${verb}" in
     keyboards) _keyboard_list; exit 0 ;;
     timezone) _timezone_default; printf "\n"; exit 0 ;;
     timezones) _timezone_list; exit 0 ;;
+    filesystems) _fs_list; exit 0 ;;
 esac
 [ "$(id -u)" = 0 ] || _die "runs as root"
 
@@ -1641,7 +1755,7 @@ case "${verb}" in
         _edit__disk="${1}"; _edit__file="${2}"; shift 2
         for _edit__word; do
             case "${_edit__word}" in
-                use=*|root=*|rootfs=*|home=*|homefs=*|esp=*|espfs=*|keyboard=*|timezone=*) choices="${choices}${choices:+ }${_edit__word}" ;;
+                use=*|root=*|rootfs=*|roottype=*|home=*|homefs=*|hometype=*|esp=*|espfs=*|keyboard=*|timezone=*) choices="${choices}${choices:+ }${_edit__word}" ;;
                 *) _die "${_edit__word} is no choice" ;;
             esac
         done

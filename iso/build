@@ -409,6 +409,16 @@ _install_bootstrap() { #root => debootstrap and wget in ROOT: the minos installe
     _chroot "${1}" apt-get install -y --no-install-recommends debootstrap wget
 }
 
+_install_filesystems() { #root => the tools of the file systems the installer offers, as its engine lists
+    #them (its filesystems verb): it makes them, and a system copied from the live one keeps them, to
+    #check and mend what it was put on
+    _install_filesystems__packages="$(sh "${here}/installer/minos-installer-engine" filesystems | cut -f3 | tr '\n' ' ')"
+    [ -n "${_install_filesystems__packages}" ] || _die "the installer's engine lists no file system"
+    _step "the tools of the file systems the installer offers: ${_install_filesystems__packages}"
+    # shellcheck disable=SC2086 # the packages, a word each
+    _chroot "${1}" apt-get install -y --no-install-recommends ${_install_filesystems__packages}
+}
+
 _slim_root() { #root => ROOT carrying what every system the minos installer's live mode makes carries, so a
     #system copied from it is the one live mode would bootstrap: the security updates applied by
     #themselves and do-release-upgrade installed, and what Ubuntu's base brings and minos does not use
@@ -867,6 +877,7 @@ _step "${kernel}: installed"
 _chroot "${root}" apt-get install -y --no-install-recommends "${kernel}"
 _install_minos "${root}"
 _install_bootstrap "${root}"
+_install_filesystems "${root}"
 _slim_root "${root}"
 _make_live "${root}"
 _install_plugins "${root}"

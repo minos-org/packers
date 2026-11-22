@@ -171,7 +171,16 @@ the cursor and the other naming what it erases; the install as it happens; the e
 line by line without leaving the installer: another disk, the whole disk or its partitions and free room,
 a partition to replace or to keep, a size for minos, a partition for `/home`, each change made a new plan
 by the engine (`edit DISK FILE CHOICE...`) and checked by it before it is shown; `r` goes back to the one
-proposed. Nothing is written before the confirmation, and what the firmware starts from (an EFI system
+proposed. `f` chooses the file system of each partition the plan makes or formats for minos and for
+`/home`: ext4 (the default), btrfs or xfs, the three Ubuntu's own installer offers, each with a line on
+what it is good at; with a partition for `/home` too, one visit sets both (Space marks one, Enter takes
+what is marked). The plan's words say them, and the plan line by line has a line for each, which changes
+it there too. A partition kept with its files keeps its ext4. `setup` puts a btrfs's `/` in the subvolume
+`@` and, when `/home` has no partition of its own, `/home` in `@home`, the layout Ubuntu-family snapshot
+tools expect; nothing is compressed, and each is made with its release's own `mkfs` defaults. The engine
+names the three in one list (its `filesystems` verb), from which the ISO's build takes their tools
+(`btrfs-progs`, `xfsprogs`), which a copied system keeps; their kernel modules are among the file systems
+the ISO keeps. Nothing is written before the confirmation, and what the firmware starts from (an EFI system
 partition, GRUB's own on a GPT that BIOS starts) is the engine's to see to: it is in every plan that needs
 it, kept when it is there, made when there is room. A disk that holds something gets no plan that deletes
 it until that is chosen. The password goes to `setup` on its standard input (`live ... USER - --now`), and

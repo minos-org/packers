@@ -16,7 +16,8 @@
 #try, which must fail and leave the unit enabled.
 #The disk is read here after each boot: the files dpkg --verify finds missing, what the copy left out, the
 #boot loader, the boot's journal, the user's password, and what the plan was to keep.
-#usage: [PHASES="install boot [untrim]"] [LAYOUT=empty|beside|home] [KEYBOARD=LAYOUT] [ZONE=ZONE] [INSTALLER=DIR] install-check ISO FIRMWARE DISK OUTPUT [MINUTES]
+#usage: [PHASES="install boot [untrim]"] [LAYOUT=empty|beside|home] [FS=FS[:FS]] [KEYBOARD=LAYOUT] [ZONE=ZONE] [INSTALLER=DIR]
+#       install-check ISO FIRMWARE DISK OUTPUT [MINUTES]
 #  FIRMWARE    bios, uefi or secureboot
 #  DISK        sata or nvme, the disk minos goes to
 #  PHASES      install (the live session, the installer answered), boot (the disk alone, no network),
@@ -30,6 +31,12 @@
 #              there after the install; NAME gets -beside. home: the disk has nothing, and the plan
 #              is changed to give /home a partition of its own, which the disk must then mount with
 #              the user's home in it; NAME gets -home
+#  FS          the file system of the partition for minos (btrfs, xfs: one of the engine's), and after a
+#              colon the one of /home's own partition: chosen on the plan with the installer's key (f),
+#              after which the plan must say them; the disk must hold them, fstab mount them (btrfs on
+#              its subvolume @, and /home on @home when it has no partition of its own), its initramfs
+#              carry their module and their check, and their tools be installed. Without FS, ext4, the
+#              default, which is taken as proposed. NAME gets -FS, - for the colon
 #  KEYBOARD    latam: on the step of the user the keyboard is changed to it, before the password is
 #              typed: Tab to its field, Enter, its code typed into the list, Enter; F2, F3 and F4,
 #              pressed there first, must change nothing. The password is typed by its keys, the same
@@ -55,8 +62,14 @@
 set -eu
 iso="${1:-}"; firmware="${2:-}"; disk="${3:-}"; out="${4:-}"; minutes="${5:-15}"
 phases="${PHASES:-install boot}"; layout="${LAYOUT:-empty}"
-if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '19,51s/^#//p' "${0}" >&2; exit 2; fi
+if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '19,58s/^#//p' "${0}" >&2; exit 2; fi
 name="${firmware}-${disk}"; [ "${layout}" = "empty" ] || name="${name}-${layout}"
+fs="${FS:-}"; root_fs="${fs%%:*}"; home_fs=""
+case "${fs}" in *:*) home_fs="${fs#*:}" ;; esac
+[ -z "${fs}" ] || name="${name}-$(printf "%s" "${fs}" | tr ':' '-')"
+#the file systems the installer offers, as the engine beside this script lists them: the live session has
+#the tools of every one
+fs_list="$(sh "${INSTALLER:-$(dirname "${0}")/installer}/minos-installer-engine" filesystems)"
 [ -z "${KEYBOARD:-}" ] || name="${name}-${KEYBOARD}"
 zone="${ZONE:-}"; city="$(printf "%s" "${zone##*/}" | tr '[:upper:]_' '[:lower:] ')"
 [ -z "${zone}" ] || name="${name}-$(printf "%s" "${city}" | tr ' ' '-')"
@@ -135,7 +148,17 @@ ${i3} exec "env MINOS_INSTALLER_EFFECTS=off minos-installer --window" > /dev/nul
 last=""
 while :; do
     title="$(${i3} -t get_tree 2>/dev/null | grep -o '"name":"minos installer[^"]*"' | head -n 1 | cut -d'"' -f4)"
-    [ "${title}" = "${last}" ] || { _say "screen: ${title:-closed}"; last="${title}"; }
+    if [ "${title}" != "${last}" ]; then
+        _say "screen: ${title:-closed}"; last="${title}"
+        #a view of the plan: what its actions say, read by the engine from the plan the installer holds
+        #(its directory of mktemp's), and then that they were said
+        case "${title}" in "minos installer - plan"*)
+            plan="$(ls -t /tmp/tmp.*/plan 2>/dev/null | head -n 1)"
+            [ -z "${plan}" ] || minos-installer-engine review "${plan}" 2>/dev/null | awk -F '\t' '$1 == "action" {print $3}' |
+                while IFS= read -r line; do _say "plan action: ${line}"; done
+            _say "plan said" ;;
+        esac
+    fi
     sleep 1
 done
 E=O=F
@@ -190,6 +213,64 @@ _wait_screen() { #name seconds => true when the installer's window says it shows
     _wait_serial "probe: screen: minos installer - ${1}" "${2}" || { _screen timeout; _die "the installer did not get to its screen \"${1}\": $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
     #drawn, and its engine through
     sleep 1
+}
+
+_fs_index() { #name => its row among the file systems the installer offers (fs_list), from 1
+    printf "%s\n" "${fs_list}" | awk -F '\t' -v name="${1}" '$1 == name {print NR; found = 1} END {exit !found}' ||
+        _die "${1} is no file system the installer offers: $(printf "%s\n" "${fs_list}" | cut -f1 | tr '\n' ' ')"
+}
+
+_plan_said() { #=> waited, a minute at most, until the probe has said the plan for each view of it the window's
+    #title has named
+    _wait_serial_count "probe: plan said" "$(_count_serial "probe: screen: minos installer - plan")" 60 ||
+        { _screen timeout; _die "the probe did not say the plan: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
+}
+
+_plan_says() { #=> what the plan's actions said of the file systems of minos and /home, the last time the plan
+    #was shown (its window's title back to plan, when the probe says them): minos FS[, /home FS]
+    tr -d '\r' < "${serial}" | awk '
+        function fs_of(line, part,    m) {
+            if (match(line, "partition for " part " [(][^)]*[)]")) {
+                m = substr(line, RSTART, RLENGTH); sub(/[)]$/, "", m); sub(/.*, /, "", m); return m
+            }
+            if (match(line, "formatted as [a-z0-9]+ for " part)) {
+                m = substr(line, RSTART, RLENGTH); sub(/^formatted as /, "", m); sub(/ for .*/, "", m); return m
+            }
+            return ""
+        }
+        $0 == "probe: screen: minos installer - plan" {root = ""; home = ""; on = 1; next}
+        /^probe: screen: / {on = 0}
+        on && /^probe: plan action: / {m = fs_of($0, "minos"); if (m != "") root = m; m = fs_of($0, "/home"); if (m != "") home = m}
+        END {if (root != "") printf "minos %s", root; if (home != "") printf ", /home %s", home; print ""}'
+}
+
+_choose_fs() { #=> the file systems FS says chosen on the plan, by the installer's key (f) and its chooser: the
+    #cursor starts on the one minos has; with /home's own partition, Space marks minos' and the cursor goes
+    #on to /home's, three rows on; Enter takes them. The plan must then say them
+    _plan_said; _choose_fs__before="$(_plan_says)"; _choose_fs__views="$(_count_serial "probe: screen: minos installer - plan")"
+    _press f
+    _wait_screen "plan filesystems" 30
+    _choose_fs__at="$(_fs_index "$(printf "%s\n" "${fs_list}" | awk -F '\t' '$2 == "default" {print $1}')")"
+    _choose_fs__to="$(_fs_index "${root_fs}")"
+    while [ "${_choose_fs__at}" -lt "${_choose_fs__to}" ]; do _press j; _choose_fs__at="$((_choose_fs__at + 1))"; done
+    if [ -n "${home_fs}" ]; then
+        _press spc
+        _choose_fs__to="$(($(printf "%s\n" "${fs_list}" | grep -c .) + $(_fs_index "${home_fs}")))"
+        while [ "${_choose_fs__at}" -lt "${_choose_fs__to}" ]; do _press j; _choose_fs__at="$((_choose_fs__at + 1))"; done
+    fi
+    sleep 2
+    _screen filesystems
+    _press ret
+    #two views of the plan more, the chooser's and the plan's again, each said by the probe
+    _wait_serial_count "probe: screen: minos installer - plan" "$((_choose_fs__views + 2))" 30 ||
+        { _screen timeout; _die "the installer did not go back to its plan from the chooser of file systems: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
+    _plan_said
+    _choose_fs__after="$(_plan_says)"
+    _choose_fs__want="minos ${root_fs}${home_fs:+, /home ${home_fs}}"
+    [ "${_choose_fs__after}" = "${_choose_fs__want}" ] ||
+        { _screen timeout; _die "after f the plan says ${_choose_fs__after:-no file system}, not ${_choose_fs__want}; before it said ${_choose_fs__before:-none}"; }
+    printf "%s\n" "plan file systems: before f: ${_choose_fs__before}; after: ${_choose_fs__after}" >> "${facts}"
+    _step "the file systems chosen on the plan (f): ${_choose_fs__after}"
 }
 
 _open_edit() { #=> the plan shown, opened line by line as a person opens it: p, which is no key of the plan,
@@ -285,7 +366,13 @@ _read_disk() { #title => NAME.facts gets TITLE and what the disk holds: the file
     #one its fstab mounts on /boot/efi
     _read_disk__part="$(blkid -t LABEL=minos -o device "${_read_disk__loop}"p* | head -n 1)"
     [ -n "${_read_disk__part}" ] || { losetup -d "${_read_disk__loop}"; _die "no partition labelled minos on the disk"; }
-    mount "${_read_disk__part}" "${_read_disk__root}"
+    #a btrfs holds minos in its subvolume @
+    _read_disk__type="$(blkid -o value -s TYPE "${_read_disk__part}")"
+    if [ "${_read_disk__type}" = "btrfs" ]; then
+        mount -o subvol=@ "${_read_disk__part}" "${_read_disk__root}"
+    else
+        mount "${_read_disk__part}" "${_read_disk__root}"
+    fi
     _read_disk__esp="$(awk '$2 == "/boot/efi" {sub(/^UUID=/, "", $1); print $1}' "${_read_disk__root}/etc/fstab")"
     [ -z "${_read_disk__esp}" ] || _read_disk__esp="$(blkid -t UUID="${_read_disk__esp}" -o device "${_read_disk__loop}"p* | head -n 1)"
     esp_number="${_read_disk__esp##*p}"
@@ -387,6 +474,27 @@ _read_disk() { #title => NAME.facts gets TITLE and what the disk holds: the file
         #what that zone is called and how far from UTC it is now, by the disk's own zone files
         printf "clock: zone file: %s (%s)\n" "${_read_disk__zone}" "$(chroot "${_read_disk__root}" env TZ="${_read_disk__zone}" date '+%Z, %z' 2>&1)"
         sed 's/^/fstab: /' "${_read_disk__root}/etc/fstab"
+        #the file systems of / and /home, as the disk holds them and as its fstab mounts them; a btrfs's
+        #subvolumes, its initramfs's modules and checks of them, and their tools, by the disk's own
+        #btrfs, lsinitramfs and dpkg
+        _read_disk__said=""
+        for _read_disk__mount in / /home; do
+            _read_disk__line="$(awk -v mount="${_read_disk__mount}" '$2 == mount {print $1, $3, $4, $5, $6; exit}' "${_read_disk__root}/etc/fstab")"
+            [ -n "${_read_disk__line}" ] || continue
+            _read_disk__holds="$(blkid -t "${_read_disk__line%% *}" -o value -s TYPE "${_read_disk__loop}"p* 2>/dev/null | head -n 1)"
+            _read_disk__said="${_read_disk__said}${_read_disk__said:+, }${_read_disk__mount} ${_read_disk__holds:-nothing} (fstab ${_read_disk__line#* })"
+        done
+        if [ "${_read_disk__type}" = "btrfs" ]; then
+            _read_disk__said="${_read_disk__said}; subvolumes $(chroot "${_read_disk__root}" btrfs subvolume list / 2>&1 | awk '{printf "%s%s", (n++ ? " " : ""), $NF}')"
+        fi
+        _read_disk__initrd="$(find "${_read_disk__root}/boot" -maxdepth 1 -name 'initrd.img-*' | sort | tail -n 1)"
+        _read_disk__said="${_read_disk__said}; initramfs $(chroot "${_read_disk__root}" lsinitramfs "/boot/${_read_disk__initrd##*/}" 2>/dev/null |
+            grep -E '/(btrfs|xfs|f2fs)\.ko(\.[a-z]+)?$|/(fsck\.(btrfs|xfs|ext4)|btrfs|xfs_repair|e2fsck)$' | sed 's|.*/||' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+        # shellcheck disable=SC2016 # dpkg-query's format, not the shell's
+        _read_disk__said="${_read_disk__said}; tools $(for _read_disk__package in e2fsprogs btrfs-progs xfsprogs; do
+            printf "%s %s, " "${_read_disk__package}" "$(chroot "${_read_disk__root}" dpkg-query -W -f='${db:Status-Abbrev}' "${_read_disk__package}" 2>/dev/null | tr -d ' ')"
+            done | sed 's/ ,/ absent,/g; s/, $//')"
+        printf "file systems: %s\n" "${_read_disk__said}"
         printf "boot: %s\n" "$(cd "${_read_disk__root}/boot" && find . -maxdepth 2 \( -name 'vmlinuz-*' -o -name 'initrd.img-*' -o -path ./grub/grub.cfg \) | sort | tr '\n' ' ')"
         [ -z "${esp_number}" ] || printf "esp: %s\n" "$(cd "${_read_disk__root}/boot/efi" && find . -type f | sort | tr '\n' ' ')"
         printf "kernels: %s\n" "$(find "${_read_disk__root}/usr/lib/modules" -mindepth 1 -maxdepth 1 -printf '%f ')"
@@ -484,21 +592,27 @@ case " ${phases} " in *" install "*)
         _press j ret; sleep 3
         _press minus; sleep 3
         _press minus; sleep 3
-        _screen plan
-        _press n
     elif [ "${layout}" = "home" ]; then
         #the plan proposed, the whole disk, changed line by line (c); down to the line of /home (after what
-        #is used, what the firmware starts from and the partition of minos); Enter opens its choices; the
-        #next one, a partition of its own
+        #is used, what the firmware starts from, the partition of minos and its file system); Enter opens
+        #its choices; the next one, a partition of its own
         _open_edit
-        _press j j j
+        _press j j j j
         _press ret; sleep 1
         _press j ret; sleep 3
-        _screen plan
-        _press n
-    else
+    fi
+    if [ -n "${fs}" ]; then
+        #the file systems, chosen on the plan itself: back to it from the plan line by line
+        [ "${layout}" = "empty" ] || { _press esc; _wait_serial_count "probe: screen: minos installer - plan[[:cntrl:]]*\$" 2 30 || _die "Esc did not go back to the plan"; }
+        _choose_fs
         _screen plan
         _press ret
+    elif [ "${layout}" = "empty" ]; then
+        _screen plan
+        _press ret
+    else
+        _screen plan
+        _press n
     fi
     _wait_screen "user" 60
     #before anything is chosen, the step shows the zone an install starts on
@@ -677,6 +791,35 @@ if [ "${layout}" = "home" ]; then
     grep -q "^home: its own partition, [0-9]*M, mounted on /home by fstab; in it: ${user} " "${facts}" ||
         _die "/home is not on a partition of its own with ${user}'s home in it"
 fi
+#each reading: / and /home on the file systems chosen (FS), or on the default, ext4; a btrfs mounted from its
+#subvolumes, /home from @home when it has no partition of its own; the initramfs with the module and the
+#check of / when it is not ext4 (ext4's are the kernel's own and e2fsprogs'; /home is checked once / is
+#mounted, by the system's own fsck), and the tools of each installed
+_judge_fs() { #mount fs => what is wrong with the file system of MOUNT in the readings, FS by FS; nothing when right
+    _judge_fs__options=""
+    case "${1}:${2}" in
+        /:btrfs) _judge_fs__options="subvol=@ " ;;
+        /home:btrfs) [ -n "${home_fs}" ] || _judge_fs__options="subvol=@home " ;;
+    esac
+    _judge_fs__package="$(printf "%s\n" "${fs_list}" | awk -F '\t' -v name="${2}" '$1 == name {print $3}')"
+    grep '^file systems: ' "${facts}" | while IFS= read -r _judge_fs__line; do
+        case "${_judge_fs__line}" in *" ${1} ${2} (fstab ${2} ${_judge_fs__options}"*) ;; *) printf "%s is not %s %s: %s\n" "${1}" "${2}" "${_judge_fs__options}" "${_judge_fs__line}" ;; esac
+        case "${_judge_fs__line}" in *" ${_judge_fs__package} ii"*) ;; *) printf "%s is not installed: %s\n" "${_judge_fs__package}" "${_judge_fs__line}" ;; esac
+        _judge_fs__initramfs="${_judge_fs__line#*; initramfs }"; _judge_fs__initramfs=" ${_judge_fs__initramfs%%;*} "
+        [ "${2}" = "ext4" ] || [ "${1}" != "/" ] || case "${_judge_fs__initramfs}" in
+            *" ${2}.ko"*) case "${_judge_fs__initramfs}" in *" fsck.${2} "*) ;; *) printf "the initramfs has no fsck.%s: %s\n" "${2}" "${_judge_fs__line}" ;; esac ;;
+            *) printf "the initramfs has no module %s: %s\n" "${2}" "${_judge_fs__line}" ;;
+        esac
+        [ "${1}:${2}" != "/:btrfs" ] || case "${_judge_fs__line}" in
+            *"; subvolumes @ @home;"*|*"; subvolumes @home @;"*) ;;
+            *"; subvolumes @;"*) [ -n "${home_fs}" ] || printf "the btrfs has no subvolume @home: %s\n" "${_judge_fs__line}" ;;
+            *) printf "the btrfs has not its subvolumes: %s\n" "${_judge_fs__line}" ;;
+        esac
+    done
+}
+_fs__wrong="$(_judge_fs / "${root_fs:-ext4}"
+    if [ -n "${home_fs}" ]; then _judge_fs /home "${home_fs}"; elif [ "${root_fs}" = "btrfs" ]; then _judge_fs /home btrfs; fi)"
+[ -z "${_fs__wrong}" ] || _die "the disk's file systems are not the ones chosen: $(printf "%s" "${_fs__wrong}" | head -n 3 | tr '\n' ' ')"
 case " ${phases} " in *" boot "*)
     #the reading after the boot with no network: on a copy of the ISO, minos-untrim tried, failed for want
     #of an archive, and stays enabled to try again

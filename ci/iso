@@ -6,9 +6,10 @@
 #among it; the session boots with the network's cable out too, and must come up all the same, with its
 #plugins. Then minos is installed from the live session, its installer answered by its keys, onto an empty
 #disk with no network, by UEFI and by BIOS (with another keyboard and another time zone than the session's,
-#chosen in the installer), and beside what a disk holds; each disk boots alone with the same keys for its
-#password and says its time zone, by UEFI
-#with a network as well, once minos-untrim has given it back what the ISO left out (iso/install-check).
+#chosen in the installer), and beside what a disk holds; on btrfs by BIOS, and on xfs with /home on a btrfs
+#by UEFI, chosen on the plan; each disk boots alone with the same keys for its password and says its time
+#zone, by UEFI with a network as well, once minos-untrim has given it back what the ISO left out
+#(iso/install-check).
 #One line per check; ci/verdict iso reads them.
 #usage: [SETUP=FILE|URL] [MIRROR=URI] ci/iso RELEASE
 #  MIRROR, the Ubuntu archive the build fetches from: by default the one this machine's apt reads
@@ -56,15 +57,16 @@ _live() { #label firmware medium cable => LABEL's line, and with the cable in (y
     rm -f "${_live__serial}.lines"
 }
 
-_install() { #label firmware disk phases [layout [keyboard [zone]]] => LABEL's line; the disk's facts, serial
-    #log and screens to the logs
+_install() { #label firmware disk phases [layout [keyboard [zone [fs]]]] => LABEL's line; the disk's facts,
+    #serial log and screens to the logs
     _install__name="${2}-${3}"; [ "${5:-empty}" = "empty" ] || _install__name="${_install__name}-${5}"
+    [ -z "${8:-}" ] || _install__name="${_install__name}-$(printf "%s" "${8}" | tr ':' '-')"
     [ -z "${6:-}" ] || _install__name="${_install__name}-${6}"
     #as iso/install-check names the run: the city of the zone, in lower case
     [ -z "${7:-}" ] || _install__name="${_install__name}-$(printf "%s" "${7##*/}" | tr '[:upper:]_' '[:lower:]-')"
     _install__log="${logs}/install-${_install__name}.log"
     _install__start="$(date +%s)"
-    PHASES="${4}" LAYOUT="${5:-empty}" KEYBOARD="${6:-}" ZONE="${7:-}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${tmp}/install" 20 > "${_install__log}" 2>&1
+    PHASES="${4}" LAYOUT="${5:-empty}" KEYBOARD="${6:-}" ZONE="${7:-}" FS="${8:-}" sh "${w}/iso/install-check" "${iso}" "${2}" "${3}" "${tmp}/install" 20 > "${_install__log}" 2>&1
     _install__status="${?}"; _install__secs="$(($(date +%s) - _install__start))"
     mkdir -p "${logs}/install"
     for _install__file in "${tmp}/install/${_install__name}".facts "${tmp}/install/${_install__name}".serial.log \
@@ -136,6 +138,14 @@ _install "install bios sata, keyboard, zone" bios sata "install boot" empty lata
 _install "install uefi nvme, beside" uefi nvme "install boot" beside
 #the plan opened line by line by its key, c, and not by p, which was its key before
 _line "plan, c and p" "$(sed -n 's/^plan keys: //p' "${logs}/install/uefi-nvme-beside.facts" 2>/dev/null | head -n 1)"
+#the file systems the installer offers besides ext4, each installed once and booted, on the two firmwares:
+#btrfs for minos and /home in its subvolumes, by BIOS; by UEFI xfs for minos and a btrfs of its own for
+#/home, both chosen on the plan in one visit of its chooser (f), which the plan must then say
+_install "install bios sata, btrfs" bios sata "install boot" empty "" "" btrfs
+_line "file systems, bios btrfs" "$(sed -n 's/^file systems: //p' "${logs}/install/bios-sata-btrfs.facts" 2>/dev/null | tail -n 1)"
+_install "install uefi sata, xfs, home btrfs" uefi sata "install boot" home "" "" xfs:btrfs
+_line "file systems, uefi xfs, home btrfs" "$(sed -n 's/^file systems: //p' "${logs}/install/uefi-sata-home-xfs-btrfs.facts" 2>/dev/null | tail -n 1)"
+_line "plan, f" "$(sed -n 's/^plan file systems: //p' "${logs}/install/uefi-sata-home-xfs-btrfs.facts" 2>/dev/null | head -n 1)"
 rm -rf "${tmp}/install"
 printf "%s\\n" "--- ${name}.iso took $(($(date +%s) - began))s"
 

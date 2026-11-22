@@ -97,6 +97,16 @@ awk -v flavour="${flavour}" -v release="${release}" '
             must("^install uefi nvme, beside$", "^ok ")
             #where it was changed by its key, c: p, the key before, leaves the plan as it is
             must("^plan, c and p$", "^p left the plan as it was; c opened it line by line$")
+            #the file systems the installer offers besides ext4, each installed and booted (iso/install-check): btrfs
+            #by BIOS, minos and /home on its subvolumes @ and @home; by UEFI xfs, and /home on a btrfs of its own.
+            #Each mounted by fstab, its module and its check in the initramfs, its tools installed
+            must("^install bios sata, btrfs$", "^ok ")
+            must("^file systems, bios btrfs$", "^/ btrfs [(]fstab btrfs subvol=@ 0 1[)], /home btrfs [(]fstab btrfs subvol=@home 0 2[)]; subvolumes @ @home; initramfs ([^;]* )?btrfs[.]ko[^;]* fsck[.]btrfs[ ;].* btrfs-progs ii")
+            must("^install uefi sata, xfs, home btrfs$", "^ok ")
+            must("^file systems, uefi xfs, home btrfs$", "^/ xfs [(]fstab xfs defaults 0 1[)], /home btrfs [(]fstab btrfs defaults 0 2[)]; initramfs [^;]*fsck[.]xfs[^;]* xfs[.]ko[^;]*; tools .* btrfs-progs ii, xfsprogs ii$")
+            #both chosen on the plan by its key (f), in one visit of the chooser: the plan said ext4 before, and
+            #then what was chosen
+            must("^plan, f$", "^before f: minos ext4, /home ext4; after: minos xfs, /home btrfs$")
         } else {
             common(flavour, "vagrant")
             must("^packer build \\(ppa\\)$", "^ok ")

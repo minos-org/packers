@@ -322,15 +322,35 @@ _frame() { #step key label... => the frame of a screen: the installer's name and
     _keys "${@}"
 }
 
-_keys() { #key label... => the row of keys at the bottom of the frame
+_keys() { #key label... => the row of keys at the bottom of the frame, 3 columns apart. A row that does not
+    #fit the body's width has them 2 apart; one that still does not, first without the keys that do
+    #nothing here (~), then 1 apart
+    _keys__try=1
+    while :; do
+        case "${_keys__try}" in
+            1) _keys__gap=3; _keys__dimmed="yes" ;; 2) _keys__gap=2; _keys__dimmed="yes" ;;
+            3) _keys__gap=3; _keys__dimmed="" ;; 4) _keys__gap=2; _keys__dimmed="" ;; *) _keys__gap=1; _keys__dimmed="" ;;
+        esac
+        _keys__width="$((0 - _keys__gap))"; _keys__key=""
+        for _keys__word; do
+            if [ -z "${_keys__key}" ]; then _keys__key="${_keys__word}"; continue; fi
+            case "${_keys__key}" in "~"*) [ -n "${_keys__dimmed}" ] || { _keys__key=""; continue; } ;; esac
+            _keys__key="${_keys__key#"~"}"
+            _keys__width="$((_keys__width + _keys__gap + ${#_keys__key} + 1 + ${#_keys__word}))"; _keys__key=""
+        done
+        if [ "${_keys__width}" -le "${body_columns}" ] || [ "${_keys__try}" -ge 5 ]; then break; fi
+        _keys__try="$((_keys__try + 1))"
+    done
+    _rep " " "${_keys__gap}"; _keys__space="${rep}"
     screen="${screen}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H${blank_row}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H"
     _keys__gap=""
     while [ "${#}" -ge 2 ]; do
         case "${1}" in
-            "~"*) screen="${screen}${_keys__gap}${s_dim}${1#"~"} ${2}${s_off}" ;;
-            *) screen="${screen}${_keys__gap}${s_bold}${1}${s_off} ${2}" ;;
+            "~"*) if [ -n "${_keys__dimmed}" ]; then
+                      screen="${screen}${_keys__gap}${s_dim}${1#"~"} ${2}${s_off}"; _keys__gap="${_keys__space}"
+                  fi ;;
+            *) screen="${screen}${_keys__gap}${s_bold}${1}${s_off} ${2}"; _keys__gap="${_keys__space}" ;;
         esac
-        _keys__gap="   "
         shift 2
     done
 }
@@ -447,7 +467,7 @@ _load() { #=> the plan choices make for disk, as the engine makes it: the plan i
     #the r_ variables, choices as the engine took them. False when the engine fails; what it said is
     #in errors
     r_problems=""; r_problem_count=0; r_now=""; r_after=""; r_actions=""; r_lines=""; r_line_count=0
-    r_options=""; r_sizes=""; r_loss_kind="none"; r_loss=""; r_button_kind="plain"; r_button=""; r_disk=""
+    r_options=""; r_sizes=""; r_fs=""; r_loss_kind="none"; r_loss=""; r_button_kind="plain"; r_button=""; r_disk=""
     # shellcheck disable=SC2086 # the choices, a word each
     _load__rows="$(_engine edit "${disk}" "${plan}" ${choices} 2>"${errors}")" || return 1
     while IFS="${c_tab}" read -r _load__tag _load__rest; do
@@ -457,6 +477,7 @@ _load() { #=> the plan choices make for disk, as the engine makes it: the plan i
             line) r_lines="${r_lines}${_load__rest}${c_nl}"; r_line_count="$((r_line_count + 1))" ;;
             option) r_options="${r_options}${_load__rest}${c_nl}" ;;
             size) r_sizes="${r_sizes}${_load__rest}${c_nl}" ;;
+            fs) r_fs="${r_fs}${_load__rest}${c_nl}" ;;
             problem) r_problems="${r_problems}${_load__rest}${c_nl}"; r_problem_count="$((r_problem_count + 1))" ;;
             now) r_now="${r_now}${_load__rest}${c_nl}" ;;
             after) r_after="${r_after}${_load__rest}${c_nl}" ;;
@@ -1089,9 +1110,95 @@ E=O=F
     _rest "${row}"
 }
 
+_fs_choices() { #=> fs_rows, what the chooser of file systems offers, "id words text" a line: for each
+    #partition the plan makes or formats for minos or for /home (the engine's fs rows, in their order),
+    #the file systems it can be made with (the options of its line); fs_count, how many; fs_groups, how
+    #many partitions have them; fs_marks, the words of the one each has now; fs_at, the first of those
+    fs_rows=""; fs_count=0; fs_groups=0; fs_marks=""; fs_at=0
+    while IFS="${c_tab}" read -r _fs_choices__id _; do
+        [ -n "${_fs_choices__id}" ] || continue
+        _options_of "${_fs_choices__id}"
+        [ "${option_count}" -gt 1 ] || continue
+        fs_groups="$((fs_groups + 1))"
+        while IFS="${c_tab}" read -r _fs_choices__words _fs_choices__text _fs_choices__current; do
+            [ -n "${_fs_choices__words}" ] || continue
+            fs_rows="${fs_rows}${_fs_choices__id}${c_tab}${_fs_choices__words}${c_tab}${_fs_choices__text}${c_nl}"
+            fs_count="$((fs_count + 1))"
+            if [ "${_fs_choices__current}" = "current" ]; then
+                fs_marks="${fs_marks}${fs_marks:+ }${_fs_choices__words}"
+                [ "${fs_at}" -gt 0 ] || fs_at="${fs_count}"
+            fi
+        done << E=O=F
+${options}
+E=O=F
+    done << E=O=F
+${r_fs}
+E=O=F
+    [ "${fs_at}" -gt 0 ] || fs_at=1
+}
+
+_fs_words_at() { #n => fs_words, the words of row N of fs_rows
+    fs_words="$(printf "%s" "${fs_rows}" | sed -n "${1}p" | cut -f2)"
+}
+
+_fs_mark() { #words => fs_marks with WORDS (KEY=VALUE) in the place of the one of its key: marked
+    _fs_mark__kept=""
+    for _fs_mark__old in ${fs_marks}; do
+        [ "${_fs_mark__old%%=*}" = "${1%%=*}" ] || _fs_mark__kept="${_fs_mark__kept}${_fs_mark__kept:+ }${_fs_mark__old}"
+    done
+    fs_marks="${_fs_mark__kept}${_fs_mark__kept:+ }${1}"
+}
+
+_draw_filesystems() { #=> the chooser of file systems: for each partition the plan makes or formats, the file
+    #systems it can be made with and what each is good at, the one under the cursor (fs_at) lit and the
+    #one marked for it (fs_marks) with (*); a partition kept with its files says why it has no choice
+    _row 1 "" ""; _row 2 "" ""
+    _put 2 3 "${s_bold}" "File systems"
+    _put 2 39 "${s_dim}" "Nothing is written until you confirm."
+    _row 3 "" ""
+    row=4; _draw_filesystems__n=0
+    if [ -z "${r_fs}" ]; then
+        _rows 4 "" 4 3 "The plan has no partition for minos yet: c chooses one."
+    fi
+    while IFS="${c_tab}" read -r _draw_filesystems__id _draw_filesystems__heading; do
+        [ -n "${_draw_filesystems__id}" ] || continue
+        _row "${row}" "${s_bold}" "  ${_draw_filesystems__heading}"; row="$((row + 1))"
+        _draw_filesystems__has=""
+        while IFS="${c_tab}" read -r _draw_filesystems__of _draw_filesystems__words _draw_filesystems__text; do
+            [ "${_draw_filesystems__of}" = "${_draw_filesystems__id}" ] || continue
+            _draw_filesystems__n="$((_draw_filesystems__n + 1))"; _draw_filesystems__has="yes"
+            _draw_filesystems__mark="( )"
+            case " ${fs_marks} " in *" ${_draw_filesystems__words} "*) _draw_filesystems__mark="(*)" ;; esac
+            if [ "${_draw_filesystems__n}" = "${fs_at}" ]; then
+                _row "${row}" "" ""; _put "${row}" 5 "${s_bold}" ">"
+                _put "${row}" 7 "${s_bold}" "${_draw_filesystems__mark} ${_draw_filesystems__text}"
+            else
+                _row "${row}" "" "      ${_draw_filesystems__mark} ${_draw_filesystems__text}"
+            fi
+            row="$((row + 1))"
+        done << E=O=F
+${fs_rows}
+E=O=F
+        if [ -z "${_draw_filesystems__has}" ]; then
+            #kept with its files: its line says what it keeps, and why
+            while IFS="${c_tab}" read -r _draw_filesystems__of _ _draw_filesystems__value _draw_filesystems__note _; do
+                [ "${_draw_filesystems__of}" = "${_draw_filesystems__id}" ] || continue
+                _rows "${row}" "${s_dim}" 6 2 "${_draw_filesystems__value}: ${_draw_filesystems__note}"
+            done << E=O=F
+${r_lines}
+E=O=F
+        fi
+        _row "${row}" "" ""; row="$((row + 1))"
+    done << E=O=F
+${r_fs}
+E=O=F
+    [ "${fs_groups}" -lt 2 ] || { _row "${row}" "${s_dim}" "    Space marks one for each partition; Enter takes what is marked."; row="$((row + 1))"; }
+    _rest "${row}"
+}
+
 _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Enter or changed line by line
-    #(c), with its partition table one key away (t). The window's title says the view: plan, or plan edit
-    #for the plan line by line
+    #(c), with its partition table one key away (t) and its file systems another (f). The window's title
+    #says the view: plan, plan edit for the plan line by line, plan filesystems for the chooser of them
     [ "${loaded}" = "${disk} ${choices}" ] || {
         #another disk, or the first time: the plan the engine suggests
         [ "${loaded%% *}" = "${disk}" ] || { choices=""; proposed=""; plan_view="plan"; edit_line=1; }
@@ -1101,12 +1208,23 @@ _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Ent
             { [ "${r_loss_kind}" = "some" ] || [ "${r_problem_count}" -gt 0 ]; } || proposed="yes"
         fi
     }
-    edit_open=""; _step_plan__table=""
+    edit_open=""; _step_plan__table=""; _step_plan__fs=""
     while :; do
-        if [ "${plan_view}" = "edit" ] && [ -z "${_step_plan__table}" ]; then _title "plan edit"; else _title "plan"; fi
+        if [ -n "${_step_plan__fs}" ]; then _title "plan filesystems"
+        elif [ "${plan_view}" = "edit" ] && [ -z "${_step_plan__table}" ]; then _title "plan edit"
+        else _title "plan"; fi
         if [ -n "${_step_plan__table}" ]; then
             _frame plan "t" "back to the plan" "Esc" "back to the plan" "q" "quit"
             _draw_table
+        elif [ -n "${_step_plan__fs}" ]; then
+            if [ "${fs_groups}" -gt 1 ]; then
+                _frame plan "j k" "move" "Space" "mark" "Enter" "take what is marked" "Esc" "leave them as they were"
+            elif [ "${fs_count}" -gt 0 ]; then
+                _frame plan "j k" "move" "Enter" "take it" "Esc" "leave it as it was"
+            else
+                _frame plan "Enter" "back to the plan" "Esc" "back to the plan"
+            fi
+            _draw_filesystems
         elif [ "${plan_view}" = "edit" ] && [ -n "${edit_open}" ]; then
             _frame plan "j k" "move" "Enter" "take it" "Esc" "leave it as it was"
             _draw_edit
@@ -1122,10 +1240,10 @@ _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Ent
             _frame plan "c" "choose partitions" "e" "erase the disk" "t" "table" "Esc" "back" "q" "quit"
             _draw_plan
         elif [ "${r_problem_count}" -gt 0 ]; then
-            _frame plan "~Enter" "use this plan" "c" "change it" "r" "reset" "t" "table" "Esc" "back" "q" "quit"
+            _frame plan "~Enter" "use this plan" "c" "change it" "r" "reset" "f" "file system" "t" "table" "Esc" "back" "q" "quit"
             _draw_plan
         else
-            _frame plan "Enter" "use this plan" "c" "change it" "t" "table" "Esc" "back" "q" "quit"
+            _frame plan "Enter" "use this plan" "c" "change it" "f" "file system" "t" "table" "Esc" "back" "q" "quit"
             _draw_plan
         fi
         _key
@@ -1133,6 +1251,23 @@ _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Ent
             case "${key}" in
                 q) ! _ask_quit || exit 0 ;;
                 *) _step_plan__table="" ;;
+            esac
+            continue
+        fi
+        if [ -n "${_step_plan__fs}" ]; then
+            case "${key}" in
+                j|down) [ "${fs_at}" -ge "${fs_count}" ] || fs_at="$((fs_at + 1))" ;;
+                k|up) [ "${fs_at}" -le 1 ] || fs_at="$((fs_at - 1))" ;;
+                " ") [ "${fs_count}" = 0 ] || { _fs_words_at "${fs_at}"; _fs_mark "${fs_words}"; } ;;
+                enter)
+                    _step_plan__fs=""
+                    if [ "${fs_count}" -gt 0 ]; then
+                        _fs_words_at "${fs_at}"; _fs_mark "${fs_words}"
+                        # shellcheck disable=SC2086 # the choices, a word each
+                        _choose ${fs_marks}
+                        _load || _failed "The installer could not make that plan:"
+                    fi ;;
+                esc|left|b|q) _step_plan__fs="" ;;
             esac
             continue
         fi
@@ -1200,6 +1335,7 @@ _step_plan() { #=> the plan for the disk: the engine's, shown, accepted with Ent
                     proposed="yes"
                 fi
                 [ "${edit_line}" -le "${r_line_count}" ] || edit_line=1 ;;
+            f)  if [ -n "${proposed}" ]; then _fs_choices; _step_plan__fs="yes"; fi ;;
             e)  if [ -z "${proposed}" ]; then
                     choices="use=whole"
                     _load || _failed "The installer could not read ${disk}:"
