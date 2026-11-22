@@ -89,6 +89,10 @@ awk -v flavour="${flavour}" -v release="${release}" '
             #(iso/install-check); by UEFI also with a network, until minos-untrim gave back what the ISO left out
             must("^install uefi sata$", "^ok ")
             must("^install bios sata, keyboard, zone$", "^ok ")
+            #there the keyboard and the time zone were fields: reached with Tab, each taken from the list Enter
+            #opens, by what was typed; the function keys that once changed them changed nothing; and the disk
+            #has what was taken
+            must("^installer fields$", "^F2 F3 F4 change nothing; keyboard [a-z]+ from its list; zone [A-Za-z_/]+ from its list; the disk has keyboard [a-z]+, zone [A-Za-z_/]+$")
             #and beside what a disk holds, the plan changed in the installer, on an NVMe disk
             must("^install uefi nvme, beside$", "^ok ")
         } else {

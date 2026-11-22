@@ -29,18 +29,21 @@
 #              there after the install; NAME gets -beside. home: the disk has nothing, and the plan
 #              is changed to give /home a partition of its own, which the disk must then mount with
 #              the user's home in it; NAME gets -home
-#  KEYBOARD    latam: on the step of the user the keyboard is changed to it with the installer's key,
-#              before the password is typed. The password is typed by its keys, the same ones here and
-#              at the disk's login, whatever characters the layout makes of them; the disk must have
-#              that keyboard, and without KEYBOARD the live session's own (us). NAME gets -KEYBOARD
-#  ZONE        a time zone (Asia/Tokyo): chosen on the step of the user, its city typed into the
-#              installer's list. The disk must be in that zone, by its files and by what it says once
-#              booted; without ZONE, in America/Mexico_City. NAME gets the city, in lower case
+#  KEYBOARD    latam: on the step of the user the keyboard is changed to it, before the password is
+#              typed: Tab to its field, Enter, its code typed into the list, Enter; F2, F3 and F4,
+#              pressed there first, must change nothing. The password is typed by its keys, the same
+#              ones here and at the disk's login, whatever characters the layout makes of them; the disk
+#              must have that keyboard, and without KEYBOARD the live session's own (us). NAME gets
+#              -KEYBOARD
+#  ZONE        a time zone (Asia/Tokyo): chosen on the step of the user, Tab to its field, Enter, its
+#              city typed into the list, Enter. The disk must be in that zone, by its files and by what
+#              it says once booted; without ZONE, in America/Mexico_City. NAME gets the city, in lower
+#              case
 #  INSTALLER   a directory with minos-installer and minos-installer-engine: they take the place of the
 #              ISO's own in its live session, so a change to them is tried without building an ISO
 #  => in OUTPUT, for NAME=FIRMWARE-DISK: NAME.img (the disk), NAME.serial.log (the probe in the live
 #     session), NAME.facts (the disk read after each boot), the screens of the install
-#     NAME-{desktop,installer,plan,zone,confirm,installing,installed}.png, NAME-{slim,i3,clock}.png of the disk's boot and
+#     NAME-{desktop,installer,plan,keyboard,zone,confirm,installing,installed}.png, NAME-{slim,i3,clock}.png of the disk's boot and
 #     NAME-net-{slim,i3}.png of its boot with a network; exit 0 when the installer finished, the live
 #     session restarted on its own, the disk came up to i3 by itself (on a copy of the ISO, with
 #     minos-untrim failed and still enabled) and, with untrim, the packages minos-untrim reinstalls miss
@@ -51,7 +54,7 @@
 set -eu
 iso="${1:-}"; firmware="${2:-}"; disk="${3:-}"; out="${4:-}"; minutes="${5:-15}"
 phases="${PHASES:-install boot}"; layout="${LAYOUT:-empty}"
-if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '18,47s/^#//p' "${0}" >&2; exit 2; fi
+if [ -z "${firmware}" ] || [ -z "${disk}" ] || [ -z "${out}" ]; then sed -n '18,50s/^#//p' "${0}" >&2; exit 2; fi
 name="${firmware}-${disk}"; [ "${layout}" = "empty" ] || name="${name}-${layout}"
 [ -z "${KEYBOARD:-}" ] || name="${name}-${KEYBOARD}"
 zone="${ZONE:-}"; city="$(printf "%s" "${zone##*/}" | tr '[:upper:]_' '[:lower:] ')"
@@ -490,21 +493,37 @@ case " ${phases} " in *" install "*)
     #before anything is chosen, the step shows the zone an install starts on
     grep '^probe: screen: minos installer - user' "${serial}" | head -n 1 | tr -d '\r' | grep -q " ${default_zone}\$" ||
         { _screen timeout; _die "the installer does not start on ${default_zone}: $(grep '^probe: screen: minos installer - user' "${serial}" | head -n 1)"; }
+    #the keyboard and the time zone are fields of the step, after the name and the two passwords: Tab
+    #reaches them (a field not typed yet is passed over), Enter opens the field's list, what is typed
+    #narrows it until the window says the cursor is on the one wanted, and Enter takes it
+    _user__field=1
     if [ -n "${keyboard}" ]; then
-        #the installer's key moves to the next keyboard of minos' list: pressed until its window says the
-        #one wanted is the active one
-        _keyboard__tries=0
-        until grep '^probe: screen: minos installer - user' "${serial}" | tail -n 1 | tr -d '\r' | grep -q "user ${keyboard} "; do
-            _keyboard__tries="$((_keyboard__tries + 1))"
-            [ "${_keyboard__tries}" -le 4 ] || { _screen timeout; _die "the installer's key did not get to the keyboard ${keyboard}: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
-            _press f2; sleep 4
-        done
-        _step "the keyboard changed in the installer: ${keyboard}"
+        _press tab tab tab; sleep 2; _user__field=4
+        #the function keys that once changed the keyboard and the zone from the step change nothing
+        #now: the window still says the step, the same keyboard and the same zone, and no list opened
+        _user__title="$(grep '^probe: screen: ' "${serial}" | tail -n 1 | tr -d '\r')"
+        #(counted by awk: grep -c says none with a failure, which would end this script)
+        _user__lists="$(awk '/^probe: screen: minos installer - (keyboard|zone) / {n++} END {print n + 0}' "${serial}")"
+        _press f2; sleep 2; _press f3; sleep 2; _press f4; sleep 4
+        { [ "$(grep '^probe: screen: ' "${serial}" | tail -n 1 | tr -d '\r')" = "${_user__title}" ] &&
+          [ "$(awk '/^probe: screen: minos installer - (keyboard|zone) / {n++} END {print n + 0}' "${serial}")" = "${_user__lists}" ]; } ||
+            { _screen timeout; _die "F2, F3 or F4 changed the step of the user: $(grep '^probe: screen: ' "${serial}" | tail -n 3 | tr -d '\r' | tr '\n' ' ')"; }
+        _step "fields: F2 F3 F4 change nothing"
+        _press ret
+        _wait_screen "keyboard " 30
+        _type "${keyboard}"; sleep 3
+        grep '^probe: screen: ' "${serial}" | tail -n 1 | tr -d '\r' | grep -q -x "probe: screen: minos installer - keyboard ${keyboard}" ||
+            { _screen timeout; _die "\"${keyboard}\" typed into the installer's list of keyboards did not find it: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
+        _screen keyboard
+        _press ret
+        _wait_serial "probe: screen: minos installer - user ${keyboard} " 30 ||
+            { _screen timeout; _die "the installer did not take the keyboard ${keyboard}: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
+        _step "fields: keyboard ${keyboard} from its list"
     fi
     if [ -n "${zone}" ]; then
-        #the installer's list of time zones, narrowed by the city typed until its window says the cursor
-        #is on the zone wanted; Enter takes it, and the step says it
-        _press f4
+        while [ "${_user__field}" -lt 5 ]; do _press tab; _user__field="$((_user__field + 1))"; done
+        sleep 2
+        _press ret
         _wait_screen "zone " 30
         _type "${city}"; sleep 3
         grep '^probe: screen: ' "${serial}" | tail -n 1 | tr -d '\r' | grep -q -x "probe: screen: minos installer - zone ${zone}" ||
@@ -513,8 +532,10 @@ case " ${phases} " in *" install "*)
         _press ret
         _wait_serial "probe: screen: minos installer - user [a-z]* ${zone}" 30 ||
             { _screen timeout; _die "the installer did not take the time zone ${zone}: $(grep '^probe: screen: ' "${serial}" | tail -n 1)"; }
-        _step "the time zone chosen in the installer: ${zone}"
+        _step "fields: zone ${zone} from its list"
     fi
+    #after a list the cursor stays on its field: Tab goes round to the name
+    [ "${_user__field}" = 1 ] || { _press tab; sleep 1; }
     _type "${user}"; _press ret; sleep 2
     _type "${password_keys}"; _press ret; sleep 2
     _type "${password_keys}"; _press ret
@@ -630,6 +651,8 @@ if [ -f "${out}/${name}.serial.log" ]; then
             _die "the disk's own system, booted, does not tell the time in ${_expected__letters}: $(grep '^clock: date: ' "${facts}" | head -n 1)"
         ;;
     esac
+    #what was taken from the fields' lists, the disk has
+    [ -z "${keyboard}" ] || [ -z "${zone}" ] || _step "fields: the disk has keyboard ${keyboard}, zone ${zone}"
 fi
 awk '/^i3 config: / {n++; if ($0 != "i3 config: 0 lines naming minos-installer") bad++} END {exit !(n && !bad)}' "${facts}" ||
     _die "the disk's i3 configuration is missing, or still names the installer"

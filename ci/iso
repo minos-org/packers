@@ -78,6 +78,9 @@ _install() { #label firmware disk phases [layout [keyboard [zone]]] => LABEL's l
     else
         _line "${1}" "FAIL  (${_install__status}) ${_install__secs}s $(tail -n 2 "${_install__log}" | tr '\n' ' ' | cut -c1-220)"
     fi
+    #the keyboard and the time zone, taken from their fields' lists, as install-check says it went
+    _install__fields="$(sed -n 's/^ *[0-9]*s  fields: //p' "${_install__log}" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
+    [ -z "${_install__fields}" ] || _line "installer fields" "${_install__fields}"
 }
 
 [ "$(id -u)" = 0 ] || { printf "%s\\n" "ci/iso runs as root: iso/build and iso/install-check need it" >&2; exit 2; }
