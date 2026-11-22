@@ -181,18 +181,32 @@ _fs_default() { #=> the name of the file system a partition is made with unless 
 }
 
 _fs_field() { #name number => field NUMBER of the line of the file system NAME; nothing when it is none
-    printf "%s\n" "${filesystems}" | awk -F '\t' -v name="${1}" -v n="${2}" '$1 == name {print $n; exit}'
+    while IFS="${tab}" read -r _fs_field__1 _fs_field__2 _fs_field__3 _fs_field__4; do
+        [ "${_fs_field__1}" = "${1}" ] || continue
+        eval "printf '%s\n' \"\${_fs_field__${2}}\""
+        return 0
+    done << E=O=F
+${filesystems}
+E=O=F
 }
 
 _fs_offered() { #=> the names of the file systems this system can make, a line each, in their order: the
     #ones whose mkfs is here
-    printf "%s\n" "${filesystems}" | while IFS="${tab}" read -r _fs_offered__name _ _fs_offered__mkfs _; do
+    while IFS="${tab}" read -r _fs_offered__name _ _fs_offered__mkfs _; do
         ! command -v "${_fs_offered__mkfs%% *}" >/dev/null 2>&1 || printf "%s\n" "${_fs_offered__name}"
-    done
+    done << E=O=F
+${filesystems}
+E=O=F
 }
 
 _is_offered() { #name => true when NAME is a file system this system can make
-    _fs_offered | grep -qxF -e "${1}"
+    while IFS="${tab}" read -r _is_offered__name _ _is_offered__mkfs _; do
+        [ "${_is_offered__name}" = "${1}" ] || continue
+        command -v "${_is_offered__mkfs%% *}" >/dev/null 2>&1 && return 0
+    done << E=O=F
+${filesystems}
+E=O=F
+    return 1
 }
 
 _fs_words() { #=> the names of the file systems, for people: ext4, btrfs or xfs
@@ -211,11 +225,16 @@ _or_dash() { #text => TEXT, or - when there is none: no field of a line is ever 
     printf "%s" "${1:--}"
 }
 
-_human() { #MiB => the size as lsblk says sizes: 512M, 15.5G, 1.8T
-    awk -v mib="${1}" 'BEGIN {
-        if (mib < 1024) printf "%dM", mib
-        else if (mib < 1048576) printf "%.1fG", mib / 1024
-        else printf "%.1fT", mib / 1048576 }'
+_human() { #MiB => the size as lsblk says sizes: 512M, 15.5G, 1.8T. One decimal, rounded as printf rounds
+    #(half to even), in the shell's own arithmetic: no process
+    _human__mib="${1:-0}"
+    if [ "${_human__mib}" -lt 1024 ]; then printf "%dM" "${_human__mib}"; return 0; fi
+    if [ "${_human__mib}" -lt 1048576 ]; then _human__unit=1024; _human__letter="G"; else _human__unit=1048576; _human__letter="T"; fi
+    _human__tenths="$((_human__mib * 10 / _human__unit))"; _human__left="$((_human__mib * 10 % _human__unit * 2))"
+    if [ "${_human__left}" -gt "${_human__unit}" ] || { [ "${_human__left}" = "${_human__unit}" ] && [ "$((_human__tenths % 2))" = 1 ]; }; then
+        _human__tenths="$((_human__tenths + 1))"
+    fi
+    printf "%s.%s%s" "$((_human__tenths / 10))" "$((_human__tenths % 10))" "${_human__letter}"
 }
 
 _row() { #field... => a row: the fields, tab-separated
@@ -239,8 +258,12 @@ _mib() { #device => its size in MiB, as the kernel has it
     printf "%s" "$((_mib__sectors / 2048))"
 }
 
-_is_disk() { #device => true when it is a whole disk
-    [ -b "${1}" ] && [ "$(lsblk -dno TYPE "${1}" 2>/dev/null | tr -d ' ')" = "disk" ]
+_is_disk() { #device => true when it is a whole disk. From disks_types when _disks_load read them
+    [ -b "${1}" ] || return 1
+    if [ -n "${disks_loaded}" ]; then
+        case "${nl}${disks_types}" in *"${nl}${1} disk${nl}"*) return 0 ;; *) return 1 ;; esac
+    fi
+    [ "$(lsblk -dno TYPE "${1}" 2>/dev/null | tr -d ' ')" = "disk" ]
 }
 
 _is_partition() { #device => true when it is a partition that exists
@@ -293,15 +316,41 @@ _partition_number() { #partition => its number, by its name
 }
 
 _disk_of() { #partition => its disk: of one that exists, as the kernel has it; of one a plan is to make,
-    #by its name
+    #by its name (sdb3: sdb; nvme0n1p2: nvme0n1). One that map holds is its disk there, as _scan read it
     if [ -f "/sys/class/block/${1#/dev/}/partition" ]; then
+        if [ -n "${map_loaded}" ]; then
+            while IFS="${tab}" read -r _disk_of__name _disk_of__disk _; do
+                [ "${_disk_of__name}" != "${1}" ] || { printf "%s" "${_disk_of__disk}"; return 0; }
+            done << E=O=F
+${map_text}
+E=O=F
+        fi
         _disk_of__dir="$(dirname "$(readlink -f "/sys/class/block/${1#/dev/}")")"
         printf "/dev/%s" "${_disk_of__dir##*/}"
     else
-        _disk_of__name="$(printf "%s" "${1}" | sed 's/[0-9]*$//')"
+        _disk_of__name="${1}"
+        while :; do case "${_disk_of__name}" in *[0-9]) _disk_of__name="${_disk_of__name%?}" ;; *) break ;; esac; done
         case "${_disk_of__name}" in *[0-9]p) _disk_of__name="${_disk_of__name%p}" ;; esac
         printf "%s" "${_disk_of__name}"
     fi
+}
+
+_disk_of_get() { #partition => disk_got, what _disk_of says, with no process but for a partition that map does
+    #not hold
+    if [ -f "/sys/class/block/${1#/dev/}/partition" ]; then
+        if [ -n "${map_loaded}" ]; then
+            while IFS="${tab}" read -r _disk_of_get__name _disk_of_get__disk _; do
+                [ "${_disk_of_get__name}" != "${1}" ] || { disk_got="${_disk_of_get__disk}"; return 0; }
+            done << E=O=F
+${map_text}
+E=O=F
+        fi
+        disk_got="$(_disk_of "${1}")"
+        return 0
+    fi
+    disk_got="${1}"
+    while :; do case "${disk_got}" in *[0-9]) disk_got="${disk_got%?}" ;; *) break ;; esac; done
+    case "${disk_got}" in *[0-9]p) disk_got="${disk_got%p}" ;; esac
 }
 
 _scan() { #=> map, a file: every partition of the machine's disks, a line each, tab-separated, in the
@@ -346,6 +395,7 @@ E=O=F
         done
     done
     sort -t "${tab}" -k 2,2 -k 4,4n -k 3,3n -o "${map}" "${map}"
+    _map_load
 }
 
 _map_key() { #=> what the read of the disks depends on that the kernel tells with no process started: the
@@ -377,18 +427,84 @@ _map_take() { #key => true when the map kept is of KEY, and map is it now
     esac
     _map_take__rows="${_map_take__kept#"${_map_take__head}"}"
     printf "%s" "${_map_take__rows%"end${nl}"}" > "${map}"
+    _map_load
+}
+
+_map_load() { #=> map_text, the lines of map, held by the shell: the questions about a partition are answered
+    #from it with no process. _scan and _map_take load it
+    map_text=""
+    while IFS= read -r _map_load__line || [ -n "${_map_load__line}" ]; do
+        map_text="${map_text}${_map_load__line}${nl}"
+    done < "${map}"
+    map_loaded="yes"
 }
 
 _of() { #partition field => that field of its line in map (the numbers of _scan); nothing when it is not there
-    awk -F '\t' -v device="${1}" -v field="${2}" '$1 == device {print $field; exit}' "${map}"
+    if [ -z "${map_loaded}" ]; then
+        awk -F '\t' -v device="${1}" -v field="${2}" '$1 == device {print $field; exit}' "${map}"
+        return 0
+    fi
+    while IFS="${tab}" read -r _of__1 _of__2 _of__3 _of__4 _of__5 _of__6 _of__7 _of__8 _of__9 _of__10; do
+        [ "${_of__1}" = "${1}" ] || continue
+        eval "printf '%s\n' \"\${_of__${2}}\""
+        return 0
+    done << E=O=F
+${map_text}
+E=O=F
+}
+
+_of_get() { #partition field => of_got, what _of says, with no process when map_text holds map
+    if [ -z "${map_loaded}" ]; then
+        of_got="$(_of "${@}")"
+        return 0
+    fi
+    of_got=""
+    while IFS="${tab}" read -r _of_get__1 _of_get__2 _of_get__3 _of_get__4 _of_get__5 _of_get__6 _of_get__7 _of_get__8 _of_get__9 _of_get__10; do
+        [ "${_of_get__1}" = "${1}" ] || continue
+        eval "of_got=\"\${_of_get__${2}}\""
+        return 0
+    done << E=O=F
+${map_text}
+E=O=F
 }
 
 _partitions() { #disk => its partitions, a /dev name a line, in the order of the disk
-    awk -F '\t' -v disk="${1}" '$2 == disk {print $1}' "${map}"
+    if [ -z "${map_loaded}" ]; then
+        awk -F '\t' -v disk="${1}" '$2 == disk {print $1}' "${map}"
+        return 0
+    fi
+    while IFS="${tab}" read -r _partitions__name _partitions__disk _; do
+        [ "${_partitions__disk}" != "${1}" ] || printf "%s\n" "${_partitions__name}"
+    done << E=O=F
+${map_text}
+E=O=F
 }
 
-_table_now() { #disk => the partition table it has, gpt or dos; nothing when it has none
+_table_now() { #disk => the partition table it has, gpt or dos; nothing when it has none. From disks_tables
+    #when _disks_load read them
+    if [ -n "${disks_loaded}" ]; then
+        case "${nl}${disks_types}" in
+            *"${nl}${1} disk${nl}"*)
+                while read -r _table_now__disk _table_now__table; do
+                    [ "${_table_now__disk}" != "${1}" ] || { [ "${_table_now__table}" = "-" ] || printf "%s\n" "${_table_now__table}"; return 0; }
+                done << E=O=F
+${disks_tables}
+E=O=F
+                ;;
+        esac
+    fi
     blkid -p -o value -s PTTYPE "${1}" 2>/dev/null
+}
+
+_disks_load() { #=> disks_types (each device lsblk lists whole: "name type" a line) and disks_tables (each
+    #disk's partition table, - for none), read once for the verbs that write nothing: what they ask of a disk
+    #more than once is answered from them. apply and empty read the disks as they are at each question
+    disks_types="$(lsblk -dnpo NAME,TYPE 2>/dev/null | awk '{print $1, $2}')${nl}"; disks_tables=""
+    for _disks_load__disk in $(_whole_disks); do
+        _disks_load__table="$(blkid -p -o value -s PTTYPE "${_disks_load__disk}" 2>/dev/null)"
+        disks_tables="${disks_tables}${_disks_load__disk} ${_disks_load__table:--}${nl}"
+    done
+    disks_loaded="yes"
 }
 
 _disk_fs() { #disk => the file system, or other signature, a disk with no partition table holds on the whole
@@ -397,16 +513,17 @@ _disk_fs() { #disk => the file system, or other signature, a disk with no partit
 }
 
 _file_system() { #partition => the file system on it; nothing when it has none
-    _file_system__type="$(_of "${1}" 8)"
-    [ "${_file_system__type:--}" = "-" ] || printf "%s" "${_file_system__type}"
+    _of_get "${1}" 8
+    [ "${of_got:--}" = "-" ] || printf "%s" "${of_got}"
 }
 
 _kind_now() { #partition => what it is to the firmware, by its type: esp, bios-boot, frame or data
-    _of "${1}" 7
+    _of_get "${1}" 7; printf "%s\n" "${of_got}"
 }
 
 _holds() { #partition => what is on it, for people: ext4 "label", or that it holds no file system
-    _holds__type="$(_file_system "${1}")"; _holds__label="$(_of "${1}" 9)"
+    _of_get "${1}" 8; _holds__type="${of_got}"; [ "${_holds__type}" != "-" ] || _holds__type=""
+    _of_get "${1}" 9; _holds__label="${of_got}"
     if [ -z "${_holds__type}" ]; then
         printf "%s" "no file system"
     elif [ "${_holds__label:--}" = "-" ]; then
@@ -418,8 +535,10 @@ _holds() { #partition => what is on it, for people: ext4 "label", or that it hol
 
 _name_now() { #partition => what people call it: its label, or what it is (boot, grub, swap, its file
     #system), or blank when it holds nothing
-    _name_now__label="$(_of "${1}" 9)"; _name_now__type="$(_file_system "${1}")"
-    case "$(_kind_now "${1}")" in
+    _of_get "${1}" 9; _name_now__label="${of_got}"
+    _of_get "${1}" 8; _name_now__type="${of_got}"; [ "${_name_now__type}" != "-" ] || _name_now__type=""
+    _of_get "${1}" 7
+    case "${of_got}" in
         esp) printf "%s" "boot"; return 0 ;;
         bios-boot) printf "%s" "grub"; return 0 ;;
         frame) printf "%s" "extended"; return 0 ;;
@@ -595,13 +714,82 @@ _is_timezone() { #zone => true when ZONE is the name of a zone this system has
 ################################################################################
 
 _plan() { #action [device] => the lines of plan (a file) that are ACTION, about DEVICE when one is named:
-    #their words after the action
-    awk -v action="${1}" -v device="${2:-}" '
-        $1 == action && (device == "" || $2 == device) {$1 = ""; sub(/^ /, ""); print}' "${plan}"
+    #what follows the action, its words one space apart. From plan_text when _plan_load held it
+    if [ -z "${plan}" ] || [ "${plan_text_of}" != "${plan}" ]; then
+        awk -v action="${1}" -v device="${2:-}" '
+            $1 == action && (device == "" || $2 == device) {$1 = ""; sub(/^ /, ""); print}' "${plan}"
+        return 0
+    fi
+    _plan__want="${1}"; _plan__device="${2:-}"
+    while read -r _plan__action _plan__rest; do
+        [ "${_plan__action}" = "${_plan__want}" ] || continue
+        set -f
+        # shellcheck disable=SC2086 # the words of the line, as awk splits them
+        set -- ${_plan__rest}
+        set +f
+        [ -z "${_plan__device}" ] || [ "${1:-}" = "${_plan__device}" ] || continue
+        printf "%s\n" "${*}"
+    done << E=O=F
+${plan_text}
+E=O=F
+}
+
+_plan_get() { #action [device] => plan_got, what _plan says, as a command substitution of it would hold it
+    #(its trailing newlines gone), with no process when plan_text holds the plan
+    if [ -z "${plan}" ] || [ "${plan_text_of}" != "${plan}" ]; then
+        plan_got="$(_plan "${@}")"
+        return 0
+    fi
+    plan_got=""; _plan_get__want="${1}"; _plan_get__device="${2:-}"
+    while read -r _plan_get__action _plan_get__rest; do
+        [ "${_plan_get__action}" = "${_plan_get__want}" ] || continue
+        set -f
+        # shellcheck disable=SC2086 # the words of the line, as awk splits them
+        set -- ${_plan_get__rest}
+        set +f
+        [ -z "${_plan_get__device}" ] || [ "${1:-}" = "${_plan_get__device}" ] || continue
+        plan_got="${plan_got}${*}${nl}"
+    done << E=O=F
+${plan_text}
+E=O=F
+    while :; do case "${plan_got}" in *"${nl}") plan_got="${plan_got%"${nl}"}" ;; *) break ;; esac; done
+}
+
+_cut_get() { #text n => cut_got, field N of each line of TEXT cut at spaces, as cut -d' ' -fN cuts it (a
+    #line with no space whole, one with fewer fields empty), as a command substitution of it would hold it
+    cut_got=""
+    while IFS= read -r _cut_get__line; do
+        case "${_cut_get__line}" in
+            *" "*) _cut_get__n="${2}"
+                   while [ "${_cut_get__n}" -gt 1 ]; do
+                       case "${_cut_get__line}" in *" "*) _cut_get__line="${_cut_get__line#* }" ;; *) _cut_get__line=""; break ;; esac
+                       _cut_get__n="$((_cut_get__n - 1))"
+                   done
+                   _cut_get__line="${_cut_get__line%% *}" ;;
+        esac
+        cut_got="${cut_got}${_cut_get__line}${nl}"
+    done << E=O=F
+${1}
+E=O=F
+    while :; do case "${cut_got}" in *"${nl}") cut_got="${cut_got%"${nl}"}" ;; *) break ;; esac; done
+}
+
+_plan_load() { #=> plan_text, the lines of plan, held by the shell for _plan: plan is not written to once it
+    #is named
+    plan_text=""
+    while IFS= read -r _plan_load__line || [ -n "${_plan_load__line}" ]; do
+        plan_text="${plan_text}${_plan_load__line}${nl}"
+    done < "${plan}"
+    plan_text_of="${plan}"
 }
 
 _plan_one() { #action => the device of the first line of plan that is ACTION; nothing when there is none
-    _plan "${1}" | awk 'NR == 1 {print $1}'
+    _plan_get "${1}"
+    set -f
+    # shellcheck disable=SC2086 # the words of the first line
+    set -- ${plan_got%%"${nl}"*}
+    set +f
+    printf "%s\n" "${1:-}"
 }
 
 _whole_table() { #disk => the table a whole disk gets for this firmware: UEFI reads a GPT, BIOS an MBR,
@@ -671,21 +859,28 @@ _plan_partitions() { #root [esp] [keep] => a plan for partitions that exist
 }
 
 _table_of() { #disk => the partition table plan gives it, gpt or dos; nothing when it keeps its own
-    _plan table "${1}" | cut -d' ' -f2
+    _plan_get table "${1}"
+    _cut_get "${plan_got}" 2
+    [ -z "${plan_got}" ] || printf "%s\n" "${cut_got}"
 }
 
 _made_on() { #disk => the partitions plan makes on it, "name size type [start]" a line, in order
-    _plan partition | while read -r _made_on__name _made_on__rest; do
-        [ "$(_disk_of "${_made_on__name}")" != "${1}" ] || printf "%s\n" "${_made_on__name} ${_made_on__rest}"
-    done
+    _plan_get partition
+    [ -n "${plan_got}" ] || return 0
+    while read -r _made_on__name _made_on__rest; do
+        _disk_of_get "${_made_on__name}"
+        [ "${disk_got}" != "${1}" ] || printf "%s\n" "${_made_on__name} ${_made_on__rest}"
+    done << E=O=F
+${plan_got}
+E=O=F
 }
 
 _mib_in_plan() { #partition => its size in MiB: the one plan gives it, or the one it has. The rest of a
     #disk is what its other partitions leave, less the 2M the table and its alignment take
-    _mib_in_plan__size="$(_plan partition "${1}" | cut -d' ' -f2)"
+    _plan_get partition "${1}"; _cut_get "${plan_got}" 2; _mib_in_plan__size="${cut_got}"
     case "${_mib_in_plan__size}" in
         "") _mib "${1}" ;;
-        rest) _mib_in_plan__disk="$(_disk_of "${1}")"
+        rest) _disk_of_get "${1}"; _mib_in_plan__disk="${disk_got}"
               printf "%s" "$(($(_mib "${_mib_in_plan__disk}") - 2 - $(_made_on "${_mib_in_plan__disk}" |
                   awk '$2 != "rest" {sum += $2} END {print sum + 0}')))" ;;
         *) printf "%s" "${_mib_in_plan__size}" ;;
@@ -693,26 +888,29 @@ _mib_in_plan() { #partition => its size in MiB: the one plan gives it, or the on
 }
 
 _kind_in_plan() { #partition => what it is to the firmware once plan is applied: esp, bios-boot, frame or data
-    case "$(_plan partition "${1}" | cut -d' ' -f3)" in
+    _plan_get partition "${1}"; _cut_get "${plan_got}" 3
+    case "${cut_got}" in
         esp) printf "%s" esp ;;
         bios-boot) printf "%s" bios-boot ;;
         linux) printf "%s" data ;;
-        *) _kind_now "${1}" ;;
+        *) _of_get "${1}" 7; printf "%s" "${of_got}" ;;
     esac
 }
 
 _holds_in_plan() { #partition => the file system on it once plan is applied: fat32, ext4, btrfs, another,
     #or none
-    _holds_in_plan__as="$(_plan format "${1}" | cut -d' ' -f2)"
-    case "${_holds_in_plan__as}" in
-        ?*) printf "%s" "${_holds_in_plan__as}" ;;
-        *) if [ -n "$(_plan partition "${1}")" ]; then
+    _plan_get format "${1}"; _cut_get "${plan_got}" 2
+    case "${cut_got}" in
+        ?*) printf "%s" "${cut_got}" ;;
+        *) _plan_get partition "${1}"
+           if [ -n "${plan_got}" ]; then
                printf "%s" none
            else
-               case "$(_file_system "${1}")" in
+               _of_get "${1}" 8; [ "${of_got}" != "-" ] || of_got=""
+               case "${of_got}" in
                    vfat) printf "%s" fat32 ;;
                    "") printf "%s" none ;;
-                   *) _file_system "${1}" ;;
+                   *) printf "%s" "${of_got}" ;;
                esac
            fi ;;
     esac
@@ -720,13 +918,22 @@ _holds_in_plan() { #partition => the file system on it once plan is applied: fat
 
 _in_plan() { #partition => true when it is there once plan is applied: plan makes it, or it exists on a
     #disk that keeps its table
-    [ -n "$(_plan partition "${1}")" ] ||
-        { _is_partition "${1}" && [ -z "$(_table_of "$(_disk_of "${1}")")" ]; }
+    _plan_get partition "${1}"
+    [ -n "${plan_got}" ] && return 0
+    _is_partition "${1}" || return 1
+    _disk_of_get "${1}"; _plan_get table "${disk_got}"
+    [ -z "${plan_got}" ]
 }
 
 _role() { #partition => what plan makes of it: root, home, esp, or nothing
+    _role__part="${1}"
     for _role__action in root home esp; do
-        [ "$(_plan_one "${_role__action}")" != "${1}" ] || { printf "%s" "${_role__action}"; return 0; }
+        _plan_get "${_role__action}"
+        set -f
+        # shellcheck disable=SC2086 # the words of the first line
+        set -- ${plan_got%%"${nl}"*}
+        set +f
+        [ "${1:-}" != "${_role__part}" ] || { printf "%s" "${_role__action}"; return 0; }
     done
 }
 
@@ -764,7 +971,11 @@ _check_holds() { #partition what => what stops PARTITION from holding WHAT (mino
 }
 
 _check() { #=> the check verb: what stops plan, a line each
-    awk -v kinds=" fat32 $(printf "%s\n" "${filesystems}" | cut -f1 | tr '\n' ' ')" '/^[ \t]*(#|$)/ {next}
+    _check__kinds=" fat32 "
+    while IFS= read -r _check__line; do _check__kinds="${_check__kinds}${_check__line%%"${tab}"*} "; done << E=O=F
+${filesystems}
+E=O=F
+    awk -v kinds="${_check__kinds}" '/^[ \t]*(#|$)/ {next}
         $1 == "table" && NF == 3 && $3 ~ /^(gpt|dos)$/ {next}
         $1 == "partition" && (NF == 4 || NF == 5 && $5 ~ /^[0-9]+$/) && $3 ~ /^([1-9][0-9]*|rest)$/ && $4 ~ /^(esp|linux|bios-boot)$/ {next}
         $1 == "format" && NF == 3 && index(kinds, " " $3 " ") {next}
@@ -772,13 +983,18 @@ _check() { #=> the check verb: what stops plan, a line each
         $1 == "keyboard" && (NF == 2 || NF == 3) && $2 ~ /^[a-z0-9_]+$/ && $3 ~ /^[a-zA-Z0-9_-]*$/ {next}
         $1 == "timezone" && NF == 2 {next}
         {print "line " NR " is no action of a plan: " $0}' "${plan}"
-    for _check__zone in $(_plan timezone); do
+    _plan_get timezone
+    # shellcheck disable=SC2086 # the zones, a word each, as the command substitution gave them
+    for _check__zone in ${plan_got}; do
         _is_timezone "${_check__zone}" || printf "%s\n" "${_check__zone} is no time zone this system has."
     done
-    _plan format | while read -r _check__part _check__as; do
+    _plan_get format
+    [ -z "${plan_got}" ] || while read -r _check__part _check__as; do
         [ "${_check__as}" = "fat32" ] || [ -z "$(_fs_field "${_check__as}" 1)" ] || _is_offered "${_check__as}" ||
             printf "%s\n" "${_check__part#/dev/} cannot be made ${_check__as} here: there is no $(_fs_field "${_check__as}" 3 | cut -d' ' -f1) (package $(_fs_field "${_check__as}" 2))."
-    done
+    done << E=O=F
+${plan_got}
+E=O=F
 
     #the disks: each one touched must be free, and a new table holds what is made on it
     for _check__disk in $(_plan_disks); do
@@ -952,13 +1168,13 @@ _rows() { #disk now|after => the now or after rows of DISK
         fi
         if [ "${2}" = "now" ]; then
             if [ -n "${_rows__gets}" ]; then _rows__fate="gone"
-            elif [ -n "$(_plan format "${_rows__part}")" ]; then _rows__fate="erased"
+            elif { _plan_get format "${_rows__part}"; [ -n "${plan_got}" ]; }; then _rows__fate="erased"
             else _rows__fate="kept"; fi
             _row now "${_rows__part}" "${_rows__mib}" "$(_human "${_rows__mib}")" "$(_kind_now "${_rows__part}")" \
                 "$(_file_system "${_rows__part}")" "$(_name_now "${_rows__part}")" "${_rows__fate}" -
         else
-            if [ -n "$(_plan partition "${_rows__part}")" ]; then _rows__fate="new"
-            elif [ -n "$(_plan format "${_rows__part}")" ]; then _rows__fate="formatted"
+            if { _plan_get partition "${_rows__part}"; [ -n "${plan_got}" ]; }; then _rows__fate="new"
+            elif { _plan_get format "${_rows__part}"; [ -n "${plan_got}" ]; }; then _rows__fate="formatted"
             else _rows__fate="kept"; fi
             case "$(_role "${_rows__part}")" in
                 root) _rows__mount="/" ;; home) _rows__mount="/home" ;; esp) _rows__mount="/boot/efi" ;; *) _rows__mount="-" ;;
@@ -1012,12 +1228,12 @@ _actions() { #=> the action rows of plan, the loss row and the button row: what 
         NR % 2 == 1 {held = $0; next} {printf "action\tmake\tCreate %s and %s%s\n", held, $0, where; held = ""}
         END {if (held != "") printf "action\tmake\tCreate %s%s\n", held, where}'
     for _actions__part in $( { _plan format; _plan esp; _plan root; _plan home; } | cut -d' ' -f1 | awk '!seen[$0]++'); do
-        [ -z "$(_plan partition "${_actions__part}")" ] || continue
+        { _plan_get partition "${_actions__part}"; [ -z "${plan_got}" ]; } || continue
         _is_partition "${_actions__part}" || continue
         case "$(_role "${_actions__part}")" in
             root) _actions__for="minos" ;; home) _actions__for="/home" ;; esp) _actions__for="the boot loader" ;; *) _actions__for="nothing" ;;
         esac
-        if [ -n "$(_plan format "${_actions__part}")" ]; then
+        if { _plan_get format "${_actions__part}"; [ -n "${plan_got}" ]; }; then
             _row action erase "Delete everything on $(_part_words "${_actions__part}"): formatted as $(_holds_in_plan "${_actions__part}") for ${_actions__for}"
             _actions__lost="${_actions__lost}${_actions__lost:+, }$(_part_words "${_actions__part}")"
         else
@@ -1418,11 +1634,11 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
                 _lines__is="stays as it is"; _lines__tone="plain"; _lines__clear=""
                 if [ "${_lines__part}" = "${_lines__root}" ]; then
                     _lines__clear="root=none"
-                    if [ -n "$(_plan format "${_lines__part}")" ]; then _lines__is="erased, for minos, $(_holds_in_plan "${_lines__part}")"; _lines__tone="erase"
+                    if { _plan_get format "${_lines__part}"; [ -n "${plan_got}" ]; }; then _lines__is="erased, for minos, $(_holds_in_plan "${_lines__part}")"; _lines__tone="erase"
                     else _lines__is="minos, over its files"; _lines__tone="new"; fi
                 elif [ "${_lines__part}" = "${_lines__home}" ]; then
                     _lines__clear="home=none"
-                    if [ -n "$(_plan format "${_lines__part}")" ]; then _lines__is="erased, for /home, $(_holds_in_plan "${_lines__part}")"; _lines__tone="erase"
+                    if { _plan_get format "${_lines__part}"; [ -n "${plan_got}" ]; }; then _lines__is="erased, for /home, $(_holds_in_plan "${_lines__part}")"; _lines__tone="erase"
                     else _lines__is="/home, its files kept"; _lines__tone="new"; fi
                 fi
                 _lines__note="-"
@@ -1433,17 +1649,17 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
                 _lines__unroot=""; [ "${_lines__part}" != "${_lines__root}" ] || _lines__unroot=" root=none"
                 if [ "${_lines__mib}" -ge "${root_mib}" ]; then
                     _row option "${_lines__part}" "root=${_lines__part} rootfs=format${_lines__unhome}" "erase it, use it for minos" \
-                        "$([ "${_lines__part}" = "${_lines__root}" ] && [ -n "$(_plan format "${_lines__part}")" ] && printf current)"
+                        "$([ "${_lines__part}" = "${_lines__root}" ] && { _plan_get format "${_lines__part}"; [ -n "${plan_got}" ]; } && printf current)"
                     [ "${_lines__fs}" != "${kept_fs}" ] ||
                         _row option "${_lines__part}" "root=${_lines__part} rootfs=keep${_lines__unhome}" "copy minos over its files, not formatted" \
-                            "$([ "${_lines__part}" = "${_lines__root}" ] && [ -z "$(_plan format "${_lines__part}")" ] && printf current)"
+                            "$([ "${_lines__part}" = "${_lines__root}" ] && { _plan_get format "${_lines__part}"; [ -z "${plan_got}" ]; } && printf current)"
                 fi
                 if [ "${_lines__mib}" -ge "${home_mib}" ]; then
                     _row option "${_lines__part}" "home=${_lines__part} homefs=format${_lines__unroot}" "erase it, use it for /home" \
-                        "$([ "${_lines__part}" = "${_lines__home}" ] && [ -n "$(_plan format "${_lines__part}")" ] && printf current)"
+                        "$([ "${_lines__part}" = "${_lines__home}" ] && { _plan_get format "${_lines__part}"; [ -n "${plan_got}" ]; } && printf current)"
                     [ "${_lines__fs}" != "${kept_fs}" ] ||
                         _row option "${_lines__part}" "home=${_lines__part} homefs=keep${_lines__unroot}" "use it as /home, its files kept" \
-                            "$([ "${_lines__part}" = "${_lines__home}" ] && [ -z "$(_plan format "${_lines__part}")" ] && printf current)"
+                            "$([ "${_lines__part}" = "${_lines__home}" ] && { _plan_get format "${_lines__part}"; [ -z "${plan_got}" ]; } && printf current)"
                 fi
                 if [ "${_lines__part}" = "${_lines__root}" ]; then _fs_line roottype "${_lines__part}" minos
                 elif [ "${_lines__part}" = "${_lines__home}" ]; then _fs_line hometype "${_lines__part}" /home; fi ;;
@@ -1451,15 +1667,15 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
                 if [ "${firmware}" != "uefi" ]; then
                     _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  stays as it is" "an EFI system partition: not used, this computer starts by BIOS" off
                 elif [ "${_lines__part}" = "${_lines__esp}" ]; then
-                    if [ -n "$(_plan format "${_lines__part}")" ]; then
+                    if { _plan_get format "${_lines__part}"; [ -n "${plan_got}" ]; }; then
                         _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  erased, for the boot loader" "the EFI system partition: UEFI starts minos from it" erase
                     else
                         _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  kept, minos is added to it" "the EFI system partition: UEFI starts minos from it" plain
                     fi
                     [ "${_lines__fs}" != "vfat" ] ||
-                        _row option "${_lines__part}" "esp=${_lines__part} espfs=auto" "keep what it holds, add minos to it" "$([ -n "$(_plan format "${_lines__part}")" ] || printf current)"
+                        _row option "${_lines__part}" "esp=${_lines__part} espfs=auto" "keep what it holds, add minos to it" "$({ _plan_get format "${_lines__part}"; [ -n "${plan_got}" ]; } || printf current)"
                     _row option "${_lines__part}" "esp=${_lines__part} espfs=format" "format it: the boot loaders of other systems on it are erased" \
-                        "$([ -z "$(_plan format "${_lines__part}")" ] || printf current)"
+                        "$({ _plan_get format "${_lines__part}"; [ -z "${plan_got}" ]; } || printf current)"
                 else
                     _row line "${_lines__part}" "${_lines__label}" "${_lines__what}  stays as it is" "an EFI system partition, not the one minos starts from" off
                     _row option "${_lines__part}" "use=parts" "leave it as it is" current
@@ -1476,7 +1692,7 @@ _lines() { #disk => the line, option and size rows: the plan as lines a person c
     if [ "${firmware}" = "uefi" ]; then
         if [ -z "${_lines__esp}" ]; then
             _row line boot "Boot" "nothing to start from yet" "UEFI needs an EFI system partition: $(_human "${esp_mib}") of free room, or the whole disk" erase
-        elif [ -n "$(_plan partition "${_lines__esp}")" ]; then
+        elif { _plan_get partition "${_lines__esp}"; [ -n "${plan_got}" ]; }; then
             _row line boot "Boot" "a new partition, ${_lines__esp#/dev/}, $(_human "${esp_mib}"), in the free room" "the EFI system partition: UEFI starts minos from it" new
         else
             _row line boot "Boot" "by UEFI, from ${_lines__esp#/dev/}$([ "$(_disk_of "${_lines__esp}")" = "${1}" ] || printf ", on another disk")" \
@@ -1515,7 +1731,7 @@ _edit() { #disk file => the edit verb: choices made a plan in FILE, and its rows
     fi
     cat "${scratch}" > "${2}" || _die "cannot write ${2}"
     rm -f "${scratch}"
-    plan="${2}"
+    plan="${2}"; _plan_load
     _row choices "${choices}"
     _row disk "${1}" "$(lsblk -dno SIZE "${1}" | tr -d ' ')" "$(_model "${1}")" "$(_holds_summary "${1}")"
     _lines "${1}"
@@ -1764,6 +1980,7 @@ if [ -n "${medium}" ]; then
     medium="${_medium__disk:-${medium#/dev/}}"
 fi
 plan=""; user=""; password=""; choices=""; free=""; watched=""
+map_text=""; map_loaded=""; plan_text=""; plan_text_of=""; disks_types=""; disks_tables=""; disks_loaded=""
 map="$(mktemp)" || _die "no temporary file"
 trap 'rm -f "${map}"' EXIT
 trap 'exit 130' INT TERM HUP
@@ -1808,6 +2025,7 @@ case "${verb}" in
             esac
         done
         #the read kept, while the kernel tells of the same partitions and mounts; else read again, and kept
+        _disks_load
         _edit__key="$(_map_key)"
         if [ -n "${_edit__fresh}" ] || ! _map_take "${_edit__key}"; then
             _scan; _map_keep "${_edit__key}"
@@ -1816,6 +2034,7 @@ case "${verb}" in
     review|check|describe)
         [ "${#}" -ge 1 ] || _usage
         plan="${1}"; [ -f "${plan}" ] || _die "no plan ${plan}"
+        _plan_load; _disks_load
         _scan
         case "${verb}" in
             describe) _describe ;;
