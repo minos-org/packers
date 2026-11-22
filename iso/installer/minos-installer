@@ -463,13 +463,43 @@ _buttons() { #row focus left left-style right right-style => two buttons on row 
 # What the engine says, kept for the screens
 ################################################################################
 
-_load() { #=> the plan choices make for disk, as the engine makes it: the plan in its file, its rows in
-    #the r_ variables, choices as the engine took them. False when the engine fails; what it said is
-    #in errors
+_map_kept() { #=> true when the engine kept its read of the disks for the partitions and the mounts there
+    #are now: then its edit does not read them again (map_kept, its file: its form, the key, "map", its
+    #lines, "end"). Read here only to tell whether to say that the disks are being read
+    { [ -n "${map_kept}" ] && [ -r "${map_kept}" ]; } || return 1
+    _map_kept__part="form"; _map_kept__key=""; _map_kept__last=""
+    while IFS= read -r _map_kept__line; do
+        case "${_map_kept__part}" in
+            form) [ "${_map_kept__line}" = "minos-installer-engine map 1" ] || return 1; _map_kept__part="key" ;;
+            key) if [ "${_map_kept__line}" = "map" ]; then _map_kept__part="map"
+                 else _map_kept__key="${_map_kept__key}${_map_kept__line}${c_nl}"; fi ;;
+        esac
+        _map_kept__last="${_map_kept__line}"
+    done < "${map_kept}"
+    { [ "${_map_kept__part}" = "map" ] && [ "${_map_kept__last}" = "end" ]; } || return 1
+    _disks_key
+    [ "${_map_kept__key}" = "${disks_key}" ]
+}
+
+_reading() { #text => TEXT in the row of keys, written out at once: what the screen says while the engine
+    #reads the disks, which takes seconds on a slow machine
+    screen="${screen}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H${blank_row}${c_esc}[$((origin_row + canvas_rows - 1));$((origin_column + 3))H${s_dim}${1}${s_off}"
+    printf "%s" "${screen}"; screen=""
+}
+
+_load() { #[fresh] => the plan choices make for disk, as the engine makes it: the plan in its file, its rows
+    #in the r_ variables, choices as the engine took them. The engine reads the disks again unless it
+    #kept them as they are now, and always when FRESH is said; the screen says so before the wait. False
+    #when the engine fails; what it said is in errors
     r_problems=""; r_problem_count=0; r_now=""; r_after=""; r_actions=""; r_lines=""; r_line_count=0
     r_options=""; r_sizes=""; r_fs=""; r_loss_kind="none"; r_loss=""; r_button_kind="plain"; r_button=""; r_disk=""
+    if [ -n "${1:-}" ]; then
+        _reading "Reading ${disk#/dev/} again, as it is now: the confirmation says what it holds..."
+    elif ! _map_kept; then
+        _reading "Reading the disks..."
+    fi
     # shellcheck disable=SC2086 # the choices, a word each
-    _load__rows="$(_engine edit "${disk}" "${plan}" ${choices} 2>"${errors}")" || return 1
+    _load__rows="$(_engine edit ${1:+--fresh} "${disk}" "${plan}" ${choices} 2>"${errors}")" || return 1
     while IFS="${c_tab}" read -r _load__tag _load__rest; do
         case "${_load__tag}" in
             choices) choices="${_load__rest}" ;;
@@ -1891,8 +1921,8 @@ _step_confirm() { #=> the one confirmation: what will be done, and two buttons. 
     #holds the cursor; the other says what it erases
     _title "confirm"
     _step_confirm__focus="left"; _step_confirm__table=""
-    #the plan as the disk is now: what the screens showed may be minutes old
-    _load || _failed "The installer could not read ${disk}:"
+    #the plan as the disk is now: what the screens showed may be minutes old, and the kept read older
+    _load fresh || _failed "The installer could not read ${disk}:"
     if [ "${r_problem_count}" -gt 0 ]; then
         return 4
     fi
@@ -2152,7 +2182,7 @@ if ! facts="$(_engine facts 2>&1)"; then
     _as_root true 2>/dev/null < /dev/null || _end "The installer needs sudo without a password for $(id -un), or root."
     _end "${facts}"
 fi
-log=""; progress_file=""; firmware_now=""; system_size=""; timezone=""; applying=""
+log=""; progress_file=""; firmware_now=""; system_size=""; timezone=""; applying=""; map_kept=""
 while read -r _main__name _main__value; do
     case "${_main__name}" in
         log) log="${_main__value}" ;;
@@ -2160,6 +2190,7 @@ while read -r _main__name _main__value; do
         firmware) firmware_now="${_main__value}" ;;
         system-mib) system_size="${_main__value}M" ;;
         timezone) timezone="${_main__value}" ;;
+        map) map_kept="${_main__value}" ;;
         applying) [ "${_main__value}" = "-" ] || applying="${_main__value}" ;;
     esac
 done << E=O=F

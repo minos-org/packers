@@ -12,11 +12,13 @@
 #                           the session runs from, or -), try (yes, no), log (where apply keeps what was
 #                           said), progress (where it keeps how far it is), applying (the process of an
 #                           apply that is running, or -), timezone (the one the installed system
-#                           takes unless another is chosen: the timezone verb's)
+#                           takes unless another is chosen: the timezone verb's), map (where the read
+#                           of the disks is kept between calls, for edit: below)
 #  disks [PID]              the machine's disks, a line each, tab-separated: device, size, model, why
 #                           minos cannot go to it (- when it can), what it holds (empty, or its partitions);
 #                           with PID, read only while that process lives: once it is gone, exit 1, the rest
-#                           unread (an interface that reads them in the background, and is closed)
+#                           unread (an interface that reads them in the background, and is closed).
+#                           What it read is kept for edit
 #  partitions [DISK]        the partitions of DISK, or of every disk minos can go to, a line each,
 #                           tab-separated: device, size, what it can be for minos (root, esp, small: too
 #                           small for it, or -), what it holds, its type
@@ -27,11 +29,14 @@
 #                           a plan that takes partitions that exist: ROOT for minos, formatted unless
 #                           it is ext4 and keep is said; on UEFI the EFI system partition ESP, formatted
 #                           unless it is FAT already
-#  edit DISK FILE [CHOICE...]
+#  edit [--fresh] DISK FILE [CHOICE...]
 #                           the plan the CHOICEs make for DISK, written to FILE; with none, the plan the
 #                           engine suggests. On stdout, rows for an interface (below): the choices as
 #                           the engine took them, the lines of the plan that can be changed and what
-#                           each can be changed to, and the rows of review
+#                           each can be changed to, and the rows of review. The disks are not read
+#                           again while the read kept by disks or the last edit is of the partitions
+#                           and mounts there are now; --fresh reads them all the same. Writes nothing
+#                           to a disk: apply reads them again, and checks the plan against that
 #  review PLAN [DISK]       PLAN as rows for an interface (below): what stops it, DISK (the disk minos
 #                           goes to) now and once it is applied, what is done in words, what is lost,
 #                           and the name of the deed
@@ -44,6 +49,7 @@
 #                           how far it is to /tmp/minos-installer.progress, and how it ended (the exit
 #                           status) to /tmp/minos-installer.status
 #  empty DISK               with --try: DISK left with no partition table and no file system
+#                           (apply and empty read the disks again, and drop what was kept: they change them)
 #  keyboard                 the keyboard that is active, "layout variant where": where is x when it is
 #                           the X session's, as setxkbmap says it (also after a key of the desktop
 #                           changed it), or system when there is no X: the one the system was set to
@@ -123,6 +129,10 @@ set -u
 LC_ALL=C; export LC_ALL
 setup="/cdrom/minos/setup"; log="/tmp/minos-installer.log"; status="/tmp/minos-installer.status"
 progress="/tmp/minos-installer.progress"; pidfile="/tmp/minos-installer.pid"
+#the read of the disks kept between calls (_map_keep): under /run, where only root writes, since what the
+#engine plans with must not be something a user could have written. Readable by all, as lsblk is: an
+#interface tells from its key whether edit will read the disks again, and says so while it waits
+map_dir="/run/minos-installer"; map_kept="${map_dir}/map"; map_form="minos-installer-engine map 1"
 #the EFI system partition made on a whole disk: the boot loader takes 10M of it, firmware updates more
 esp_mib=512
 #the least a partition of its own for /home is worth
@@ -145,6 +155,7 @@ timezones_own="America/Mexico_City America/Caracas America/New_York"
 esp_types="c12a7328-f81f-11d2-ba4b-00a0c93ec93b 0xef"
 bios_boot_type="21686148-6449-6e6f-744e-656564454649"
 tab="$(printf '\t')"
+nl="$(printf '\nx')"; nl="${nl%x}"
 
 _die() { #message => on stderr, exit 1
     printf "%s\n" "minos-installer-engine: ${*}" >&2
@@ -335,6 +346,37 @@ E=O=F
         done
     done
     sort -t "${tab}" -k 2,2 -k 4,4n -k 3,3n -o "${map}" "${map}"
+}
+
+_map_key() { #=> what the read of the disks depends on that the kernel tells with no process started: the
+    #partitions it knows (/proc/partitions) and the devices mounted (the /dev/ lines of /proc/self/mounts),
+    #a line each, as the interface's _disks_key reads them. A file system made or a type changed with
+    #the table left as it was is not in it: what edit plans with may be that old, and apply reads anew
+    cat /proc/partitions 2>/dev/null
+    grep '^/dev/' /proc/self/mounts 2>/dev/null
+    printf "x"
+}
+
+_map_keep() { #key => map kept, with KEY (_map_key, taken before it was read): its form, the key, "map",
+    #its lines, "end". Written aside and moved into place, so a read of it finds the last one whole. One
+    #that cannot be written is no failure of the verb: the next edit reads the disks again
+    { mkdir -p "${map_dir}" && chmod 755 "${map_dir}"; } || return 0
+    if ! { { printf "%s\n%smap\n" "${map_form}" "${1%x}"; cat "${map}"; printf "end\n"; } > "${map_kept}.${$}" &&
+        chmod 644 "${map_kept}.${$}" && mv -f "${map_kept}.${$}" "${map_kept}"; }; then
+        rm -f "${map_kept}.${$}"
+    fi
+}
+
+_map_take() { #key => true when the map kept is of KEY, and map is it now
+    [ -f "${map_kept}" ] || return 1
+    _map_take__kept="$(cat "${map_kept}" 2>/dev/null; printf "x")"; _map_take__kept="${_map_take__kept%x}"
+    _map_take__head="$(printf "%s\n%smap\n" "${map_form}" "${1%x}"; printf "x")"; _map_take__head="${_map_take__head%x}"
+    case "${_map_take__kept}" in
+        "${_map_take__head}"*"end${nl}") ;;
+        *) return 1 ;;
+    esac
+    _map_take__rows="${_map_take__kept#"${_map_take__head}"}"
+    printf "%s" "${_map_take__rows%"end${nl}"}" > "${map}"
 }
 
 _of() { #partition field => that field of its line in map (the numbers of _scan); nothing when it is not there
@@ -1731,12 +1773,13 @@ case "${verb}" in
         applying="$(_applying)"
         printf "%s\n" "firmware ${firmware}" "root-mib ${root_mib}" "esp-mib ${esp_mib}" "system-mib ${system_mib}" \
             "medium ${medium:--}" "try ${try:-no}" "log ${log}" "progress ${progress}" "applying ${applying:--}" \
-            "timezone $(_timezone_default)" ;;
+            "timezone $(_timezone_default)" "map ${map_kept}" ;;
     disks)
         [ "${#}" -le 1 ] || _usage
         case "${1:-0}" in *[!0-9]*) _usage ;; esac
         watched="${1:-}"
-        _scan; _list_disks ;;
+        _disks__key="$(_map_key)"
+        _scan; _map_keep "${_disks__key}"; _list_disks ;;
     partitions)
         [ "${#}" -le 1 ] || _usage
         [ "${#}" = 0 ] || _is_disk "${1}" || _die "${1} is not a disk"
@@ -1754,6 +1797,7 @@ case "${verb}" in
             *) _usage ;;
         esac ;;
     edit)
+        _edit__fresh=""; [ "${1:-}" != "--fresh" ] || { _edit__fresh="yes"; shift; }
         [ "${#}" -ge 2 ] || _usage
         _is_disk "${1}" || _die "${1} is not a disk"
         _edit__disk="${1}"; _edit__file="${2}"; shift 2
@@ -1763,7 +1807,12 @@ case "${verb}" in
                 *) _die "${_edit__word} is no choice" ;;
             esac
         done
-        _scan; _edit "${_edit__disk}" "${_edit__file}" ;;
+        #the read kept, while the kernel tells of the same partitions and mounts; else read again, and kept
+        _edit__key="$(_map_key)"
+        if [ -n "${_edit__fresh}" ] || ! _map_take "${_edit__key}"; then
+            _scan; _map_keep "${_edit__key}"
+        fi
+        _edit "${_edit__disk}" "${_edit__file}" ;;
     review|check|describe)
         [ "${#}" -ge 1 ] || _usage
         plan="${1}"; [ -f "${plan}" ] || _die "no plan ${plan}"
@@ -1792,6 +1841,7 @@ case "${verb}" in
         plan="${1}"; user="${2}"; [ -f "${plan}" ] || _die "no plan ${plan}"
         IFS= read -r password || :
         [ -z "$(_applying)" ] || _die "an install is running already (process $(_applying)): what it says is in ${log}"
+        rm -f "${map_kept}"
         _scan
         problems="$(_check; _user_refusal "${user}"; _password_refusal "${password}")"
         [ -z "${problems}" ] || { printf "%s\n" "${problems}" >&2; _die "the plan is not applied: nothing was written"; }
@@ -1810,6 +1860,7 @@ case "${verb}" in
         [ "${#}" = 1 ] || _usage
         [ -n "${try}" ] || _die "empty is for --try"
         _is_disk "${1}" || _die "${1} is not a disk"
+        rm -f "${map_kept}"
         _scan
         problems="$(_disk_refusal "${1}")"
         [ -z "${problems}" ] || _die "${1}: ${problems}"
