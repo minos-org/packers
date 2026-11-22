@@ -139,7 +139,9 @@ and draws nothing. The installer draws its first screen before it has the disks,
 the background, and keeps what it read in the user's directory of the session (`$XDG_RUNTIME_DIR`, a
 tmpfs): the next opening lists them from there, with no process started, while the kernel's partitions
 and mounts are the ones they were read with, and `r` on the screen of the disks reads them again. What
-writes to a disk never takes them from there: `edit`, `apply` and `empty` read the disk themselves.
+writes to a disk never takes them from there: `apply` and `empty` read the disk themselves, and `edit`, which
+writes only a plan, takes the engine's own last read (kept under `/run`, where only root writes) while the
+kernel's partitions and mounts are the same, and reads the disk again when they are not.
 
     # minos-installer-engine disks                    # the disks, and why minos cannot go to one
     # minos-installer-engine plan whole /dev/sda > plan     # or: plan partitions ROOT [ESP] [keep]
@@ -165,8 +167,9 @@ in `/tmp/minos-installer.status`.
 `minos-installer` is the interface over it: a wizard this script draws by itself in a terminal of 80 by 24
 (escape sequences, keys read one at a time; urxvt, the Linux console, ssh), with the steps along the top
 and every step going back and forward. An intro; the disk, asked when there are several; the plan the
-engine proposes, the disk as a bar now and after and what is done in words, with the partition table one
-key away (`t`); the user and its password; one confirmation, two buttons, the one that goes back holding
+engine proposes, asked for in the background as soon as the disk is known, its screen drawn at once and
+filled in when the plan comes: the disk as a bar now and after and what is done in words, with the
+partition table one key away (`t`); the user and its password; one confirmation, two buttons, the one that goes back holding
 the cursor and the other naming what it erases; the install as it happens; the end. `c` changes the plan
 line by line without leaving the installer: another disk, the whole disk or its partitions and free room,
 a partition to replace or to keep, a size for minos, a partition for `/home`, each change made a new plan
@@ -190,15 +193,18 @@ The step of the user answers one worry, whether what was typed is what was meant
 judged by the engine (`user NAME`), which refuses it in a sentence that says what a name is: lower case
 letters, digits, `-` and `_`, a letter first, 32 at most, and no user or group the copied system has. The
 password is asked twice while it is typed blind and once while it is seen (`F5`, or `Ctrl-P` where a
-terminal keeps the function keys). The step has five fields, in this order: the name, the password, the same
-again, the keyboard and the time zone. `Tab` goes through all five and round again; `Enter` on the three that
-are typed goes on to the next of them, and from the last to the next step; `Enter` on the keyboard or the
-time zone opens its list, where the arrows and the page keys move, what is typed narrows it by name, `Enter`
-takes the one under the cursor and `Esc` leaves it as it was. The step needs no letter to be worked: `Tab`,
+terminal keeps the function keys). The step has five fields, in this order: the keyboard, the time zone, the
+name, the password and the same again, and the cursor starts on the keyboard. `Tab` goes through all five and
+round again; `Enter` on the keyboard or the time zone opens its list, where the arrows and the page keys
+move, what is typed narrows it by name, `Enter` takes the one under the cursor and goes on to the next field,
+and `Esc` leaves it as it was; `Enter` on the three that are typed goes on to the next of them, and from the
+last to the next step. The step needs no letter to be worked: `Tab`,
 the arrows, `Enter` and `Esc` say the same whatever the keyboard. The keyboard shown is the one that is
 active, as the X session has it (`setxkbmap -query`, so also after minos' own key, Alt and the right Shift);
 its list has every layout xkb knows, minos' own first (`minos-config keyboard-layouts`), narrowed by the
-layout's code or its name, and what was typed as a password goes with the old keyboard. On the console the
+layout's code or its name. A password typed with the old keyboard stays when each of its keys says the same
+with the new one (as `xmodmap` lists the keys), and goes when one does not or when that cannot be told; the
+step says which, and when it went the cursor goes to the password. On the console the
 keyboard is the one the system was set to and is not changed from the installer. The time zone is shown with
 the time it is there: minos' own, America/Mexico_City, until another is chosen. Its list has every zone the
 session's tzdata has (its `tzdata.zi`), minos' three first (Mexico City, Caracas, New York: the engine names
@@ -323,8 +329,9 @@ It keeps the screen at GRUB's menu, on the desktop, with the probe and with the 
     $ iso/live-check output/minos-24.04-amd64.iso secureboot usb output/live
 
 `iso/install-check` installs minos from the live session onto an empty disk (SATA or NVMe) with no
-network: the installer's key (`Win+i`) must open its window, and a probe has the installer's engine plan
-the whole disk and apply that plan (the screens are not answered: their questions are still changing).
+network: the installer's key (`Win+i`) must open its window, and the installer is then answered by its keys
+as a person answers it, each screen waited for by its window's title: the intro, the plan as proposed, the
+user's step from the keyboard, its first field, the confirmation, the install and its end.
 Then the disk boots alone, still with no network, to slim, where the user logs in, and to i3, and
 stays up until `minos-untrim` has had its try (after connman's 2 minutes of waiting for a network), which
 must fail and leave the unit enabled; and, with `PHASES="install boot untrim"`, once more with a network,
