@@ -8,7 +8,7 @@
 #BUILD=live makes the box from minos' own installer instead: setup's live mode onto a loop disk
 #(scripts/live.sh, as root), its first boot with box.sh as Packer runs it, export.sh; no Packer, no subiquity,
 #no Ubuntu ISO. BUILD=given checks the box BOX_DIR already holds (NAME.box and NAME.sha256).
-#usage: [FLAVOURS="core desktop"] [BUILD=packer|live|given] [ORIGIN=bench BENCH=DIR] [SETUP=FILE]
+#usage: [FLAVOURS="core desktop"] [BUILD=packer|live|given] [ORIGIN=bench BENCH=DIR] [SETUP=FILE|URL]
 #       [MIRROR=URI] [BOX_DIR=DIR] [DISK_SIZE=SIZE] [STEPS="install vagrant"] ci/boxes RELEASE...
 #       MIRROR, the Ubuntu archive the installer fetches from (minos.pkr.hcl's mirror): by default the one
 #       this machine's apt reads (ci/mirror), on a GitHub-hosted runner its cloud's; the box keeps
@@ -17,9 +17,10 @@
 #       ORIGIN=bench, for test builds: minos from the packages in DIR/SERIES (minos' bench leaves them in
 #       out/SERIES) and the setup script FILE, instead of the minos archive and minos.io/s (minos.pkr.hcl,
 #       origin bench); it needs dpkg-scanpackages (dpkg-dev). ci/verdict passes only boxes of the archive
-#       BUILD=live, from the minos archive only: SETUP names the installer it runs (minos-org.github.com/setup);
-#       DISK_SIZE the size of the box's disk (10G) and STEPS the steps of scripts/live.sh it runs: install alone
-#       stops after it and keeps the disk, vagrant alone goes on from the disk that install kept
+#       BUILD=live, from the minos archive only: SETUP names the installer it runs (minos-org.github.com/setup),
+#       a file or an https URL, https://minos.io/s when absent; DISK_SIZE the size of the box's disk (10G) and
+#       STEPS the steps of scripts/live.sh it runs: install alone stops after it and keeps the disk, vagrant
+#       alone goes on from the disk that install kept
 #       needs packer's and the boxes' tools on the PATH: qemu-system-x86, qemu-utils, xorriso, curl, unzip,
 #       file, libxml2-utils, openssh-client, zerofree, e2fsprogs, xz-utils, and sudo for installing
 #       Vagrant's package and for the qemu-nbd of scripts/export.sh; BUILD=live needs sudo for losetup,
@@ -161,6 +162,18 @@ _wants() { #$1 a step of scripts/live.sh => true when STEPS runs it (both by def
     return 1
 }
 
+_fetch_setup() { #$1 a file or an https URL, $2 file => the minos installer in FILE. It carries the key of the
+                 #minos archive, so whatever it installs is trusted because of it: https or a file, never http
+    case "${1}" in
+        https://*) curl --proto '=https' --tlsv1.2 -fsSL -o "${2}" "${1}" || { printf "%s\\n" "cannot download ${1}"; return 1; } ;;
+        *) cp "${1}" "${2}" || return 1 ;;
+    esac
+    grep -q '^_minos_archive_key()' "${2}" || { printf "%s\\n" "${1} is not the minos installer: it carries no archive key"; return 1; }
+    #scripts/live.sh starts it with no countdown and gives the box its keyboard and time zone
+    { grep -q -e '--now)' "${2}" && grep -q -e '--keyboard)' "${2}" && grep -q -e '--timezone)' "${2}"; } ||
+        { printf "%s\\n" "${1} takes no --now, no --keyboard or no --timezone, which scripts/live.sh passes"; return 1; }
+}
+
 _kill_qemu() { #$1 pid: the machine stopped, and gone before what comes next takes its port
     kill "${1}" 2>/dev/null
     while kill -0 "${1}" 2>/dev/null; do sleep 1; done
@@ -169,10 +182,13 @@ _kill_qemu() { #$1 pid: the machine stopped, and gone before what comes next tak
 _build_live() { #setup's live mode onto a loop disk and the vagrant step inside it (scripts/live.sh, as root),
                 #then what Packer does after an install: the first boot with box.sh, a clean poweroff, export.sh
     start="$(date +%s)"
+    _fetch_setup "${setup}" "${tmp}/setup" > "${logs}/setup.log" 2>&1 ||
+        { _line "live build (${origin})" "FAIL  setup: $(tail -1 "${logs}/setup.log")"; return 1; }
+    _line "live setup" "${setup}: $(sha256sum "${tmp}/setup" | cut -d' ' -f1)"
     #sudo keeps none of this environment: what live.sh reads is given to it
     # shellcheck disable=SC2024 # the log is this user's: only live.sh needs root
     sudo env STEPS="${STEPS:-install vagrant}" DISK_SIZE="${DISK_SIZE:-10G}" \
-        sh "${w}/scripts/live.sh" "${release}" "${flavour}" "${setup}" "${out}" > "${logs}/live.log" 2>&1; status="${?}"
+        sh "${w}/scripts/live.sh" "${release}" "${flavour}" "${tmp}/setup" "${out}" > "${logs}/live.log" 2>&1; status="${?}"
     sudo chown -R "$(id -u):$(id -g)" "${out}/${name}"
     if [ -f "${out}/${name}/install.log" ]; then sed 's/^[0-9]* //' "${out}/${name}/install.log" > "${logs}/install.log"; fi
     installed="$(date +%s)"
@@ -397,8 +413,14 @@ case "${build}" in
     live)
         #setup's live mode installs minos from the minos archive; the bench's packages reach only Packer's
         [ "${origin}" = "ppa" ] || { printf "%s\\n" "BUILD=live installs from the minos archive: ORIGIN=ppa" >&2; exit 2; }
-        [ -f "${SETUP:-}" ] || { printf "%s\\n" "BUILD=live: SETUP names the setup script it runs" >&2; exit 2; }
-        setup="$(cd "$(dirname "${SETUP}")" && pwd)/$(basename "${SETUP}")"
+        #the installer people run, or the one named: https or a file (_fetch_setup)
+        setup="${SETUP:-https://minos.io/s}"
+        case "${setup}" in
+            https://*) : ;;
+            *://*) printf "%s\\n" "BUILD=live: SETUP=${setup}: the minos installer comes from https or from a file" >&2; exit 2 ;;
+            *) [ -f "${setup}" ] || { printf "%s\\n" "BUILD=live: no ${setup}: SETUP names the installer, a file or an https URL" >&2; exit 2; }
+               setup="$(cd "$(dirname "${setup}")" && pwd)/$(basename "${setup}")" ;;
+        esac
         for step in ${STEPS:-install vagrant}; do
             case "${step}" in install|vagrant) : ;; *) printf "%s\\n" "BUILD=live: STEPS=${STEPS}: the steps are install and vagrant" >&2; exit 2 ;; esac
         done ;;
