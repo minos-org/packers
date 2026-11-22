@@ -1,6 +1,7 @@
 # The minos boxes and the minos ISOs, built and checked on GitHub-hosted runners with KVM. A box: Packer
 # installs Ubuntu's live-server ISO with minos' recipe (minos.pkr.hcl), ci/boxes boots the result the way
-# VirtualBox and QEMU would and checks minos inside it. An ISO, one per release: ci/iso builds it from
+# VirtualBox and QEMU would and checks minos inside it; the same six are also made by minos' own installer
+# (live-box), and checked alike, but not published yet. An ISO, one per release: ci/iso builds it from
 # scratch (iso/build) and uses it in QEMU as a person would, its live session and an install from it.
 # Both fetch Ubuntu's packages from $MIRROR (ci/mirror), and what they keep reads archive.ubuntu.com
 # whatever it is. ci/verdict says whether each passed, judging what every minos system must show
@@ -256,6 +257,147 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: logs-${{ env.NAME }}
+          path: ~/minos-boxes-out/logs/${{ env.NAME }}/
+          if-no-files-found: warn
+          retention-days: 3
+
+  # The same six boxes made by minos' own installer instead (ci/boxes, BUILD=live): the live mode of the
+  # installer at minos.io/s onto a loop disk (scripts/live.sh), its first boot with box.sh and export.sh as
+  # Packer's, and then every check Packer's boxes get. No Packer, no subiquity, no Ubuntu ISO. Until the six
+  # pass this way, the boxes Packer makes are the published ones: publish does not need this job, and a box
+  # that fails here holds no release back. Its artifacts have names of their own (live-minos-...), which the
+  # boxes publish downloads (minos-*) leave out
+  live-box:
+    name: live-${{ matrix.flavour }}-${{ matrix.release }}
+    needs: decide
+    if: needs.decide.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { flavour: core, release: "22.04" }
+          - { flavour: core, release: "24.04" }
+          - { flavour: core, release: "26.04" }
+          - { flavour: desktop, release: "22.04" }
+          - { flavour: desktop, release: "24.04" }
+          - { flavour: desktop, release: "26.04" }
+    env:
+      FLAVOUR: ${{ matrix.flavour }}
+      RELEASE: ${{ matrix.release }}
+      NAME: minos-${{ matrix.flavour }}-${{ matrix.release }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup's live mode installs the boot loader of the firmware the machine it runs on booted with, and a
+      # box boots by BIOS: the line says which firmware this runner booted with (scripts/live.sh stops on
+      # UEFI), and its swap, which a box built here must not name
+      - name: the runner's user opens /dev/kvm
+        run: |
+          printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+              sudo tee /etc/udev/rules.d/99-kvm4all.rules >/dev/null
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+          printf '%s\n' "$(nproc) cpus, $(free -m | awk '/^Mem:/ {print $2}') MB, $(df -h --output=avail / | tail -1) free on /"
+          printf '%s\n' "firmware $([ -d /sys/firmware/efi ] && echo UEFI || echo BIOS); swap $(swapon --show=NAME,TYPE --noheadings | tr '\n' ' ')"
+
+      # the packages' files are cached as the Packer job's are, under a key of their own: the list differs.
+      # No Packer and no xorriso. The runner has no debootstrap, and setup fetches one that knows every
+      # release it installs with wget and unpacks it with busybox
+      - name: cache keys
+        id: keys
+        timeout-minutes: 10
+        run: |
+          printf '%s\n' 'Acquire::http::Timeout "60";' 'Acquire::https::Timeout "60";' |
+              sudo tee /etc/apt/apt.conf.d/99minos-timeouts >/dev/null
+          printf '%s\n' qemu-system-x86 qemu-utils openssh-client curl ca-certificates file libxml2-utils zerofree \
+              fdisk wget busybox-static > "${RUNNER_TEMP}/packages"
+          sudo apt-get update -q
+          apt="$(xargs sudo apt-get install -qq --no-install-recommends --print-uris < "${RUNNER_TEMP}/packages" |
+              awk '{print $2}' | sort | sha256sum | cut -c1-16)"
+          tools="$(sed -n 's/^packer_version="\([^"]*\)"; vagrant_version="\([^"]*\)"$/packer-\1-vagrant-\2/p' ci/boxes)"
+          [ -n "${tools}" ] || { printf '%s\n' "no packer_version and vagrant_version in ci/boxes"; exit 1; }
+          printf '%s\n' "apt=${apt}" "tools=${tools}" | tee -a "${GITHUB_OUTPUT}"
+          sudo install -d -o "$(id -u)" /var/cache/minos-boxes-apt
+
+      - name: the packages' files (cache)
+        id: apt
+        uses: actions/cache/restore@v6
+        with:
+          path: /var/cache/minos-boxes-apt
+          key: boxes-live-apt-${{ steps.keys.outputs.apt }}
+
+      - name: QEMU and the tools of the checks
+        id: install
+        timeout-minutes: 15
+        run: |
+          start="$(date +%s)"
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo install -d -o _apt /var/cache/minos-boxes-apt/partial
+          xargs sudo NEEDRESTART_SUSPEND=1 DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              -o Dir::Cache::Archives=/var/cache/minos-boxes-apt < "${RUNNER_TEMP}/packages"
+          sudo rm -f /var/cache/minos-boxes-apt/lock
+          sudo chown -R "$(id -u)" /var/cache/minos-boxes-apt
+          printf '%s\n' "installed in $(($(date +%s) - start))s; $(qemu-system-x86_64 --version | head -1)"
+
+      # Vagrant, its keys and the OVF schemas, as the Packer job keeps them (that job saves them; Packer, in
+      # them too, goes unused); ci/boxes fetches what is missing
+      - name: Vagrant, its keys, the OVF schemas (cache)
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/minos-boxes-cache/bin
+            ~/minos-boxes-cache/plugins
+            ~/minos-boxes-cache/keys
+            ~/minos-boxes-cache/ovf
+            ~/minos-boxes-cache/vagrant_*.deb
+          key: boxes-tools-${{ steps.keys.outputs.tools }}
+
+      # as this user: ci/boxes runs scripts/live.sh through sudo, with the installer at minos.io/s (SETUP)
+      - name: build and check ${{ env.NAME }} with the installer's live mode
+        run: BUILD=live FLAVOURS="${FLAVOUR}" sh ci/boxes "${RELEASE}" 2>&1 | tee "${RUNNER_TEMP}/checks.log"
+
+      - name: verdict
+        if: success() || failure()
+        run: |
+          mkdir -p ~/minos-boxes-out/logs/"${NAME}"
+          if [ -f "${RUNNER_TEMP}/checks.log" ]; then cp "${RUNNER_TEMP}/checks.log" ~/minos-boxes-out/logs/"${NAME}"/; fi
+          sh ci/verdict "${FLAVOUR}" "${RELEASE}" "${RUNNER_TEMP}/checks.log" | tee ~/minos-boxes-out/logs/"${NAME}"/verdict.log
+
+      - name: summary
+        if: success() || failure()
+        run: |
+          {   printf '### %s, live\n\n```\n' "${NAME}"
+              for log in checks verdict; do
+                  if [ -f ~/minos-boxes-out/logs/"${NAME}/${log}.log" ]; then cat ~/minos-boxes-out/logs/"${NAME}/${log}.log"; fi
+              done
+              printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: keep the packages' files (cache)
+        if: (success() || failure()) && steps.install.outcome == 'success' && steps.apt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: /var/cache/minos-boxes-apt
+          key: boxes-live-apt-${{ steps.keys.outputs.apt }}
+
+      - name: the box and its checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: live-${{ env.NAME }}
+          path: |
+            ~/minos-boxes-out/${{ env.NAME }}.box
+            ~/minos-boxes-out/${{ env.NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: the logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-live-${{ env.NAME }}
           path: ~/minos-boxes-out/logs/${{ env.NAME }}/
           if-no-files-found: warn
           retention-days: 3

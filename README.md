@@ -79,12 +79,24 @@ index is written for them):
 
     $ ORIGIN=bench BENCH=../bench/out SETUP=../minos-org.github.com/setup sh ci/boxes 24.04
 
+The same box, made by the minos installer's live mode instead of Packer, with no Ubuntu ISO and no
+subiquity: `scripts/live.sh` partitions a disk image like Packer's and runs `setup live` onto it,
+`scripts/live-vagrant.sh` adds inside it what a Vagrant box needs, and the box boots once for
+`scripts/box.sh` and is exported as Packer's is. It runs as root through sudo, on a machine booted by
+BIOS (setup installs the boot loader of the firmware it runs on), with the installer at minos.io/s or the
+one named:
+
+    $ BUILD=live sh ci/boxes 24.04
+    $ BUILD=live SETUP=../minos-org.github.com/setup FLAVOURS=desktop sh ci/boxes 26.04
+
 Continuous integration
 ----------------------
 
 `.github/workflows/boxes.yml` builds the boxes and the ISOs on GitHub-hosted runners with KVM and checks
 each one. `ci/boxes` builds a box and boots its disk the way VirtualBox and QEMU would, `ci/box-check`
-looks at minos inside it. `ci/iso` builds the ISO of a release (`iso/build`), a job for each of 22.04,
+looks at minos inside it. A second job makes the same six boxes with the installer's live mode
+(`BUILD=live`) and checks them alike; until the six pass that way, the boxes Packer makes are the ones
+published, and a live box that fails holds no release back. `ci/iso` builds the ISO of a release (`iso/build`), a job for each of 22.04,
 24.04 and 26.04, checks its size and its checksum, and runs one general test: minos installed from it by
 UEFI onto an empty SATA disk with no network, the plan taken as the installer proposes it, and the disk
 booted alone (`iso/install-check`). The installer seldom changes, so the detailed checks are cases, run
