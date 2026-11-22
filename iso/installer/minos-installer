@@ -2104,9 +2104,13 @@ _step_confirm() { #=> the one confirmation: what will be done, and two buttons. 
         _step_confirm__style=""; [ "${r_loss_kind}" != "some" ] || _step_confirm__style="${s_danger}"
         _rows 10 "${_step_confirm__style}" 4 2 "${r_loss}"
         _row "${row}" "" ""; row="$((row + 1))"
-        _row "${row}" "" "    User    ${user}, keyboard ${keyboard}"; row="$((row + 1))"
-        _row "${row}" "" "    Zone    ${timezone}"; row="$((row + 1))"
-        _row "${row}" "" "    Starts  by $([ "${firmware_now}" = "uefi" ] && printf UEFI || printf BIOS), on its own, once the installation medium is out"; row="$((row + 1))"
+        #what was answered stands out from the words around it: the values, in bold, over their own places
+        _row "${row}" "" "    User    ${user}, keyboard ${keyboard}"
+        _put "${row}" 13 "${s_bold}" "${user}"; _put "${row}" "$((24 + ${#user}))" "${s_bold}" "${keyboard}"; row="$((row + 1))"
+        _row "${row}" "" "    Zone    ${timezone}"; _put "${row}" 13 "${s_bold}" "${timezone}"; row="$((row + 1))"
+        _step_confirm__firmware="UEFI"; [ "${firmware_now}" = "uefi" ] || _step_confirm__firmware="BIOS"
+        _row "${row}" "" "    Starts  by ${_step_confirm__firmware}, on its own, once the installation medium is out"
+        _put "${row}" 16 "${s_bold}" "${_step_confirm__firmware}"; row="$((row + 1))"
         while [ "${row}" -le 16 ]; do _row "${row}" "" ""; row="$((row + 1))"; done
         _row 17 "" "    This is the last step you can go back from."
         _row 18 "" ""
