@@ -70,14 +70,17 @@ _install() { #setup's live mode onto a new disk image: the disk Packer gives sub
     # shellcheck disable=SC2086 # a list of options
     mkfs.ext4 -q ${_install__features} "${loop}p2"
     command -v udevadm >/dev/null 2>&1 && udevadm settle
-    #setup reads the terminal for nothing; its exit status crosses the pipe in a file
+    #setup reads the terminal for nothing and starts at once (--now); boxes travel, so they get the us keyboard
+    #and UTC, as the boxes Packer makes, not the keyboard and the zone of the machine that builds them. Its exit
+    #status crosses the pipe in a file
     { _install__rc=0
-      sh "${setup}" live "${flavour}" "${loop}p2" "${user}" "${user}" --release "${release}" < /dev/null 2>&1 || _install__rc="${?}"
+      sh "${setup}" live "${flavour}" "${loop}p2" "${user}" "${user}" --release "${release}" \
+          --now --keyboard us --timezone Etc/UTC < /dev/null 2>&1 || _install__rc="${?}"
       printf "%s\\n" "${_install__rc}" > "${dir}/install.status"; } | _stamp > "${dir}/install.log"
     _detach_disk
     _install__status="$(cat "${dir}/install.status")"; rm -f "${dir}/install.status"
     _install__log="${dir}/install.log"
-    printf "live: setup live %s %s: exit %s in %ss; countdowns %ss, debootstrap %ss, in the chroot %ss (updates %s, grub %s, kernel %s, user %s, minos %s, upgrade %s, locale %s, boot loader %s)\\n" \
+    printf "live: setup live %s %s: exit %s in %ss; before the bootstrap %ss, debootstrap %ss, in the chroot %ss (updates %s, grub %s, kernel %s, user %s, minos %s, upgrade %s, locale %s, boot loader %s)\\n" \
         "${flavour}" "${release}" "${_install__status}" \
         "$(_since "${_install__log}" 'Minos Setup' '(DONE: Reboot|FAILED while)')" \
         "$(_since "${_install__log}" 'Minos Setup' 'Bootstrapping')" \

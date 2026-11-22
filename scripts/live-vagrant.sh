@@ -104,74 +104,14 @@ systemctl enable systemd-networkd.service
 mkdir -p /etc/systemd/system/tmp.mount.d
 printf '%s\n' '[Mount]' 'Options=defaults,noatime,nosuid,nodev,size=10%' > /etc/systemd/system/tmp.mount.d/exec.conf
 
-#boxes travel: UTC and the us keyboard, not the country of whoever installed them (setup's live mode sets latam
-#and America/Mexico_City)
-sed -i -e '/^XKBLAYOUT/ s:=.*:="us":' -e '/^XKBVARIANT/ s:=.*:="":' /etc/default/keyboard
-ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime
-dpkg-reconfigure -fnoninteractive tzdata
-
 #grub-pc installs itself again on its upgrades, to the disk setup named: the loop device of the machine that
 #built the box. In the box the disk is the first SATA disk VirtualBox gives an imported machine
 printf '%s\n' "grub-pc grub-pc/install_devices multiselect /dev/sda" | debconf-set-selections
 update-grub
 
-#what any minos install drops, list (a): a COPY of the slimming in autoinstall/user-data's late-commands, which
-#only the Packer path runs. setup's live mode now runs the same lists itself for every install (its
-#_live_slim_script): with a setup that carries them this finds nothing left to purge. Ubuntu's metapackages
-#may go, but what they pulled and every package of priority required, important or standard is marked manual
-#first
+#what any minos install drops (list (a) of autoinstall/user-data) setup's live mode purged itself, with the
+#services debootstrap brings that no minos package asks for (its _live_slim_script)
 _used() { df -m --output=used / | tail -1; }
-keep="$( { apt-cache depends --recurse --installed --no-recommends --no-suggests --no-conflicts --no-breaks \
-        --no-replaces --no-enhances minos-core minos-desktop 2>/dev/null | grep -v '^[ <]'
-    dpkg-query -W -f='${db:Status-Abbrev} ${Priority} ${Package}\n' | awk '$1 ~ /^.i/ && $2 == "required" {print $3}'
-    _installed dbus sudo openssh-server netplan.io systemd-resolved systemd-timesyncd 'grub*' 'shim*' 'linux-image-*' \
-        'linux-modules-*' initramfs-tools kbd console-setup keyboard-configuration locales tzdata ca-certificates \
-        dracut dracut-core ubuntu-release-upgrader-core
-} | sort -u)"
-ubuntu="$(_installed ubuntu-minimal ubuntu-server-minimal ubuntu-standard ubuntu-server)" || :
-pulled=""
-# shellcheck disable=SC2086 # a list of packages
-[ -z "${ubuntu}" ] || pulled="$(dpkg-query -W -f='${Depends}, ${Pre-Depends}, ${Recommends}\n' ${ubuntu} | tr ',' '\n' |
-    sed 's/[|(].*//; s/:.*//; s/ //g' | grep .)" || :
-# shellcheck disable=SC2086,SC2046 # lists of packages
-apt-mark manual $( { [ -z "${pulled}" ] || _installed ${pulled}; printf "%s\n" "${keep}"
-    dpkg-query -W -f='${db:Status-Abbrev} ${Priority} ${Package}\n' |
-        awk '$1 ~ /^.i/ && $2 ~ /^(required|important|standard)$/ {print $3}'; } | sort -u) > /dev/null
-_remove() { #$1 what, then packages: purge the installed ones minos does not need, and what only they pulled
-    _remove__what="${1}"; shift
-    _remove__pkgs="$(_installed "${@}" | grep -vxF "${keep}")" || :
-    for _remove__pkg in ${_remove__pkgs}; do
-        if apt-get -s purge "${_remove__pkg}" | awk '/^Purg / {print $2}' | grep -qxF "${keep}"; then
-            _remove__pkgs="$(printf "%s\n" ${_remove__pkgs} | grep -vx "${_remove__pkg}")" || :
-        fi
-    done
-    if [ -n "${_remove__pkgs}" ]; then
-        # shellcheck disable=SC2086 # a list of packages
-        printf "live-vagrant: %s purges %s\\n" "${_remove__what}" "$(apt-get -s purge ${_remove__pkgs} | awk '/^Purg / {printf "%s ", $2}')"
-        # shellcheck disable=SC2086
-        apt-get -y -q purge ${_remove__pkgs} > /dev/null
-        apt-get -y -q autoremove --purge > /dev/null
-    fi
-    printf "live-vagrant: %s %s\\n" "${_remove__what}" "$(_used)"
-}
-_remove "reports, advertising and Ubuntu Pro" apport apport-symptoms apport-core-dump-handler python3-apport \
-    python3-problem-report whoopsie popularity-contest ubuntu-report landscape-common landscape-client \
-    motd-news-config ubuntu-pro-client ubuntu-pro-client-l10n ubuntu-advantage-tools update-notifier-common \
-    pollinate sosreport
-_remove "cloud tools" cloud-guest-utils cloud-initramfs-copymods cloud-initramfs-dyn-netconf \
-    ubuntu-cloudimage-keyring grub-legacy-ec2 lxd-installer lxd-agent-loader open-vm-tools open-iscsi
-_remove "tools minos replaces or does not use" byobu screen eatmydata ed pastebinit run-one ltrace lshw \
-    info install-info usbutils psmisc ufw uidmap hdparm laptop-detect irqbalance os-prober needrestart \
-    software-properties-common python3-software-properties packagekit packagekit-tools iso-codes \
-    python3-babel python-babel-localedata xdg-user-dirs shared-mime-info publicsuffix mlocate plocate \
-    nano w3m ppp powermgmt-base ethtool vlan ifenslave fakeroot libc6-dev linux-libc-dev eject \
-    geoip-database krb5-locales 'language-pack-*' fonts-ubuntu-console accountsservice \
-    vim-tiny gawk xauth dmidecode bind9-host bind9-dnsutils dnsutils ftp tnftp inetutils-telnet telnet \
-    crash kdump-tools makedumpfile bpftool manpages-dev manpages binutils binutils-common \
-    'binutils-x86-64-linux-gnu' libbinutils libgprofng0 'libctf*' 'libsframe*' hwctl python3-setuptools
-_remove "servers minos never wanted (app-purge)" xinetd sasl2-bin 'sendmail*' sensible-mda rmail \
-    bsd-mailx 'apache2*' bind9 rpcbind postfix cifs-utils 'samba*'
-
 printf "live-vagrant: done, %s MB used\\n" "$(_used)"
 
 # vim: set ts=8 sw=4 tw=0 ft=sh :
