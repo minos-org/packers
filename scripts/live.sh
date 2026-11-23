@@ -4,8 +4,7 @@
 #Ubuntu ISO), then scripts/live-vagrant.sh adds inside it what a Vagrant base box needs, as
 #autoinstall/vagrant.yaml does for the boxes Packer makes. ci/boxes boots the image once for scripts/box.sh
 #and packs it with scripts/export.sh, as Packer does.
-#usage: [STEPS="install vagrant"] [DISK_SIZE=10G] live.sh RELEASE FLAVOUR SETUP OUTPUT     (as root, on a
-#       machine booted by BIOS)
+#usage: [STEPS="install vagrant"] [DISK_SIZE=10G] live.sh RELEASE FLAVOUR SETUP OUTPUT     (as root)
 #       => OUTPUT/minos-FLAVOUR-RELEASE/minos-FLAVOUR-RELEASE.raw, and beside it install.log: setup's output,
 #          each line after the second it was printed at
 #       needs losetup, sfdisk, mkfs.ext4, chroot, perl and the network; setup fetches debootstrap when the
@@ -54,14 +53,10 @@ _since() { #$1 log, $2 $3 two patterns => seconds from the first line matching $
 
 _install() { #setup's live mode onto a new disk image: the disk Packer gives subiquity, GPT with a BIOS boot
              #partition and one ext4 partition for everything (autoinstall/user-data: storage direct)
-    #setup installs the boot loader of the firmware the machine it runs on booted with (/sys/firmware/efi), and
-    #a box boots by BIOS, as VirtualBox starts an imported machine: on a machine booted by UEFI setup asks for
-    #an EFI system partition the disk does not have, and would make a box that boots by UEFI alone
-    if [ -d /sys/firmware/efi ]; then
-        printf "%s\\n" "live: this machine booted by UEFI, and setup's live mode installs GRUB for the firmware it runs on: a box boots by BIOS" >&2
-        return 1
-    fi
-    printf "%s\\n" "live: this machine booted by BIOS, as the box does"
+    #a box boots by BIOS, as VirtualBox starts an imported machine, whatever the machine that builds it booted
+    #by: setup is told (--firmware bios), or on a machine booted by UEFI it would install GRUB for EFI and ask
+    #for an EFI system partition the disk does not have
+    printf "%s\\n" "live: this machine booted by $([ -d /sys/firmware/efi ] && printf UEFI || printf BIOS), the box boots by BIOS"
     rm -rf "${dir}"; mkdir -p "${dir}"
     truncate -s "${DISK_SIZE:-10G}" "${disk}"
     printf '%s\n' 'label: gpt' 'start=2048, size=2048, type=21686148-6449-6E6F-744E-656564454649' \
@@ -84,7 +79,7 @@ _install() { #setup's live mode onto a new disk image: the disk Packer gives sub
     #status crosses the pipe in a file
     { _install__rc=0
       sh "${setup}" live "${flavour}" "${loop}p2" "${user}" "${user}" --release "${release}" \
-          --now --keyboard us --timezone Etc/UTC < /dev/null 2>&1 || _install__rc="${?}"
+          --now --keyboard us --timezone Etc/UTC --firmware bios < /dev/null 2>&1 || _install__rc="${?}"
       printf "%s\\n" "${_install__rc}" > "${dir}/install.status"; } | _stamp > "${dir}/install.log"
     _detach_disk
     _install__status="$(cat "${dir}/install.status")"; rm -f "${dir}/install.status"

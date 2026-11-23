@@ -169,9 +169,10 @@ _fetch_setup() { #$1 a file or an https URL, $2 file => the minos installer in F
         *) cp "${1}" "${2}" || return 1 ;;
     esac
     grep -q '^_minos_archive_key()' "${2}" || { printf "%s\\n" "${1} is not the minos installer: it carries no archive key"; return 1; }
-    #scripts/live.sh starts it with no countdown and gives the box its keyboard and time zone
-    { grep -q -e '--now)' "${2}" && grep -q -e '--keyboard)' "${2}" && grep -q -e '--timezone)' "${2}"; } ||
-        { printf "%s\\n" "${1} takes no --now, no --keyboard or no --timezone, which scripts/live.sh passes"; return 1; }
+    #scripts/live.sh starts it with no countdown and gives the box its keyboard, its time zone and its firmware
+    { grep -q -e '--now)' "${2}" && grep -q -e '--keyboard)' "${2}" && grep -q -e '--timezone)' "${2}" &&
+      grep -q -e '--firmware)' "${2}"; } ||
+        { printf "%s\\n" "${1} takes no --now, no --keyboard, no --timezone or no --firmware, which scripts/live.sh passes"; return 1; }
 }
 
 _kill_qemu() { #$1 pid: the machine stopped, and gone before what comes next takes its port

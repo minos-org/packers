@@ -83,8 +83,8 @@ The same box, made by the minos installer's live mode instead of Packer, with no
 subiquity: `scripts/live.sh` partitions a disk image like Packer's and runs `setup live` onto it,
 `scripts/live-vagrant.sh` adds inside it what a Vagrant box needs, and the box boots once for
 `scripts/box.sh` and is exported as Packer's is. It runs as root through sudo, on a machine booted by
-BIOS (setup installs the boot loader of the firmware it runs on), with the installer at minos.io/s or the
-one named:
+BIOS or by UEFI (setup installs GRUB for BIOS, `--firmware bios`, the way the box boots), with the
+installer at minos.io/s or the one named, which must know `--firmware`:
 
     $ BUILD=live sh ci/boxes 24.04
     $ BUILD=live SETUP=../minos-org.github.com/setup FLAVOURS=desktop sh ci/boxes 26.04

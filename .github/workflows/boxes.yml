@@ -290,9 +290,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # setup's live mode installs the boot loader of the firmware the machine it runs on booted with, and a
-      # box boots by BIOS: the line says which firmware this runner booted with (scripts/live.sh stops on
-      # UEFI), and its swap, which a box built here must not name
+      # a box boots by BIOS whatever this runner booted by (scripts/live.sh tells setup --firmware bios): the
+      # line says which firmware the runner booted with, and its swap, which a box built here must not name
       - name: the runner's user opens /dev/kvm
         run: |
           printf '%s\n' 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
