@@ -4,17 +4,20 @@ About
 Recipes to build the official minos images for [Vagrant](https://www.vagrantup.com/) and for
 [VirtualBox](https://www.virtualbox.org) without Vagrant, from 22.04 on.
 
-`minos.pkr.hcl` installs Ubuntu's live-server ISO (22.04, 24.04 or 26.04) with Ubuntu's own installer
-(subiquity) in QEMU, told what to do by the install recipe of minos, `autoinstall/user-data`. One build
-gives:
+The boxes are made by minos' own installer: `scripts/live.sh` runs its live mode (`setup live`, the
+installer at minos.io/s) onto a disk image of 22.04, 24.04 or 26.04, with no Ubuntu ISO and no Packer, and
+the box boots once for `scripts/box.sh` and is packed by `scripts/export.sh` (see Usage). The recipe that
+made them before is kept, and off in the CI: `minos.pkr.hcl` installs Ubuntu's live-server ISO with
+Ubuntu's own installer (subiquity) in QEMU, told what to do by the install recipe of minos,
+`autoinstall/user-data`. Either way, one build gives:
 
 - `minos-FLAVOUR-RELEASE.box`, a Vagrant box for VirtualBox (`vagrant box add`, see the
   [vagrant](https://github.com/minos-org/vagrant) repository for the catalogs), which VirtualBox
   without Vagrant imports too, once unpacked: it holds the machine as an OVF, `box.ovf`, and its disk;
 - `minos-FLAVOUR-RELEASE.sha256`, its checksum.
 
-The install recipe
-------------------
+Packer's install recipe
+-----------------------
 
 `autoinstall/user-data` is the install recipe of minos that the template gives Ubuntu's installer; the
 build's parts add the rest, the user among them. It reads two values from the installer's boot line:
@@ -42,13 +45,17 @@ commands run before the recipe's):
 - `autoinstall/bench.yaml`, test builds only: minos from the packages of minos' bench instead of the
   archive.
 
-`scripts/box.sh` runs on the first boot: the owner's commands for `vagrant`; what only a virtual machine
-can drop (the generic kernel and its headers, storage and radio tools, older kernels, and, through dpkg
-`path-exclude` so that it holds across kernel upgrades, the firmware tree and the drivers of hardware a
-VirtualBox or KVM guest never has: sound, cameras, sensors, physical graphics and network cards); cloud-init
-and snapd with their snaps, which can only go once the first boot is over; the services of Ubuntu's server
-seed that no minos package asks for (`unattended-upgrades`, `networkd-dispatcher`, `dbus-user-session`:
-a desktop's session bus comes from `dbus-x11`; on core, polkit); apt lists and logs; free space discarded.
+The first boot and the box
+--------------------------
+
+`scripts/box.sh` runs on the first boot, after either install: the owner's commands for `vagrant`; what
+only a virtual machine can drop (the generic kernel and its headers, storage and radio tools, older
+kernels, and, through dpkg `path-exclude` so that it holds across kernel upgrades, the firmware tree and
+the drivers of hardware a VirtualBox or KVM guest never has: sound, cameras, sensors, physical graphics and
+network cards); cloud-init and snapd with their snaps, which can only go once the first boot is over; the
+services of Ubuntu's server seed that no minos package asks for (`unattended-upgrades`,
+`networkd-dispatcher`, `dbus-user-session`: a desktop's session bus comes from `dbus-x11`; on core,
+polkit); apt lists and logs; free space discarded.
 `scripts/export.sh` turns the disk into the `.box`: it makes zeros of the free blocks the discard missed and
 of the ext4 journal, then converts the disk to a sparse VMDK, which holds only the grains with data, and
 packs it in a tar compressed with xz.
@@ -56,9 +63,20 @@ packs it in a tar compressed with xz.
 Usage
 -----
 
-    $ packer init .
-    $ packer build -var release=24.04 -var flavour=core .
-    $ vagrant box add --name minos/core-24.04 output/minos-core-24.04.box
+The boxes as the CI makes them, with the minos installer's live mode: `scripts/live.sh` partitions a disk
+image like Packer's and runs `setup live` onto it, `scripts/live-vagrant.sh` adds inside it what a Vagrant
+box needs, and the box boots once for `scripts/box.sh` and is packed by `scripts/export.sh`. `ci/boxes`
+does it all with `BUILD=live`, on a machine with KVM, and checks the box as the CI does, a `vagrant box
+add` among the checks; the box and its `.sha256` stay in `~/minos-boxes-out`. It runs as root through
+sudo, on a machine booted by BIOS or by UEFI (setup installs GRUB for BIOS, `--firmware bios`, the way the
+box boots), with the installer at minos.io/s or the one named, which must know `--firmware`:
+
+    $ BUILD=live sh ci/boxes 24.04
+    $ BUILD=live SETUP=../minos-org.github.com/setup FLAVOURS=desktop sh ci/boxes 26.04
+
+setup's chroot binds the machine's own `/dev`: `scripts/live.sh` compares the type, mode and owner of
+every node there before and after setup, and the build fails on any change (a runner's `/dev/kvm` once
+came out of it closed to the runner's user).
 
 VirtualBox without Vagrant imports the box's own OVF. The box is a tar of four files (`box.ovf`, its
 disk `box-disk1.vmdk`, and Vagrant's `metadata.json` and `Vagrantfile`) compressed with xz, which `tar xf`
@@ -69,7 +87,16 @@ recognizes on its own, so unpack it in a directory of its own and import `box.ov
     $ tar xf ../minos-core-24.04.box
     $ VBoxManage import box.ovf
 
-Test builds, with minos from a directory of packages (with its `Packages` index) and a local setup:
+With Packer, the recipe that made the boxes before, kept; the CI's job for it (`box`) is off, and deleting
+`false && ` from its `if:` in `.github/workflows/boxes.yml` builds and checks its six boxes again,
+unpublished:
+
+    $ packer init .
+    $ packer build -var release=24.04 -var flavour=core .
+    $ vagrant box add --name minos/core-24.04 output/minos-core-24.04.box
+
+Test builds, Packer's alone (the live mode installs from the minos archive), with minos from a directory
+of packages (with its `Packages` index) and a local setup:
 
     $ packer build -var release=24.04 -var origin=bench \
         -var bench=../bench/out/noble -var setup=../minos-org.github.com/setup .
@@ -79,33 +106,20 @@ index is written for them):
 
     $ ORIGIN=bench BENCH=../bench/out SETUP=../minos-org.github.com/setup sh ci/boxes 24.04
 
-The same box, made by the minos installer's live mode instead of Packer, with no Ubuntu ISO and no
-subiquity: `scripts/live.sh` partitions a disk image like Packer's and runs `setup live` onto it,
-`scripts/live-vagrant.sh` adds inside it what a Vagrant box needs, and the box boots once for
-`scripts/box.sh` and is exported as Packer's is. It runs as root through sudo, on a machine booted by
-BIOS or by UEFI (setup installs GRUB for BIOS, `--firmware bios`, the way the box boots), with the
-installer at minos.io/s or the one named, which must know `--firmware`:
-
-    $ BUILD=live sh ci/boxes 24.04
-    $ BUILD=live SETUP=../minos-org.github.com/setup FLAVOURS=desktop sh ci/boxes 26.04
-
-setup's chroot binds the machine's own `/dev`: `scripts/live.sh` compares the type, mode and owner of
-every node there before and after setup, and the build fails on any change (a runner's `/dev/kvm` once
-came out of it closed to the runner's user).
-
 Continuous integration
 ----------------------
 
 `.github/workflows/boxes.yml` builds the boxes and the ISOs on GitHub-hosted runners with KVM and checks
-each one. `ci/boxes` builds a box and boots its disk the way VirtualBox and QEMU would, `ci/box-check`
-looks at minos inside it. A second job makes the same six boxes with the installer's live mode
-(`BUILD=live`) and checks them alike; until the six pass that way, the boxes Packer makes are the ones
-published, and a live box that fails holds no release back. `ci/iso` builds the ISO of a release (`iso/build`), a job for each of 22.04,
-24.04 and 26.04, checks its size and its checksum, and runs one general test: minos installed from it by
-UEFI onto an empty SATA disk with no network, the plan taken as the installer proposes it, and the disk
-booted alone (`iso/install-check`). The installer seldom changes, so the detailed checks are cases, run
-only when named: `ci/iso 26.04 btrfs keyboard`, or `ci/iso 26.04 all` for every one. They are the live
-session by BIOS from a CD (`live-bios`), by UEFI with Secure Boot from a USB stick (`live-secureboot`) and
+each one. `ci/boxes` builds a box with the installer's live mode (`BUILD=live`, the `live-box` job) and
+boots its disk the way VirtualBox and QEMU would, `ci/box-check` looks at minos inside it; a box that
+fails holds the release back. Packer's job (`box`) is off, its recipe kept: deleting `false && ` from its
+`if:` builds and checks Packer's six boxes again beside them, unpublished. `ci/iso` builds the ISO of a
+release (`iso/build`), a job for each of 22.04, 24.04 and 26.04, checks its size and its checksum, and
+runs one general test: minos installed from it by UEFI onto an empty SATA disk with no network, the plan
+taken as the installer proposes it, and the disk booted alone (`iso/install-check`). The installer
+seldom changes, so the detailed checks are cases, run only when named: `ci/iso 26.04 btrfs keyboard`, or
+`ci/iso 26.04 all` for every one. They are the live session by BIOS from a CD (`live-bios`), by UEFI with
+Secure Boot from a USB stick (`live-secureboot`) and
 with the network's cable out (`live-nocable`) (`iso/live-check`); the general test's disk booted again
 with a network until `minos-untrim` is through (`untrim`); and installs by BIOS with another keyboard and
 time zone (`keyboard`), beside what an NVMe disk holds (`beside`), on btrfs (`btrfs`) and on xfs with
@@ -120,14 +134,15 @@ runs it inside each box and the live session's probe runs it from its CD (the ca
 builds them when the minos archive or the installer changed (`ci/fingerprint`); another branch builds them
 only when run by hand. The boxes and the ISOs are kept as artifacts of the run for three days.
 
-Both fetch Ubuntu's packages from the archive `MIRROR` names (`ci/mirror`; `iso/build -m`, the `mirror`
-variable of `minos.pkr.hcl`): the workflow sets `archive.ubuntu.com`, and an empty `MIRROR` takes the
-mirror the runner's own apt reads, inside GitHub's cloud. What a box or an ISO keeps in its apt sources is
+The ISO and Packer's boxes fetch Ubuntu's packages from the archive `MIRROR` names (`ci/mirror`;
+`iso/build -m`, the `mirror` variable of `minos.pkr.hcl`): the workflow sets `archive.ubuntu.com`, and an
+empty `MIRROR` takes the mirror the runner's own apt reads, inside GitHub's cloud; the installer's live
+mode fetches from `archive.ubuntu.com` itself. What a box or an ISO keeps in its apt sources is
 Ubuntu's archive itself, `archive.ubuntu.com` and `security.ubuntu.com`, whatever mirror built it:
 `scripts/box.sh` puts it back in a box, `iso/build` writes it in the live system, and `ci/probe-common`
 says it (`apt sources`), which `ci/verdict` checks.
 
-On `master`, once the six boxes and the three ISOs pass, `ci/publish` makes them the one release of this
+On `master`, once the six live boxes and the three ISOs pass, `ci/publish` makes them the one release of this
 repository, tagged with the day (`YYYY.MM.DD`): each box's `.box` and `.sha256`, and each ISO's `.iso` and
 `.sha256`. Only that release is kept. It is uploaded as a draft first and checked against the files;
 only then are the older releases deleted with their tags, and the draft published under the day's tag,
@@ -370,8 +385,13 @@ checks do to the machine (keys, screens, the serial port):
 Dependencies
 ------------
 
-- [Packer](https://developer.hashicorp.com/packer) 1.11 or later, and its QEMU plugin (`packer init`)
-- QEMU with KVM (`qemu-system-x86_64`, `qemu-img`); `xorriso` for test builds
+- QEMU with KVM (`qemu-system-x86_64`, `qemu-img`)
+- the boxes, from the installer's live mode: root through `sudo` for `scripts/live.sh` (`losetup`,
+  `sfdisk`, `mkfs.ext4`, `chroot`), `perl` and the network; setup fetches a debootstrap with `wget` and
+  unpacks it with `busybox` when the machine has none. The checks of `ci/boxes`: `curl`, `file`,
+  `libxml2-utils` and `openssh-client`
+- Packer's recipe, kept: [Packer](https://developer.hashicorp.com/packer) 1.11 or later, and its QEMU
+  plugin (`packer init`); `xorriso` for test builds
 - for `scripts/export.sh`: `qemu-nbd` (with the kernel's `nbd` module), `zerofree`, e2fsprogs and `xz`,
   and root for `qemu-nbd`, through `sudo` when the build runs as another user
 - the ISO: root, `debootstrap`, `squashfs-tools`, `xorriso`, `dosfstools`, `mtools`, `kmod` and `wget`

@@ -1,20 +1,21 @@
-# The minos boxes and the minos ISOs, built and checked on GitHub-hosted runners with KVM. A box: Packer
-# installs Ubuntu's live-server ISO with minos' recipe (minos.pkr.hcl), ci/boxes boots the result the way
-# VirtualBox and QEMU would and checks minos inside it; the same six are also made by minos' own installer
-# (live-box), and checked alike, but not published yet. An ISO, one per release: ci/iso builds it from
+# The minos boxes and the minos ISOs, built and checked on GitHub-hosted runners with KVM. A box: minos' own
+# installer, the live mode of minos.io/s, installs it onto a loop disk (live-box: ci/boxes with BUILD=live,
+# scripts/live.sh), and ci/boxes boots the result the way VirtualBox and QEMU would and checks minos inside
+# it. Packer's recipe (minos.pkr.hcl: Ubuntu's live-server ISO and Ubuntu's installer) is kept, and its job
+# (box) is off: its `if:` says how to turn it back on. An ISO, one per release: ci/iso builds it from
 # scratch (iso/build) and uses it in QEMU as a person would, its live session and an install from it.
-# Both fetch Ubuntu's packages from $MIRROR (ci/mirror), and what they keep reads archive.ubuntu.com
-# whatever it is. ci/verdict says whether each passed, judging what every minos system must show
-# (ci/probe-common) alike for both. They stay as artifacts of the run for a few days. On master, once the
-# six boxes and the three ISOs pass, ci/publish makes them the one release of this repository (the older
-# ones are deleted), and minos-org/vagrant lists the boxes in the catalogs Vagrant reads
-# (minos.io/vagrant/<box>.json) within the hour. Another branch builds and checks only when run by hand
-# (the push trigger is master's), and publishes nothing.
+# The ISO fetches Ubuntu's packages from $MIRROR (ci/mirror), the installer's live mode from
+# archive.ubuntu.com, and what both keep reads archive.ubuntu.com. ci/verdict says whether each passed,
+# judging what every minos system must show (ci/probe-common) alike for both. They stay as artifacts of the
+# run for a few days. On master, once the six boxes and the three ISOs pass, ci/publish makes them the one
+# release of this repository (the older ones are deleted), and minos-org/vagrant lists the boxes in the
+# catalogs Vagrant reads (minos.io/vagrant/<box>.json) within the hour. Another branch builds and checks
+# only when run by hand (the push trigger is master's), and publishes nothing.
 #
 # The boxes and the ISO are built from this repository, the minos archive and the installer at minos.io/s:
 # - a push to master that changes what they are made of here builds them all;
 # - the scheduled run builds them when the archive or the installer changed since the last ones that
-#   passed (ci/fingerprint; the fingerprint of the ones that passed is kept as a cache key);
+#   passed (ci/fingerprint; the fingerprint of the live boxes and ISOs that passed is kept as a cache key);
 # - a run by hand builds them all.
 name: boxes
 
@@ -67,12 +68,14 @@ jobs:
           printf '%s\n' "fingerprint ${hash}" "$(wc -l < fingerprint.txt) lines:"
           cat fingerprint.txt
 
+      # the key names the live boxes: a fingerprint whose boxes passed only as Packer's has no live boxes
+      # published yet, and a scheduled run builds them
       - name: boxes built from this fingerprint before
         id: known
         uses: actions/cache/restore@v6
         with:
           path: fingerprint.txt
-          key: boxes-fingerprint-${{ steps.fingerprint.outputs.hash }}
+          key: boxes-live-fingerprint-${{ steps.fingerprint.outputs.hash }}
           lookup-only: true
 
       - name: decide
@@ -92,7 +95,7 @@ jobs:
               schedule) build="$([ "${KNOWN}" = "true" ] && printf false || printf true)"; why="${scheduled}" ;;
               *) build=true; why="a ${EVENT} builds them all" ;;
           esac
-          # only master's boxes and ISOs become a release, and only when all of them pass (publish needs box and iso)
+          # only master's boxes and ISOs become a release, and only when all of them pass (publish needs live-box and iso)
           case "${REF}" in
               refs/heads/master) publish="${build}"; whence="the boxes of master, if all six pass" ;;
               *) publish=false; whence="only master publishes, this is ${REF}" ;;
@@ -101,10 +104,14 @@ jobs:
           printf '%s\n' "a scheduled run would ${scheduled}" "this ${EVENT} run: build=${build} (${why})" \
               "publish=${publish} (${whence})" | tee -a "${GITHUB_STEP_SUMMARY}"
 
+  # Packer's six boxes: Ubuntu's live-server ISO installed by Ubuntu's installer with minos' recipe
+  # (minos.pkr.hcl, autoinstall/). Off: the published boxes are live-box's. The recipe is kept, and this job
+  # with it; deleting `false && ` from its `if:` turns it back on, and its boxes are built and checked
+  # again beside live-box's, unpublished (publish downloads live-box's, remember follows live-box)
   box:
     name: ${{ matrix.flavour }}-${{ matrix.release }}
     needs: decide
-    if: needs.decide.outputs.build == 'true'
+    if: false && needs.decide.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     strategy:
@@ -261,12 +268,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-  # The same six boxes made by minos' own installer instead (ci/boxes, BUILD=live): the live mode of the
-  # installer at minos.io/s onto a loop disk (scripts/live.sh), its first boot with box.sh and export.sh as
-  # Packer's, and then every check Packer's boxes get. No Packer, no subiquity, no Ubuntu ISO. Until the six
-  # pass this way, the boxes Packer makes are the published ones: publish does not need this job, and a box
-  # that fails here holds no release back. Its artifacts have names of their own (live-minos-...), which the
-  # boxes publish downloads (minos-*) leave out
+  # The six boxes, made by minos' own installer (ci/boxes, BUILD=live): the live mode of the installer at
+  # minos.io/s onto a loop disk (scripts/live.sh), its first boot with box.sh and export.sh as Packer's were,
+  # and then every check a box gets. No Packer, no subiquity, no Ubuntu ISO. These are the published boxes:
+  # publish needs this job, so one box that fails here holds the release back. Its artifacts are named
+  # live-minos-FLAVOUR-RELEASE, which publish downloads and which Packer's (minos-FLAVOUR-RELEASE) never
+  # match; the files in them are minos-FLAVOUR-RELEASE.box and .sha256, the names of the release's assets
   live-box:
     name: live-${{ matrix.flavour }}-${{ matrix.release }}
     needs: decide
@@ -315,8 +322,8 @@ jobs:
           sudo apt-get update -q
           apt="$(xargs sudo apt-get install -qq --no-install-recommends --print-uris < "${RUNNER_TEMP}/packages" |
               awk '{print $2}' | sort | sha256sum | cut -c1-16)"
-          tools="$(sed -n 's/^packer_version="\([^"]*\)"; vagrant_version="\([^"]*\)"$/packer-\1-vagrant-\2/p' ci/boxes)"
-          [ -n "${tools}" ] || { printf '%s\n' "no packer_version and vagrant_version in ci/boxes"; exit 1; }
+          tools="$(sed -n 's/^.*vagrant_version="\([^"]*\)"$/vagrant-\1/p' ci/boxes)"
+          [ -n "${tools}" ] || { printf '%s\n' "no vagrant_version in ci/boxes"; exit 1; }
           printf '%s\n' "apt=${apt}" "tools=${tools}" | tee -a "${GITHUB_OUTPUT}"
           sudo install -d -o "$(id -u)" /var/cache/minos-boxes-apt
 
@@ -340,18 +347,17 @@ jobs:
           sudo chown -R "$(id -u)" /var/cache/minos-boxes-apt
           printf '%s\n' "installed in $(($(date +%s) - start))s; $(qemu-system-x86_64 --version | head -1)"
 
-      # Vagrant, its keys and the OVF schemas, as the Packer job keeps them (that job saves them; Packer, in
-      # them too, goes unused); ci/boxes fetches what is missing
+      # Vagrant, its keys and the OVF schemas, under a key of their own: the Packer job's tools (Packer and its
+      # plugin too) are saved by that job alone, which is off. ci/boxes fetches what is missing
       - name: Vagrant, its keys, the OVF schemas (cache)
+        id: tools
         uses: actions/cache/restore@v6
         with:
           path: |
-            ~/minos-boxes-cache/bin
-            ~/minos-boxes-cache/plugins
             ~/minos-boxes-cache/keys
             ~/minos-boxes-cache/ovf
             ~/minos-boxes-cache/vagrant_*.deb
-          key: boxes-tools-${{ steps.keys.outputs.tools }}
+          key: boxes-live-tools-${{ steps.keys.outputs.tools }}
 
       # as this user: ci/boxes runs scripts/live.sh through sudo, with the installer at minos.io/s (SETUP)
       - name: build and check ${{ env.NAME }} with the installer's live mode
@@ -373,6 +379,30 @@ jobs:
               done
               printf '```\n'
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      # only tools that are all there are kept, every schema the OVF check reads among them: ci/boxes fetches
+      # the schemas only when the first is missing
+      - name: the tools are whole
+        id: tools_whole
+        if: (success() || failure()) && steps.tools.outputs.cache-hit != 'true'
+        run: |
+          cd ~/minos-boxes-cache
+          whole=false
+          if ls vagrant_*.deb keys/vagrant.key.ed25519 keys/vagrant.key.rsa ovf/dsp8023_1.1.0.xsd ovf/xml.xsd \
+                ovf/common.xsd ovf/CIM_VirtualSystemSettingData.xsd ovf/CIM_ResourceAllocationSettingData.xsd >/dev/null 2>&1; then
+              whole=true
+          fi
+          printf 'whole=%s\n' "${whole}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: keep the tools (cache)
+        if: (success() || failure()) && steps.tools_whole.outputs.whole == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/minos-boxes-cache/keys
+            ~/minos-boxes-cache/ovf
+            ~/minos-boxes-cache/vagrant_*.deb
+          key: boxes-live-tools-${{ steps.keys.outputs.tools }}
 
       - name: keep the packages' files (cache)
         if: (success() || failure()) && steps.install.outcome == 'success' && steps.apt.outputs.cache-hit != 'true'
@@ -491,11 +521,11 @@ jobs:
           if-no-files-found: warn
           retention-days: 3
 
-  # the six boxes and the three ISOs of master, all passed, as the one release: ci/publish uploads them to a
-  # draft and checks what GitHub got against their .sha256; then it deletes the older releases with their
-  # tags and publishes the draft under the day's tag
+  # the six boxes of live-box and the three ISOs of master, all passed, as the one release: ci/publish uploads
+  # them to a draft and checks what GitHub got against their .sha256; then it deletes the older releases with
+  # their tags and publishes the draft under the day's tag
   publish:
-    needs: [decide, box, iso]
+    needs: [decide, live-box, iso]
     if: needs.decide.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -504,12 +534,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # one folder per box (minos-FLAVOUR-RELEASE/), each with its .box and .sha256, and one per ISO
-      # (minos-RELEASE-amd64/) with its .iso and .sha256; not the logs
-      - name: the boxes and the ISOs of this run
+      # one folder per box (live-minos-FLAVOUR-RELEASE/), each with its .box and .sha256, and one per ISO
+      # (minos-RELEASE-amd64/) with its .iso and .sha256; not the logs, and not the boxes of Packer's job
+      # when it is on (minos-FLAVOUR-RELEASE/, files of the same names)
+      - name: the boxes of this run, made by minos' installer
         uses: actions/download-artifact@v8
         with:
-          pattern: minos-*
+          pattern: live-minos-*
+          path: ${{ runner.temp }}/boxes
+
+      - name: the ISOs of this run
+        uses: actions/download-artifact@v8
+        with:
+          pattern: minos-*-amd64
           path: ${{ runner.temp }}/boxes
 
       - name: release
@@ -517,13 +554,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: sh ci/publish "${RUNNER_TEMP}/boxes" | tee -a "${GITHUB_STEP_SUMMARY}"
 
-  # the fingerprint of boxes and ISOs that all passed, and on master were published: the scheduled run
-  # skips it from now on. A publish that failed leaves it unknown, so the next scheduled run builds and
-  # publishes
+  # the fingerprint of the live boxes and the ISOs that all passed, and on master were published: the
+  # scheduled run skips it from now on. A publish that failed leaves it unknown, so the next scheduled run
+  # builds and publishes
   remember:
-    needs: [decide, box, iso, publish]
+    needs: [decide, live-box, iso, publish]
     if: >-
-      !cancelled() && needs.decide.outputs.known != 'true' && needs.box.result == 'success' &&
+      !cancelled() && needs.decide.outputs.known != 'true' && needs.live-box.result == 'success' &&
       needs.iso.result == 'success' &&
       (needs.publish.result == 'success' || needs.publish.result == 'skipped')
     runs-on: ubuntu-24.04
@@ -537,7 +574,7 @@ jobs:
       - uses: actions/cache/save@v6
         with:
           path: fingerprint.txt
-          key: boxes-fingerprint-${{ needs.decide.outputs.fingerprint }}
+          key: boxes-live-fingerprint-${{ needs.decide.outputs.fingerprint }}
 
   lint:
     runs-on: ubuntu-24.04

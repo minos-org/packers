@@ -77,7 +77,8 @@ draft="${day}-draft-${GITHUB_RUN_ID:-$$}"
 
 #the notes
 {   printf "%s\\n\\n" "The minos boxes and ISOs built from ${target}${GITHUB_RUN_ID:+ by ${server}/${repo}/actions/runs/${GITHUB_RUN_ID}}."
-    printf "%s\\n" "A Vagrant box for VirtualBox of each flavour and release. Vagrant finds the boxes through their catalogs (https://github.com/minos-org/vagrant):" "" \
+    printf "%s\\n" "A Vagrant box for VirtualBox of each flavour and release, made by minos' own installer: its live mode installs minos onto a disk image (scripts/live.sh), which boots once for scripts/box.sh and is packed by scripts/export.sh. The Packer recipe that made them before (minos.pkr.hcl) is kept, and off: deleting \`false && \` from the \`if:\` of the box job in .github/workflows/boxes.yml turns it back on." "" \
+        "Vagrant finds the boxes through their catalogs (https://github.com/minos-org/vagrant):" "" \
         "    vagrant box add https://minos.io/vagrant/core-24.04.json" "" \
         "VirtualBox without Vagrant imports the box's own OVF, once the box, a tar compressed with xz, is unpacked (File > Import Appliance, or):" "" \
         "    tar xf minos-core-24.04.box" "    VBoxManage import box.ovf" ""
