@@ -75,18 +75,17 @@ _line "files" "$(wc -l < "${tmp}/files") ($(grep -c '\.box$' "${tmp}/files") box
 day="$(date -u +%Y.%m.%d)"
 draft="${day}-draft-${GITHUB_RUN_ID:-$$}"
 
-#the notes
-{   printf "%s\\n\\n" "The minos boxes and ISOs built from ${target}${GITHUB_RUN_ID:+ by ${server}/${repo}/actions/runs/${GITHUB_RUN_ID}}."
-    printf "%s\\n" "A Vagrant box for VirtualBox of each flavour and release, made by minos' own installer: its live mode installs minos onto a disk image (scripts/live.sh), which boots once for scripts/box.sh and is packed by scripts/export.sh. The Packer recipe that made them before (minos.pkr.hcl) is kept, and off: deleting \`false && \` from the \`if:\` of the box job in .github/workflows/boxes.yml turns it back on." "" \
-        "Vagrant finds the boxes through their catalogs (https://github.com/minos-org/vagrant):" "" \
-        "    vagrant box add https://minos.io/vagrant/core-24.04.json" "" \
-        "VirtualBox without Vagrant imports the box's own OVF, once the box, a tar compressed with xz, is unpacked (File > Import Appliance, or):" "" \
-        "    tar xf minos-core-24.04.box" "    VBoxManage import box.ovf" ""
-    isos="$(grep '\.iso$' "${tmp}/files" | sed 's|.*/||')"
+#the notes: what someone needs to use minos from these files, nothing about how they are made
+{   isos="$(grep '\.iso$' "${tmp}/files" | sed 's|.*/||')"
     if [ -n "${isos}" ]; then
-        printf "%s\\n" "An ISO of each release ($(printf "%s\\n" "${isos}" | paste -sd ' ' - | sed 's/ /, /g')) boots minos-desktop as a live session from a DVD or a USB stick, by BIOS or UEFI (Secure Boot too); in it, Win+i installs minos on a disk by copying the live system, with no network. Written to a stick:" "" \
+        printf "%s\\n" "ISO: a live minos-desktop, by BIOS or UEFI (Secure Boot too); Win+i installs minos on a disk, with no network. To a USB stick:" "" \
             "    sudo dd if=$(printf "%s\\n" "${isos}" | tail -n 1) of=/dev/sdX bs=4M conv=fsync status=progress" ""
     fi
+    printf "%s\\n" "Vagrant, for VirtualBox (core or desktop, 22.04, 24.04 or 26.04):" "" \
+        "    vagrant box add https://minos.io/vagrant/core-24.04.json" \
+        "    vagrant init minos/core-24.04 && vagrant up" "" \
+        "VirtualBox without Vagrant:" "" \
+        "    tar xf minos-core-24.04.box && VBoxManage import box.ovf" ""
     printf "%s\\n" "sha256:" ""
     grep '\.sha256$' "${tmp}/files" | while IFS= read -r sums; do sed 's/^/    /' "${sums}"; done
 } > "${tmp}/notes"
