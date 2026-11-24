@@ -1,0 +1,141 @@
+#!/bin/sh
+#makes the Vagrant catalogs (minos.io/vagrant/BOX.json, catalog/BOX.json of minos-org/vagrant) name the
+#boxes of TAG, the release of this repository ci/publish has just published, and returns once no one can
+#read a catalog that names an older release, which ci/publish deletes next. The catalogs are written by
+#minos-org/vagrant's own .github/catalog (the newest release that holds each box) and pushed there with a
+#deploy key, a push that runs vagrant's workflow, which deploys them to GitHub Pages. A catalog that names
+#any release but TAG stops it here: ci/publish would delete that release. Once the deployment has
+#succeeded, the CDN in front of minos.io may still hold an older catalog for its max-age: that is waited
+#out, and then what minos.io serves must be the catalogs as committed.
+#usage: ci/catalog TAG   => needs VAGRANT_DEPLOY_KEY, the private key of a deploy key of minos-org/vagrant
+#       with write access (README: how to rotate it), gh (GH_TOKEN), git, jq, curl and ssh. The key lives
+#       in a directory of this user's alone, removed on exit, and is never printed
+
+tag="${1:?usage: ci/catalog TAG}"
+packers="minos-org/packers"
+vagrant="minos-org/vagrant"
+site="https://minos.io/vagrant"
+
+_line() { printf "%-10s %s\\n" "${1}" "${2}"; }
+_die() { printf "%s\\n" "catalog: ${*}" >&2; exit 1; }
+
+[ -n "${VAGRANT_DEPLOY_KEY}" ] ||
+    _die "VAGRANT_DEPLOY_KEY is unset: it must hold the private key of a deploy key of ${vagrant} with write access"
+
+#everything written here is this user's alone, the key first; a signal goes through exit, so the trap
+#removes it then too
+umask 077
+tmp="$(mktemp -d)" || exit 1
+trap 'rm -rf "${tmp}"' EXIT
+trap 'exit 1' HUP INT TERM
+
+#the boxes the release holds, each of which must have a catalog that names it
+gh api "repos/${packers}/releases/tags/${tag}" --jq '.assets[].name' > "${tmp}/assets" ||
+    _die "cannot read the release ${tag} of ${packers}"
+sed -n 's/^minos-\([a-z][a-z]*-[0-9][0-9]\.[0-9][0-9]\)\.box$/\1/p' "${tmp}/assets" | sort -u > "${tmp}/boxes"
+[ -s "${tmp}/boxes" ] || _die "the release ${tag} of ${packers} holds no box"
+
+#git over ssh with the deploy key alone, and GitHub's host keys as GitHub's API gives them
+printf "%s\\n" "${VAGRANT_DEPLOY_KEY}" > "${tmp}/key"
+gh api meta --jq '.ssh_keys[]' | sed 's/^/github.com /' > "${tmp}/known_hosts"
+[ -s "${tmp}/known_hosts" ] || _die "cannot read GitHub's ssh host keys (gh api meta)"
+#git runs GIT_SSH_COMMAND through sh, which reads the quotes around the paths: SC2089 and SC2090, which
+#warn that quotes inside a variable are taken literally, do not apply
+# shellcheck disable=SC2089,SC2090
+export GIT_SSH_COMMAND="ssh -i \"${tmp}/key\" -o IdentitiesOnly=yes -o UserKnownHostsFile=\"${tmp}/known_hosts\" -o StrictHostKeyChecking=yes"
+
+git clone -q "git@github.com:${vagrant}.git" "${tmp}/vagrant" 2> "${tmp}/git.log" ||
+    { cat "${tmp}/git.log" >&2; _die "cannot clone ${vagrant} with the deploy key"; }
+cd "${tmp}/vagrant" || exit 1
+_line "cloned" "${vagrant} at $(git rev-parse --short HEAD)"
+
+#the catalogs as vagrant's own script writes them, committed and pushed as vagrant's workflow does. A push
+#refused because master moved meanwhile is tried again on the new master; catalogs that come out the same
+#as master's were committed already by another writer (vagrant's hourly run)
+try=1
+while :; do
+    git reset -q --hard origin/master || _die "cannot reset to the master of ${vagrant}"
+    sh .github/catalog > "${tmp}/catalog.log" 2>&1 ||
+        { cat "${tmp}/catalog.log" >&2; _die "the .github/catalog of ${vagrant} failed"; }
+    git add -A catalog
+    if git diff --cached --quiet; then
+        _line "committed" "already: ${vagrant} at $(git rev-parse --short HEAD)"
+        break
+    fi
+    versions="$(jq -r '.versions[].version' catalog/*.json | sort -uV | paste -sd' ' -)"
+    git -c user.name='github-actions[bot]' \
+        -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+        commit -q -m "catalog: the boxes of packers' releases ${versions:-(none)}" ||
+        _die "cannot commit the catalogs"
+    if git push -q origin HEAD:master 2> "${tmp}/git.log"; then
+        _line "committed" "$(git rev-parse --short HEAD) to ${vagrant}: ${versions:-no release}"
+        break
+    fi
+    [ "${try}" -lt 3 ] || { cat "${tmp}/git.log" >&2; _die "the catalogs were not pushed to ${vagrant} in 3 tries"; }
+    try=$((try + 1))
+    git fetch -q origin 2> "${tmp}/git.log" || { cat "${tmp}/git.log" >&2; _die "cannot fetch ${vagrant}"; }
+done
+held="$(git rev-parse HEAD)"; short="$(git rev-parse --short HEAD)"
+
+#every catalog that names a release names TAG alone, and every box of TAG has one: ci/publish deletes
+#every other release next, and a catalog that named one would serve a box that is gone (a box TAG lacks)
+for file in catalog/*.json; do
+    box="${file#catalog/}"; box="${box%.json}"
+    named="$(jq -r '[.versions[].providers[].url | (capture("/releases/download/(?<t>[^/]+)/") | .t) // .]
+        | unique | join(" ")' "${file}" < /dev/null)" || _die "cannot read ${file} of ${vagrant}"
+    if [ -n "${named}" ] && [ "${named}" != "${tag}" ]; then
+        _die "the catalog of ${box} still names ${named}, not ${tag} (which holds no minos-${box}.box?)"
+    fi
+done
+while IFS= read -r box; do
+    count="$(jq '.versions | length' "catalog/${box}.json" 2> /dev/null < /dev/null)"
+    [ "${count:-0}" -gt 0 ] || _die "${vagrant} has no catalog that names ${box}, which ${tag} holds"
+done < "${tmp}/boxes" || exit 1
+_line "checked" "$(wc -l < "${tmp}/boxes") boxes in ${tag}; every catalog that names a release names ${tag} alone"
+
+#vagrant's workflow deploys catalog/ to GitHub Pages; a deployment made after the commit that holds these
+#catalogs deployed them, or later ones. Its sha cannot say so: it is the commit its run started from, the
+#one before when that run committed the catalogs itself. A run that started before the release existed and
+#deployed after the commit passes too, with older catalogs: what minos.io serves after the CDN's max-age,
+#checked below, stops that one
+since="$(gh api "repos/${vagrant}/commits/${held}" --jq '.commit.committer.date')" ||
+    _die "cannot read when ${short} of ${vagrant} was committed"
+[ -n "${since}" ] || _die "no date for ${short} of ${vagrant}"
+_deployed() { #=> true when a deployment to github-pages made at $since or after it has succeeded
+    gh api "repos/${vagrant}/deployments?environment=github-pages&per_page=10" --jq '.[] | "\(.id) \(.created_at)"' \
+        2> /dev/null < /dev/null | awk -v since="${since}" '$2 >= since {print $1}' > "${tmp}/deployments"
+    while read -r _deployed__id; do
+        gh api "repos/${vagrant}/deployments/${_deployed__id}/statuses" --jq 'any(.[]; .state == "success")' \
+            2> /dev/null < /dev/null | grep -qx true && return 0
+    done < "${tmp}/deployments"
+    return 1
+}
+start="$(date +%s)"
+until _deployed; do
+    [ "$(($(date +%s) - start))" -lt 900 ] ||
+        _die "no deployment of ${vagrant} to GitHub Pages made after ${short} (${since}) succeeded within 15 minutes"
+    sleep 20
+done
+_line "deployed" "${vagrant} to GitHub Pages, after ${short}, in $(($(date +%s) - start)) s"
+
+#a copy of an older catalog the CDN took before the deployment lives at most its max-age: wait it out, and
+#a minute more
+set -- catalog/*.json
+maxage="$(curl -fsS --max-time 30 -D - -o /dev/null "${site}/${1#catalog/}" 2> /dev/null | tr -d '\r' |
+    awk 'tolower($1) == "cache-control:" && match(tolower($0), /max-age=[0-9]+/) {
+        print substr($0, RSTART + 8, RLENGTH - 8); exit }')"
+case "${maxage}" in ''|*[!0-9]*) maxage=600 ;; esac
+waited=$((maxage + 60))
+sleep "${waited}"
+_line "waited" "${waited} s, the CDN's max-age (${maxage} s) and a minute"
+
+#what minos.io serves now, to anyone, is the catalogs as committed
+for file in catalog/*.json; do
+    curl -fsS --max-time 30 --retry 3 -o "${tmp}/served" "${site}/${file#catalog/}" 2> "${tmp}/curl.log" ||
+        { cat "${tmp}/curl.log" >&2; _die "cannot read ${site}/${file#catalog/}"; }
+    cmp -s "${file}" "${tmp}/served" ||
+        _die "${site}/${file#catalog/} is not the catalog of ${vagrant} at ${short}, ${waited} s after its deployment"
+done
+_line "served" "by ${site}/, the catalogs of ${vagrant} at ${short}"
+
+# vim: set ts=8 sw=4 tw=0 ft=sh :

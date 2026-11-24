@@ -144,13 +144,30 @@ Ubuntu's archive itself, `archive.ubuntu.com` and `security.ubuntu.com`, whateve
 says it (`apt sources`), which `ci/verdict` checks.
 
 On `master`, once the six live boxes and the three ISOs pass, `ci/publish` makes them the one release of this
-repository, tagged with the day (`YYYY.MM.DD`): each box's `.box` and `.sha256`, and each ISO's `.iso` and
-`.sha256`. Only that release is kept. It is uploaded as a draft first and checked against the files;
-only then are the older releases deleted with their tags, and the draft published under the day's tag,
-so a publish that fails leaves the release before it in place. A second release the same day takes the
-day's tag over, at its own commit. The [vagrant](https://github.com/minos-org/vagrant) repository reads
-the release and lists the boxes in the catalogs Vagrant reads, `https://minos.io/vagrant/<box>.json`,
-versioned by when the release was published, so a rebuild the same day is still a newer box.
+repository: each box's `.box` and `.sha256`, and each ISO's `.iso` and `.sha256`. Its tag is the day
+(`YYYY.MM.DD`), or `YYYY.MM.DD.N` when the day has a release or a tag already, the smallest `N` that has
+neither: a tag is never reused, so a release's URL never starts serving other bytes. The release is
+uploaded as a draft first and checked against the files, then published under its tag. Then `ci/catalog`
+has the catalogs Vagrant reads, `https://minos.io/vagrant/<box>.json`, name it: it runs the
+[vagrant](https://github.com/minos-org/vagrant) repository's own `.github/catalog`, pushes the catalogs
+there with a deploy key (the push runs vagrant's workflow, which deploys them to GitHub Pages), waits for a
+deployment made after the commit that holds them, waits out the cache of the CDN in front of minos.io, and
+checks that minos.io serves them, so that no one can still read a catalog that names an older release. A
+catalog that names any other release, as one of a box the new release lacks would, stops it. Only then are
+the older releases deleted with their tags: a publish that fails at any step leaves a release that the
+catalogs name. The catalogs are versioned by when the release was published, so a rebuild the same day is
+still a newer box; vagrant's workflow also rewrites them every hour.
+
+The deploy key is a key of the vagrant repository with write access; its private half is this repository's
+Actions secret `VAGRANT_DEPLOY_KEY`, which only the `publish` job's `release` step is given. To rotate it,
+make a new key, add it to vagrant, set the secret, delete the private key, and remove the old key from
+vagrant (`gh repo deploy-key list -R minos-org/vagrant` gives its id):
+
+    $ ssh-keygen -t ed25519 -N '' -f KEY
+    $ gh repo deploy-key add KEY.pub -R minos-org/vagrant --allow-write --title 'packers ci/catalog'
+    $ gh secret set VAGRANT_DEPLOY_KEY -R minos-org/packers < KEY
+    $ rm KEY KEY.pub
+    $ gh repo deploy-key delete OLD-ID -R minos-org/vagrant
 
 The ISO
 -------

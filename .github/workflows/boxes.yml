@@ -8,9 +8,10 @@
 # archive.ubuntu.com, and what both keep reads archive.ubuntu.com. ci/verdict says whether each passed,
 # judging what every minos system must show (ci/probe-common) alike for both. They stay as artifacts of the
 # run for a few days. On master, once the six boxes and the three ISOs pass, ci/publish makes them the one
-# release of this repository (the older ones are deleted), and minos-org/vagrant lists the boxes in the
-# catalogs Vagrant reads (minos.io/vagrant/<box>.json) within the hour. Another branch builds and checks
-# only when run by hand (the push trigger is master's), and publishes nothing.
+# release of this repository, under a tag never used before (the day, or the day.N), has the catalogs
+# Vagrant reads (minos.io/vagrant/<box>.json, written in minos-org/vagrant) name it (ci/catalog), and only
+# then deletes the older releases. Another branch builds and checks only when run by hand (the push trigger
+# is master's), and publishes nothing.
 #
 # The boxes and the ISO are built from this repository, the minos archive and the installer at minos.io/s:
 # - a push to master that changes what they are made of here builds them all;
@@ -522,13 +523,16 @@ jobs:
           retention-days: 3
 
   # the six boxes of live-box and the three ISOs of master, all passed, as the one release: ci/publish uploads
-  # them to a draft and checks what GitHub got against their .sha256; then it deletes the older releases with
-  # their tags and publishes the draft under the day's tag
+  # them to a draft and checks what GitHub got against their .sha256; then it publishes the draft under a tag
+  # never used before (the day, or the day.N), and ci/catalog pushes the Vagrant catalogs that name it to
+  # minos-org/vagrant with a deploy key, waits for their deployment and for the CDN in front of minos.io to
+  # let go of the older ones, and checks what minos.io serves; only then are the older releases deleted with
+  # their tags
   publish:
     needs: [decide, live-box, iso]
     if: needs.decide.outputs.publish == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: write # the release, its tag, and the deletion of old ones
     steps:
@@ -552,6 +556,7 @@ jobs:
       - name: release
         env:
           GH_TOKEN: ${{ github.token }}
+          VAGRANT_DEPLOY_KEY: ${{ secrets.VAGRANT_DEPLOY_KEY }} # a deploy key of minos-org/vagrant, with write access
         run: sh ci/publish "${RUNNER_TEMP}/boxes" | tee -a "${GITHUB_STEP_SUMMARY}"
 
   # the fingerprint of the live boxes and the ISOs that all passed, and on master were published: the
@@ -586,6 +591,6 @@ jobs:
         run: |
           command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
           shellcheck --version | sed -n 's/^version: /shellcheck /p'
-          shellcheck -s sh -S warning ci/boxes ci/box-check ci/probe-common ci/verdict ci/fingerprint ci/publish ci/iso \
+          shellcheck -s sh -S warning ci/boxes ci/box-check ci/probe-common ci/verdict ci/fingerprint ci/publish ci/catalog ci/iso \
               ci/mirror iso/build iso/live-check iso/install-check iso/qemu-lib iso/installer/minos-installer \
               iso/installer/minos-installer-engine
