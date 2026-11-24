@@ -89,6 +89,10 @@ installer at minos.io/s or the one named, which must know `--firmware`:
     $ BUILD=live sh ci/boxes 24.04
     $ BUILD=live SETUP=../minos-org.github.com/setup FLAVOURS=desktop sh ci/boxes 26.04
 
+setup's chroot binds the machine's own `/dev`: `scripts/live.sh` compares the type, mode and owner of
+every node there before and after setup, and the build fails on any change (a runner's `/dev/kvm` once
+came out of it closed to the runner's user).
+
 Continuous integration
 ----------------------
 

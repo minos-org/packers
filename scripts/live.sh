@@ -6,7 +6,7 @@
 #and packs it with scripts/export.sh, as Packer does.
 #usage: [STEPS="install vagrant"] [DISK_SIZE=10G] live.sh RELEASE FLAVOUR SETUP OUTPUT     (as root)
 #       => OUTPUT/minos-FLAVOUR-RELEASE/minos-FLAVOUR-RELEASE.raw, and beside it install.log: setup's output,
-#          each line after the second it was printed at
+#          each line after the second it was printed at; it fails when setup changed this machine's /dev
 #       needs losetup, sfdisk, mkfs.ext4, chroot, perl and the network; setup fetches debootstrap when the
 #       machine has none
 
@@ -45,6 +45,17 @@ _stamp() { #each line after the second it was printed at
     perl -ne 'BEGIN { $| = 1 } print time(), " ", $_'
 }
 
+_dev_nodes() { #=> every node of this machine's /dev, a line each: type, mode, uid:gid, path (a link: where it
+               #points). Left out, what comes and goes while setup runs whatever it does: the terminals of
+               #/dev/pts (apt reads dpkg's output through one), what /dev/shm holds, and the loop devices and
+               #the links to them, this script's and any other (snapd attaches its images when it pleases); no
+               #rule of systemd-tmpfiles names one, and /dev/loop-control stays in
+    command -v udevadm >/dev/null 2>&1 && udevadm settle
+    find /dev -ignore_readdir_race \( -path /dev/pts -o -path /dev/shm \) -printf '%y %m %U:%G %p\n' -prune -o \
+        -type l -printf '%y %m %U:%G %p -> %l\n' -o -printf '%y %m %U:%G %p\n' |
+        grep -v -e ' /dev/loop[0-9][0-9p]*$' -e ' -> \(.*/\)\{0,1\}loop[0-9][0-9p]*$' | LC_ALL=C sort
+}
+
 _since() { #$1 log, $2 $3 two patterns => seconds from the first line matching $2 to the first matching $3
     awk -v from="${2}" -v to="${3}" '
         a == "" && $0 ~ from {a = $1} b == "" && $0 ~ to {b = $1}
@@ -76,11 +87,16 @@ _install() { #setup's live mode onto a new disk image: the disk Packer gives sub
     command -v udevadm >/dev/null 2>&1 && udevadm settle
     #setup reads the terminal for nothing and starts at once (--now); boxes travel, so they get the us keyboard
     #and UTC, as the boxes Packer makes, not the keyboard and the zone of the machine that builds them. Its exit
-    #status crosses the pipe in a file
+    #status crosses the pipe in a file. Its chroot binds this machine's /dev, which nothing it configures there
+    #may change: the runner's /dev/kvm, opened to its user, once came back with the chroot's 0660 and group id,
+    #and the first boot's qemu could not open it. Every node is compared before and after
+    _dev_nodes > "${dir}/dev.before"
     { _install__rc=0
       sh "${setup}" live "${flavour}" "${loop}p2" "${user}" "${user}" --release "${release}" \
           --now --keyboard us --timezone Etc/UTC --firmware bios < /dev/null 2>&1 || _install__rc="${?}"
       printf "%s\\n" "${_install__rc}" > "${dir}/install.status"; } | _stamp > "${dir}/install.log"
+    _install__dev="$(_dev_nodes | diff "${dir}/dev.before" - | sed -n 's/^[<>] /live:   &/p')"
+    _install__nodes="$(wc -l < "${dir}/dev.before")"; rm -f "${dir}/dev.before"
     _detach_disk
     _install__status="$(cat "${dir}/install.status")"; rm -f "${dir}/install.status"
     _install__log="${dir}/install.log"
@@ -98,7 +114,13 @@ _install() { #setup's live mode onto a new disk image: the disk Packer gives sub
         "$(_since "${_install__log}" '[[][+]] upgrading what' '[[][+]] setting the host name')" \
         "$(_since "${_install__log}" '[[][+]] setting the host name' '[[][+]] installing the boot loader')" \
         "$(_since "${_install__log}" '[[][+]] installing the boot loader' '(DONE: Reboot|FAILED while)')"
+    if [ -z "${_install__dev}" ]; then
+        printf "%s\\n" "live: /dev after setup as before it: ${_install__nodes} nodes, each of the same type, mode and owner"
+    else
+        printf "%s\\n" "live: setup changed this machine's /dev (< before it, > after it):" "${_install__dev}" >&2
+    fi
     [ "${_install__status}" = "0" ] || { tail -n 30 "${_install__log}" >&2; return 1; }
+    [ -z "${_install__dev}" ] || return 1
 }
 
 _vagrant() { #inside the installed system, before its first boot: scripts/live-vagrant.sh
