@@ -76,7 +76,8 @@ box boots), with the installer at minos.io/s or the one named, which must know `
 
 setup's chroot binds the machine's own `/dev`: `scripts/live.sh` compares the type, mode and owner of
 every node there before and after setup, and the build fails on any change (a runner's `/dev/kvm` once
-came out of it closed to the runner's user).
+came out of it closed to the runner's user); a node that only appears or disappears, as the network card
+Hyper-V hot-plugs into an Azure runner, is listed and not compared.
 
 VirtualBox without Vagrant imports the box's own OVF. The box is a tar of four files (`box.ovf`, its
 disk `box-disk1.vmdk`, and Vagrant's `metadata.json` and `Vagrantfile`) compressed with xz, which `tar xf`

@@ -49,11 +49,34 @@ _dev_nodes() { #=> every node of this machine's /dev, a line each: type, mode, u
                #points). Left out, what comes and goes while setup runs whatever it does: the terminals of
                #/dev/pts (apt reads dpkg's output through one), what /dev/shm holds, and the loop devices and
                #the links to them, this script's and any other (snapd attaches its images when it pleases); no
-               #rule of systemd-tmpfiles names one, and /dev/loop-control stays in
+               #rule of systemd-tmpfiles names one, and /dev/loop-control stays in. _dev_compare compares only
+               #a node there before and after: a runner's network card, hot-plugged while setup ran, is no change
     command -v udevadm >/dev/null 2>&1 && udevadm settle
     find /dev -ignore_readdir_race \( -path /dev/pts -o -path /dev/shm \) -printf '%y %m %U:%G %p\n' -prune -o \
         -type l -printf '%y %m %U:%G %p -> %l\n' -o -printf '%y %m %U:%G %p\n' |
         grep -v -e ' /dev/loop[0-9][0-9p]*$' -e ' -> \(.*/\)\{0,1\}loop[0-9][0-9p]*$' | LC_ALL=C sort
+}
+
+_dev_compare() { #$1 $2 the lists of _dev_nodes before and after setup => what changed in a node in both
+                 #(on stderr, then fails), what came or went (hardware attached or removed: never fails)
+    _dev_compare__diff="$(awk '
+        FILENAME == ARGV[1] {line[$4] = $0; order[++n] = $4; next}
+        $4 in line {both++; seen[$4] = 1; if (line[$4] != $0) print "c< " line[$4] "\n" "c> " $0; next}
+        {print "+ " $0}
+        END {for (i = 1; i <= n; i++) if (!(order[i] in seen)) print "- " line[order[i]]; print "n " both + 0}
+    ' "${1}" "${2}")"
+    _dev_compare__both="$(printf "%s\\n" "${_dev_compare__diff}" | sed -n 's/^n //p')"
+    _dev_compare__changed="$(printf "%s\\n" "${_dev_compare__diff}" | sed -n 's/^c\([<>]\) /live:   \1 /p')"
+    _dev_compare__moved="$(printf "%s\\n" "${_dev_compare__diff}" | sed -n 's/^\([+-]\) /live:   \1 /p')"
+    if [ -z "${_dev_compare__changed}" ]; then
+        printf "%s\\n" "live: /dev after setup as before it: ${_dev_compare__both} nodes, each of the same type, mode and owner"
+    else
+        printf "%s\\n" "live: setup changed this machine's /dev (< before it, > after it):" "${_dev_compare__changed}" >&2
+    fi
+    if [ -n "${_dev_compare__moved}" ]; then
+        printf "%s\\n" "live: while setup ran, $(printf "%s\\n" "${_dev_compare__moved}" | wc -l | tr -d ' ') nodes came or went (hardware the machine attached or removed; only a node present before and after is compared):" "${_dev_compare__moved}"
+    fi
+    [ -z "${_dev_compare__changed}" ]
 }
 
 _since() { #$1 log, $2 $3 two patterns => seconds from the first line matching $2 to the first matching $3
@@ -89,14 +112,14 @@ _install() { #setup's live mode onto a new disk image: the disk Packer gives sub
     #and UTC, as the boxes Packer makes, not the keyboard and the zone of the machine that builds them. Its exit
     #status crosses the pipe in a file. Its chroot binds this machine's /dev, which nothing it configures there
     #may change: the runner's /dev/kvm, opened to its user, once came back with the chroot's 0660 and group id,
-    #and the first boot's qemu could not open it. Every node is compared before and after
+    #and the first boot's qemu could not open it. Every node there before and after is compared; one that only
+    #appears or disappears is not (an Azure runner's network card is hot-plugged by Hyper-V while setup runs)
     _dev_nodes > "${dir}/dev.before"
     { _install__rc=0
       sh "${setup}" live "${flavour}" "${loop}p2" "${user}" "${user}" --release "${release}" \
           --now --keyboard us --timezone Etc/UTC --firmware bios < /dev/null 2>&1 || _install__rc="${?}"
       printf "%s\\n" "${_install__rc}" > "${dir}/install.status"; } | _stamp > "${dir}/install.log"
-    _install__dev="$(_dev_nodes | diff "${dir}/dev.before" - | sed -n 's/^[<>] /live:   &/p')"
-    _install__nodes="$(wc -l < "${dir}/dev.before")"; rm -f "${dir}/dev.before"
+    _dev_nodes > "${dir}/dev.after"
     _detach_disk
     _install__status="$(cat "${dir}/install.status")"; rm -f "${dir}/install.status"
     _install__log="${dir}/install.log"
@@ -114,13 +137,10 @@ _install() { #setup's live mode onto a new disk image: the disk Packer gives sub
         "$(_since "${_install__log}" '[[][+]] upgrading what' '[[][+]] setting the host name')" \
         "$(_since "${_install__log}" '[[][+]] setting the host name' '[[][+]] installing the boot loader')" \
         "$(_since "${_install__log}" '[[][+]] installing the boot loader' '(DONE: Reboot|FAILED while)')"
-    if [ -z "${_install__dev}" ]; then
-        printf "%s\\n" "live: /dev after setup as before it: ${_install__nodes} nodes, each of the same type, mode and owner"
-    else
-        printf "%s\\n" "live: setup changed this machine's /dev (< before it, > after it):" "${_install__dev}" >&2
-    fi
+    _install__dev=0; _dev_compare "${dir}/dev.before" "${dir}/dev.after" || _install__dev=1
+    rm -f "${dir}/dev.before" "${dir}/dev.after"
     [ "${_install__status}" = "0" ] || { tail -n 30 "${_install__log}" >&2; return 1; }
-    [ -z "${_install__dev}" ] || return 1
+    [ "${_install__dev}" = "0" ] || return 1
 }
 
 _vagrant() { #inside the installed system, before its first boot: scripts/live-vagrant.sh
